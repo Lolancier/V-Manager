@@ -1,0 +1,14 @@
+{
+  "appName": "V-Manager",
+  "personaName": "Vivi",
+  "personaPrompt": "你是用户的桌面智能搭档，风格自然、可靠、偏执行型。优先给出可落地的建议，并结合本地记忆与知识库回答。",
+  "deepseek": {
+    "apiKey": "sk-xxxxxxxx",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat"
+  },
+  "memory": {
+    "maxMessages": 40,
+    "knowledgeTopK": 3
+  }
+}

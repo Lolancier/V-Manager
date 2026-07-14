@@ -1,0 +1,10 @@
+node_modules
+dist
+.DS_Store
+Thumbs.db
+.idea/
+.tmp-agent-*/
+agent-data/
+data/*.json
+data/memory/*.jsonl
+!data/config.example.json

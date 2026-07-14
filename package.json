@@ -1,0 +1,28 @@
+{
+    "name": "v-manager",
+    "version": "0.1.0",
+    "private": true,
+    "description": "PC端多功能 Agent MVP，包含桌面壳、人格设定、对话与本地记忆/RAG。",
+    "main": "electron/main.js",
+    "type": "module",
+    "scripts": {
+        "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+        "dev:renderer": "vite",
+        "dev:electron": "wait-on tcp:5173 && electron .",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "pixi-live2d-display": "^0.4.0",
+        "pixi.js": "^6.5.10",
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1"
+    },
+    "devDependencies": {
+        "@vitejs/plugin-react": "^4.4.1",
+        "concurrently": "^9.2.0",
+        "electron": "^32.3.0",
+        "vite": "^5.4.10",
+        "wait-on": "^8.0.1"
+    }
+}
