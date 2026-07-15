@@ -25,8 +25,13 @@ interface AgentConfig {
     baseUrl: string;
     model: string;
   };
+  embedding: {
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+  };
   memory: {
-    maxHistory: number;
+    maxMessages: number;
     knowledgeTopK: number;
   };
 }
@@ -124,6 +129,7 @@ interface RagStatusSnapshot {
     enabled: boolean;
     mode: string;
     embeddingProvider: string;
+    embeddingModel: string;
     chunkSize: number;
     chunkOverlap: number;
     topK: number;
@@ -134,6 +140,7 @@ interface RagStatusSnapshot {
   status: {
     indexedFileCount: number;
     indexedChunkCount: number;
+    embeddedChunkCount: number;
     updatedAt: string | null;
   };
 }
@@ -147,7 +154,8 @@ interface Window {
     getAppRegistry: () => Promise<AppRegistrySnapshot>;
     refreshAppRegistry: () => Promise<AppRegistrySnapshot>;
     getRagStatus: () => Promise<RagStatusSnapshot>;
-    rebuildRagIndex: () => Promise<{ version: number; updatedAt: string | null; chunks: unknown[]; files: unknown[] }>;
+    rebuildRagIndex: () => Promise<{ version: number; updatedAt: string | null; chunks: unknown[]; files: unknown[]; embeddedCount: number }>;
+    testEmbedding: () => Promise<{ ok: boolean; message: string; model: string; baseUrl: string; dimensions?: number }>;
     getSystemResourceSnapshot: () => Promise<SystemResourceSnapshot>;
     getFileManagerSnapshot: () => Promise<FileManagerSnapshot>;
     openExternal: (url: string) => Promise<boolean>;
@@ -163,6 +171,8 @@ interface Window {
     getPetScale: () => Promise<number>;
     setPetWindowPosition: (x: number, y: number) => Promise<boolean>;
     updatePetWindowLayout: (scale: number) => Promise<{ width: number; height: number } | null>;
+    getDataPath: () => Promise<{ baseDir: string; dataDir: string; configPath: string; memoryPath: string; knowledgeDir: string; ragDir: string; registryDir: string }>;
+    openDataFolder: () => Promise<boolean>;
     onMenuAction: (callback: (action: string) => void) => () => void;
     onConfigUpdated: (callback: (config: AgentConfig) => void) => () => void;
     onPetScaleUpdated: (callback: (scale: number) => void) => () => void;

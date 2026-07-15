@@ -17,7 +17,8 @@ import {
   rebuildKnowledgeIndex,
   saveConfig,
   searchLocalFiles,
-  testDeepSeekConnection
+  testDeepSeekConnection,
+  testEmbeddingConnection
 } from "../src-agent/core.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -649,6 +650,10 @@ ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
       ...defaultConfig.deepseek,
       ...(nextConfig.deepseek ?? {})
     },
+    embedding: {
+      ...defaultConfig.embedding,
+      ...(nextConfig.embedding ?? {})
+    },
     memory: {
       ...defaultConfig.memory,
       ...(nextConfig.memory ?? {})
@@ -728,6 +733,10 @@ ipcMain.handle("agent:get-rag-status", async () => {
 
 ipcMain.handle("agent:rebuild-rag-index", async () => {
   return rebuildKnowledgeIndex(app.getPath("userData"));
+});
+
+ipcMain.handle("agent:test-embedding", async () => {
+  return testEmbeddingConnection(app.getPath("userData"));
 });
 
 ipcMain.handle("agent:get-system-resource-snapshot", async () => {
@@ -835,4 +844,25 @@ ipcMain.on("agent:show-pet-context-menu", (event) => {
   buildPetContextMenu().popup({
     window: targetWindow ?? undefined
   });
+});
+
+// ---- Data path management ----
+
+ipcMain.handle("agent:get-data-path", async () => {
+  const baseDir = app.getPath("userData");
+  return {
+    baseDir,
+    dataDir: path.join(baseDir, "agent-data"),
+    configPath: path.join(baseDir, "agent-data", "config.json"),
+    memoryPath: path.join(baseDir, "agent-data", "memory", "conversation.jsonl"),
+    knowledgeDir: path.join(baseDir, "agent-data", "knowledge"),
+    ragDir: path.join(baseDir, "agent-data", "rag"),
+    registryDir: path.join(baseDir, "agent-data", "registry")
+  };
+});
+
+ipcMain.handle("agent:open-data-folder", async () => {
+  const dataDir = path.join(app.getPath("userData"), "agent-data");
+  await shell.openPath(dataDir);
+  return true;
 });

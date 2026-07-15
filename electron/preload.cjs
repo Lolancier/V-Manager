@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   refreshAppRegistry: () => ipcRenderer.invoke("agent:refresh-app-registry"),
   getRagStatus: () => ipcRenderer.invoke("agent:get-rag-status"),
   rebuildRagIndex: () => ipcRenderer.invoke("agent:rebuild-rag-index"),
+  testEmbedding: () => ipcRenderer.invoke("agent:test-embedding"),
   getSystemResourceSnapshot: () => ipcRenderer.invoke("agent:get-system-resource-snapshot"),
   getFileManagerSnapshot: () => ipcRenderer.invoke("agent:get-file-manager-snapshot"),
   openExternal: (url) => ipcRenderer.invoke("agent:open-external", url),
@@ -24,6 +25,8 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   getPetScale: () => ipcRenderer.invoke("agent:get-pet-scale"),
   setPetWindowPosition: (x, y) => ipcRenderer.invoke("agent:set-pet-window-position", { x, y }),
   updatePetWindowLayout: (scale) => ipcRenderer.invoke("agent:update-pet-window-layout", { scale }),
+  getDataPath: () => ipcRenderer.invoke("agent:get-data-path"),
+  openDataFolder: () => ipcRenderer.invoke("agent:open-data-folder"),
   onMenuAction: (callback) => {
     const listener = (_event, action) => callback(action);
     ipcRenderer.on("agent:menu-action", listener);

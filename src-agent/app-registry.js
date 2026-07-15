@@ -170,12 +170,23 @@ export async function ensureAppRegistry(baseDir) {
   const { registryDir, appRegistryPath } = getAgentPaths(baseDir);
   await fs.mkdir(registryDir, { recursive: true });
 
+  let isNew = false;
   try {
     await fs.access(appRegistryPath);
   } catch {
+    isNew = true;
     const initialRegistry = createEmptyAppRegistry();
     initialRegistry.updatedAt = new Date().toISOString();
     await fs.writeFile(appRegistryPath, JSON.stringify(initialRegistry, null, 2), "utf-8");
+  }
+
+  // Auto-scan on first launch so the registry isn't stuck with just 8 builtins
+  if (isNew) {
+    try {
+      await refreshAppRegistry(baseDir);
+    } catch {
+      // Silent — scan failure shouldn't block startup
+    }
   }
 
   return appRegistryPath;
@@ -214,6 +225,7 @@ export async function saveAppRegistry(baseDir, registry) {
 
 async function queryInstalledAppsFromSystem() {
   const script = [
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8",
     "$startApps = @(Get-StartApps | Select-Object Name, AppID)",
     "$appx = @(Get-AppxPackage | Select-Object Name, PackageFamilyName, InstallLocation)",
     "[pscustomobject]@{ startApps = $startApps; appxPackages = $appx } | ConvertTo-Json -Depth 5 -Compress"

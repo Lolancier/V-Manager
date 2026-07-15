@@ -39,6 +39,11 @@ const previewConfig: AgentConfig = {
     baseUrl: "https://api.deepseek.com/v1",
     model: "deepseek-chat"
   },
+  embedding: {
+    apiKey: "",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    model: "BAAI/bge-m3"
+  },
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
@@ -108,8 +113,15 @@ function App() {
   const [connectionMessage, setConnectionMessage] = useState("");
   const [testingConnection, setTestingConnection] = useState(false);
   const [clearingMemory, setClearingMemory] = useState(false);
+  const [dataPathInfo, setDataPathInfo] = useState<{ baseDir: string; dataDir: string } | null>(null);
   const [loadingSystemSnapshot, setLoadingSystemSnapshot] = useState(false);
   const [loadingFileSnapshot, setLoadingFileSnapshot] = useState(false);
+  const [ragStatus, setRagStatus] = useState<RagStatusSnapshot | null>(null);
+  const [loadingRagStatus, setLoadingRagStatus] = useState(false);
+  const [rebuildingIndex, setRebuildingIndex] = useState(false);
+  const [rebuildMessage, setRebuildMessage] = useState("");
+  const [testingEmbedding, setTestingEmbedding] = useState(false);
+  const [embeddingTestMessage, setEmbeddingTestMessage] = useState("");
   const [petMood, setPetMood] = useState<PetMood>("idle");
   const [petScale, setPetScale] = useState(1);
   const [draftPetScale, setDraftPetScale] = useState(1);
@@ -177,6 +189,10 @@ function App() {
         setMessages(nextChatState.messages);
         setKnowledge(nextChatState.knowledge);
         setLastReplyMeta(nextChatState.lastReplyMeta);
+        try {
+          const dp = await bridge.getDataPath();
+          setDataPathInfo(dp);
+        } catch { /* preview mode */ }
       } catch {
         setBootstrap(previewBootstrap);
         setConfigDraft(previewBootstrap.config);
@@ -341,6 +357,47 @@ function App() {
     }
   }
 
+  async function handleRefreshRagStatus() {
+    if (!bridge) return;
+    setLoadingRagStatus(true);
+    try {
+      const status = await bridge.getRagStatus();
+      setRagStatus(status);
+    } finally {
+      setLoadingRagStatus(false);
+    }
+  }
+
+  async function handleRebuildRagIndex() {
+    if (!bridge) return;
+    setRebuildingIndex(true);
+    setRebuildMessage("");
+    try {
+      const result = await bridge.rebuildRagIndex();
+      const fileCount = result.files?.length ?? 0;
+      const embeddedCount = result.embeddedCount ?? 0;
+      setRebuildMessage(`索引重建完成：${fileCount} 个文件，${embeddedCount} 个片段已向量化。`);
+      // Refresh status after rebuild
+      await handleRefreshRagStatus();
+    } catch (err: any) {
+      setRebuildMessage(`重建失败：${err?.message ?? String(err)}`);
+    } finally {
+      setRebuildingIndex(false);
+    }
+  }
+
+  async function handleTestEmbedding() {
+    if (!bridge) return;
+    setTestingEmbedding(true);
+    setEmbeddingTestMessage("");
+    try {
+      const result = await bridge.testEmbedding();
+      setEmbeddingTestMessage(result.message);
+    } finally {
+      setTestingEmbedding(false);
+    }
+  }
+
   function handleModelPresetChange(nextValue: string) {
     if (!configDraft) {
       return;
@@ -480,6 +537,7 @@ function App() {
 
     void handleRefreshSystemSnapshot();
     void handleRefreshFileSnapshot();
+    void handleRefreshRagStatus();
   }, [bridge, viewMode]);
 
   function handleContextMenu(event: ReactMouseEvent) {
@@ -658,6 +716,112 @@ function App() {
             <p className="knowledge-hint">
               当前对话已启用流式输出，支持边生成边显示。`flash` 更适合快回复，`pro` 更适合更高质量的复杂回答。
             </p>
+            <section className="panel-block" style={{ borderTop: "1px solid var(--border-color, #e0e0e0)", paddingTop: "0.75rem", marginTop: "0.5rem" }}>
+              <p className="eyebrow">Embedding 配置（RAG 向量检索）</p>
+              {!configDraft.embedding?.apiKey ? (
+                <p className="knowledge-hint">配置后可启用向量相似度检索，替代关键词匹配。推荐使用硅基流动（SiliconFlow）免费 Embedding API。</p>
+              ) : null}
+              <label>
+                API Key
+                <input
+                  type="password"
+                  value={configDraft.embedding?.apiKey ?? ""}
+                  placeholder="sk-..."
+                  onChange={(event) =>
+                    setConfigDraft({
+                      ...configDraft,
+                      embedding: { ...configDraft.embedding, apiKey: event.target.value }
+                    })
+                  }
+                />
+              </label>
+              <label>
+                Base URL
+                <input
+                  value={configDraft.embedding?.baseUrl ?? "https://api.siliconflow.cn/v1"}
+                  onChange={(event) =>
+                    setConfigDraft({
+                      ...configDraft,
+                      embedding: { ...configDraft.embedding, baseUrl: event.target.value }
+                    })
+                  }
+                />
+              </label>
+              <label>
+                模型名
+                <input
+                  value={configDraft.embedding?.model ?? "BAAI/bge-m3"}
+                  onChange={(event) =>
+                    setConfigDraft({
+                      ...configDraft,
+                      embedding: { ...configDraft.embedding, model: event.target.value }
+                    })
+                  }
+                />
+              </label>
+              <p className="knowledge-hint">
+                向量检索会优先使用 embedding 相似度匹配，失败时自动降级到关键词检索。重建 RAG 索引时自动生成向量。
+              </p>
+            </section>
+
+            <section className="panel-block" style={{ borderTop: "1px solid var(--border-color, #e0e0e0)", paddingTop: "0.75rem", marginTop: "0.5rem" }}>
+              <div className="section-header-row">
+                <p className="eyebrow">RAG 知识库索引</p>
+                <button
+                  className="ghost-button compact"
+                  type="button"
+                  onClick={handleRefreshRagStatus}
+                  disabled={loadingRagStatus}
+                >
+                  {loadingRagStatus ? "刷新中..." : "刷新"}
+                </button>
+              </div>
+              {ragStatus ? (
+                <>
+                  <div className="stats-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+                    <article className="stat-card">
+                      <span>索引文件</span>
+                      <strong>{ragStatus.status.indexedFileCount}</strong>
+                    </article>
+                    <article className="stat-card">
+                      <span>文本片段</span>
+                      <strong>{ragStatus.status.indexedChunkCount}</strong>
+                    </article>
+                    <article className="stat-card">
+                      <span>已向量化</span>
+                      <strong>{ragStatus.status.embeddedChunkCount}</strong>
+                    </article>
+                  </div>
+                  <p className="knowledge-hint">
+                    检索模式：{ragStatus.config.mode === "keyword_only" ? "仅关键词" : "自动（优先向量）"}
+                    {" · "}Embedding：{ragStatus.config.embeddingProvider} / {ragStatus.config.embeddingModel}
+                    {ragStatus.status.updatedAt ? ` · 更新于 ${new Date(ragStatus.status.updatedAt).toLocaleString("zh-CN")}` : " · 尚未构建索引"}
+                  </p>
+                </>
+              ) : (
+                <p className="knowledge-hint">点击刷新查看 RAG 索引状态。</p>
+              )}
+              <div className="action-row" style={{ marginTop: "0.5rem" }}>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={handleRebuildRagIndex}
+                  disabled={rebuildingIndex}
+                >
+                  {rebuildingIndex ? "重建中..." : "重建 RAG 索引"}
+                </button>
+                <button
+                  className="ghost-button compact"
+                  type="button"
+                  onClick={handleTestEmbedding}
+                  disabled={testingEmbedding}
+                >
+                  {testingEmbedding ? "测试中..." : "测试 Embedding"}
+                </button>
+              </div>
+              {rebuildMessage ? <p className="feedback-text">{rebuildMessage}</p> : null}
+              {embeddingTestMessage ? <p className="feedback-text">{embeddingTestMessage}</p> : null}
+            </section>
             <div className="inline-grid">
               <label>
                 最大消息数
@@ -885,6 +1049,26 @@ function App() {
                 </article>
               ))}
             </div>
+          </section>
+
+          <section className="panel-block">
+            <p className="eyebrow">数据存储</p>
+            {dataPathInfo ? (
+              <>
+                <label>数据目录</label>
+                <input value={dataPathInfo.dataDir} readOnly onClick={(e) => (e.target as HTMLInputElement).select()} />
+                <p className="knowledge-hint">对话记录、知识库、应用注册表、RAG 索引均存储在此目录。</p>
+                <div className="action-row">
+                  <button className="ghost-button compact" type="button" onClick={async () => {
+                    if (bridge) await bridge.openDataFolder();
+                  }}>
+                    打开数据目录
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="knowledge-hint">数据存储在系统默认应用数据目录（%APPDATA%/v-manager/agent-data/）。</p>
+            )}
           </section>
         </div>
       </div>

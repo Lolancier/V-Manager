@@ -33,6 +33,11 @@ export const defaultConfig = {
     baseUrl: "https://api.deepseek.com/v1",
     model: "deepseek-chat"
   },
+  embedding: {
+    apiKey: "",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    model: "BAAI/bge-m3"
+  },
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
@@ -46,6 +51,10 @@ function mergeConfig(rawConfig = {}) {
     deepseek: {
       ...defaultConfig.deepseek,
       ...(rawConfig.deepseek ?? {})
+    },
+    embedding: {
+      ...defaultConfig.embedding,
+      ...(rawConfig.embedding ?? {})
     },
     memory: {
       ...defaultConfig.memory,
@@ -461,7 +470,7 @@ function buildSystemPromptV3(config, knowledge) {
     "4. 如果某个操作你没有对应的工具（例如没有工具能执行某操作），必须诚实告诉用户'我目前没有这个能力'，绝对不能编造执行结果。",
     "5. 工具调用结果会以 JSON 格式返回给你，请基于真实数据用自然语言回复用户。如果工具返回 ok: false，如实告诉用户失败原因。",
     "6. 如果用户只是普通聊天，不需要调用工具，直接回复即可。",
-    "7. 你拥有的工具包括：获取系统资源、查询磁盘空间、检查进程是否运行、终止进程（需确认）、启动应用、查找应用、文件操作（列出/读取/打开/创建/删除（需确认）/搜索）、知识库检索等。",
+    "7. 你拥有的工具包括：获取系统资源、查询磁盘空间、检查进程是否运行、终止进程（需确认）、启动应用、查找应用、文件操作（列出/读取/打开/创建/删除（需确认）/搜索）、知识库检索（向量相似度搜索）等。",
     "",
     knowledgeBlock
   ].join("\n");
@@ -580,7 +589,10 @@ export async function buildAgentReply(baseDir, payload) {
     (query, topK) => retrieveKnowledge(baseDir, query, topK)
   );
   const knowledge = ragResult.items;
-  // Build recent messages from history, limited by maxMessages count
+  // Build recent messages from history, limited by maxMessages count.
+  // Track seen tool_call_ids to deduplicate — corrupted history may contain
+  // the same tool_call_id across multiple entries.
+  const seenToolCallIds = new Set();
   const maxMsgs = config.memory.maxMessages || 40;
   const recentHistory = [];
   const reversed = [...normalizedHistory].reverse();
@@ -588,19 +600,29 @@ export async function buildAgentReply(baseDir, payload) {
     const entries = [];
     entries.push({ role: "user", content: item.user });
     if (item.toolCalls && Array.isArray(item.toolCalls)) {
-      entries.push({
-        role: "assistant",
-        content: null,
-        tool_calls: item.toolCalls
-      });
-      if (item.toolResults && Array.isArray(item.toolResults)) {
-        for (const tr of item.toolResults) {
-          entries.push({
-            role: "tool",
-            tool_call_id: tr.id,
-            content: JSON.stringify(tr.result)
-          });
+      // Deduplicate tool_calls: only include calls with a fresh id
+      const freshCalls = item.toolCalls.filter((tc) => !seenToolCallIds.has(tc.id));
+      if (freshCalls.length > 0) {
+        entries.push({
+          role: "assistant",
+          content: null,
+          tool_calls: freshCalls
+        });
+        if (item.toolResults && Array.isArray(item.toolResults)) {
+          for (const tr of item.toolResults) {
+            if (seenToolCallIds.has(tr.id)) continue;
+            seenToolCallIds.add(tr.id);
+            entries.push({
+              role: "tool",
+              tool_call_id: tr.id,
+              content: JSON.stringify(tr.result)
+            });
+          }
         }
+      }
+      // Mark all calls as seen (even if filtered out, prevent future dupes)
+      for (const tc of item.toolCalls) {
+        seenToolCallIds.add(tc.id);
       }
     }
     entries.push({ role: "assistant", content: item.assistant });
@@ -648,6 +670,10 @@ export async function buildAgentReply(baseDir, payload) {
     ragMode: ragResult.meta.ragMode,
     embeddingProvider: ragResult.meta.embeddingProvider
   };
+
+  // Track where history-derived messages end — only tool calls added
+  // AFTER this point belong to the current conversation round.
+  const historySplitIndex = messages.length;
 
   if (config.deepseek.apiKey) {
     try {
@@ -728,11 +754,14 @@ export async function buildAgentReply(baseDir, payload) {
     };
   }
 
-  // Build tool call/result records for history persistence
+  // Build tool call/result records for history persistence.
+  // Only scan messages added during THIS conversation round — messages before
+  // historySplitIndex belong to previous rounds already saved in history.
   const historyToolCalls = [];
   const historyToolResults = [];
   if (toolUseCount > 0) {
-    for (const msg of messages) {
+    for (let i = historySplitIndex; i < messages.length; i++) {
+      const msg = messages[i];
       if (msg.role === "assistant" && msg.tool_calls) {
         historyToolCalls.push(...msg.tool_calls);
       }
@@ -770,4 +799,4 @@ export async function buildAgentReply(baseDir, payload) {
 export { getSystemResourceSnapshot } from "./executors/system-executor.js";
 export { searchLocalFiles, getFileManagerSnapshot } from "./executors/file-executor.js";
 export { loadAppRegistry as getAppRegistrySnapshot, refreshAppRegistry as rebuildAppRegistry } from "./app-registry.js";
-export { getRagSnapshot as getRagStatus, rebuildRagIndex as rebuildKnowledgeIndex } from "./rag.js";
+export { getRagSnapshot as getRagStatus, rebuildRagIndex as rebuildKnowledgeIndex, testEmbeddingConnection } from "./rag.js";
