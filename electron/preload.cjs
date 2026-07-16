@@ -66,5 +66,10 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = () => callback();
     ipcRenderer.on("agent:clear-expressions", listener);
     return () => ipcRenderer.removeListener("agent:clear-expressions", listener);
+  },
+  onMoodUpdated: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("agent:mood-updated", listener);
+    return () => ipcRenderer.removeListener("agent:mood-updated", listener);
   }
 });

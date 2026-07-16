@@ -8,3 +8,4 @@ agent-data/
 data/*.json
 data/memory/*.jsonl
 !data/config.example.json
+/芊芊/

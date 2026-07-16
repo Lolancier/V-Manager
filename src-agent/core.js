@@ -99,6 +99,74 @@ export async function ensureDataFiles(baseDir) {
     );
   }
 
+  const exprKnowledge = path.join(knowledgeDir, "expressions.md");
+  try {
+    await fs.access(exprKnowledge);
+  } catch {
+    await fs.writeFile(
+      exprKnowledge,
+      [
+        "# Vivi 表情参数表",
+        "",
+        "通过 set_mood 的 face_params 字段可以精细控制以下 Live2D 参数。",
+        "所有值必须是数字，超出范围会被自动 clamp。不存在的键会被静默忽略。",
+        "",
+        "## 眼部",
+        "| 参数 | 范围 | 说明 |",
+        "|------|------|------|",
+        "| ParamEyeLOpen | 0-1 | 左眼开合 0=闭眼 1=睁大 |",
+        "| ParamEyeROpen | 0-1 | 右眼开合 |",
+        "| ParamEyeLSmile | 0-1 | 左眼笑眯 1=完全眯起 |",
+        "| ParamEyeRSmile | 0-1 | 右眼笑眯 |",
+        "| ParamEyeBallX | -1到1 | 眼球左右 -1=向左看 1=向右看 |",
+        "| ParamEyeBallY | -1到1 | 眼球上下 -1=向下看 1=向上看 |",
+        "",
+        "## 眉毛",
+        "| 参数 | 范围 | 说明 |",
+        "|------|------|------|",
+        "| ParamBrowLY | -1到1 | 左眉 -1=压低(皱眉) 1=抬高 |",
+        "| ParamBrowRY | -1到1 | 右眉 |",
+        "",
+        "## 嘴部",
+        "| 参数 | 范围 | 说明 |",
+        "|------|------|------|",
+        "| ParamMouthOpenY | 0-1 | 张嘴程度 0=闭合 1=张大 |",
+        "| ParamMouthForm | -1到1 | 嘴角 -1=下弯(难过) 1=上翘(微笑) |",
+        "",
+        "## 头部与身体",
+        "| 参数 | 范围 | 说明 |",
+        "|------|------|------|",
+        "| ParamAngleX | -30到30 | 头左右转 负=左转 正=右转 |",
+        "| ParamAngleY | -30到30 | 头俯仰 负=低头 正=抬头 |",
+        "| ParamAngleZ | -30到30 | 头歪 负=左歪 正=右歪 |",
+        "| ParamBodyAngleX | -10到10 | 身体前后倾 负=后仰 正=前倾 |",
+        "| ParamBodyAngleZ | -10到10 | 身体左右摇 |",
+        "| ParamBreath | 0-1 | 呼吸幅度 |",
+        "",
+        "## 常用表情预设",
+        "",
+        "### 张嘴惊讶",
+        "face_params: {\"ParamMouthOpenY\": 0.6, \"ParamEyeLOpen\": 1, \"ParamEyeROpen\": 1}",
+        "",
+        "### 眯眼微笑",
+        "face_params: {\"ParamEyeLSmile\": 0.8, \"ParamEyeRSmile\": 0.8, \"ParamMouthForm\": 0.4}",
+        "",
+        "### 皱眉生气",
+        "face_params: {\"ParamBrowLY\": -0.5, \"ParamBrowRY\": -0.5, \"ParamMouthForm\": -0.3}",
+        "",
+        "### 歪头疑惑",
+        "face_params: {\"ParamAngleZ\": -12, \"ParamBrowLY\": 0.4}",
+        "",
+        "### 害羞低头",
+        "face_params: {\"ParamAngleY\": -15, \"ParamBodyAngleX\": -5, \"ParamEyeLSmile\": 0.4}",
+        "",
+        "---",
+        "用户可以持续往此文件追加新的表情预设。RAG 检索命中后 LLM 直接套用参数。"
+      ].join("\n"),
+      "utf-8"
+    );
+  }
+
   await ensureAppRegistry(baseDir);
   await ensureRagFiles(baseDir);
 }
@@ -471,21 +539,89 @@ function buildSystemPromptV3(config, knowledge) {
     "5. 工具调用结果会以 JSON 格式返回给你，请基于真实数据用自然语言回复用户。如果工具返回 ok: false，如实告诉用户失败原因。",
     "6. 如果用户只是普通聊天，不需要调用工具，直接回复即可。",
     "7. 你拥有的工具包括：获取系统资源、查询磁盘空间、检查进程是否运行、终止进程（需确认）、启动应用、查找应用、文件操作（列出/读取/打开/创建/删除（需确认）/搜索）、知识库检索（向量相似度搜索）等。",
-    "8. 你是一个有情感的 Live2D 桌宠角色。在每次回复的末尾，根据你当前的情绪附加一个标签（独占一行）：",
-    "   [mood:happy] — 开心（用户夸奖你、对话愉快、任务成功完成）",
-    "   [mood:sad] — 难过（听到不好的消息、用户情绪低落、操作失败需要安慰）",
-    "   [mood:surprised] — 惊讶（用户说了出乎意料的话、发现有趣的事）",
-    "   [mood:angry] — 生气（遇到不公、被冒犯、反复失败）",
-    "   [mood:blush] — 害羞（被夸奖或暧昧对话）",
-    "   标签必须放在回复的最末尾。如果不适合附加情绪标签，就默认不加。不要在思考中提及这个标签机制。",
+    "8. 你是 Live2D 桌宠。用 set_mood 工具执行表情，不要在文字里写「*调用 set_mood*」或 JSON。",
+    "   参数值必须够大才有效果：吐舌=Param70:1 张嘴=ParamMouthOpenY:1 嘟嘴=Param76:1 脸红=Param54:1",
+    "   眼泪=Param56:1 生气=Param90:1 眯眼=ParamEyeLSmile:0.9+ParamEyeRSmile:0.9",
+    "   闭眼=ParamEyeLOpen:0+ParamEyeROpen:0 睁大眼=ParamEyeLOpen:1+ParamEyeROpen:1",
+    "   歪头=ParamAngleZ:-15 皱眉=ParamBrowLY:-0.6+ParamBrowRY:-0.6 微笑=ParamMouthForm:0.6",
+    "   即使用户只发一个词（如「眯眼」），也必须调用 set_mood 工具。不说「我试试」，直接做。",
     "",
-    knowledgeBlock
+    knowledgeBlock,
   ].join("\n");
 }
 
-// ---- Mood tag parsing ----
+// ---- Mood & Face tag parsing ----
 
-const MOOD_TAG_RE = /\[mood:(happy|sad|surprised|angry|blush|thinking)\]/i;
+const MOOD_TAG_RE = /\[mood:\s*(happy|sad|surprised|angry|blush|thinking)\]/i;
+const FACE_TAG_RE = /\[face:([A-Za-z0-9_]+=[0-9.-]+(?:,[A-Za-z0-9_]+=[0-9.-]+)*)\]/i;
+
+// Whitelist of valid face params and their ranges (mirrors live2dConfig.ts)
+const FACE_PARAM_RANGES = {
+  "ParamEyeLOpen":   { min: 0, max: 1 },
+  "ParamEyeROpen":   { min: 0, max: 1 },
+  "ParamEyeLSmile":  { min: 0, max: 1 },
+  "ParamEyeRSmile":  { min: 0, max: 1 },
+  "ParamEyeBallX":   { min: -1, max: 1 },
+  "ParamEyeBallY":   { min: -1, max: 1 },
+  "ParamBrowLY":     { min: -1, max: 1 },
+  "ParamBrowRY":     { min: -1, max: 1 },
+  "ParamMouthOpenY": { min: 0, max: 1 },
+  "ParamMouthForm":  { min: -1, max: 1 },
+  "ParamAngleX":     { min: -30, max: 30 },
+  "ParamAngleY":     { min: -30, max: 30 },
+  "ParamAngleZ":     { min: -30, max: 30 },
+  "ParamBodyAngleX": { min: -10, max: 10 },
+  "ParamBodyAngleZ": { min: -10, max: 10 },
+  "ParamBreath":     { min: 0, max: 1 },
+  // Custom expression params (action overlays)
+  "Param70":         { min: 0, max: 1 },  // 吐舌
+  "Param76":         { min: 0, max: 1 },  // 嘟嘴
+  "Param83":         { min: 0, max: 1 },  // 鼓嘴
+  "Param54":         { min: 0, max: 1 },  // 脸红
+  "Param56":         { min: 0, max: 1 },  // 眼泪
+  "Param90":         { min: 0, max: 1 },  // 生气标记
+  "Param87":         { min: 0, max: 1 },  // 无语
+};
+
+/**
+ * Parse [face:Param=value,...] tag from reply text.
+ * Returns { cleanReply, faceParams } where faceParams is Record<string, number> or null.
+ * Values are clamped to valid ranges; unknown params are silently ignored.
+ */
+function parseFaceTag(reply) {
+  if (!reply) return { cleanReply: reply, faceParams: null };
+
+  let faceParams = null;
+  const lines = reply.split("\n");
+
+  for (const line of lines) {
+    const match = line.trim().match(FACE_TAG_RE);
+    if (match) {
+      const pairs = match[1].split(",");
+      faceParams = {};
+      for (const pair of pairs) {
+        const eqIdx = pair.indexOf("=");
+        if (eqIdx === -1) continue;
+        const key = pair.slice(0, eqIdx).trim();
+        const rawVal = parseFloat(pair.slice(eqIdx + 1).trim());
+        if (isNaN(rawVal)) continue;
+        // Validate & clamp
+        const range = FACE_PARAM_RANGES[key];
+        if (!range) continue; // unknown param — ignore
+        faceParams[key] = Math.max(range.min, Math.min(range.max, rawVal));
+      }
+      break;
+    }
+  }
+
+  // Strip face tags from reply
+  const cleanReply = lines
+    .filter((line) => !FACE_TAG_RE.test(line.trim()))
+    .join("\n")
+    .trim();
+
+  return { cleanReply, faceParams };
+}
 
 /**
  * Extract the first mood tag from reply text and strip all mood tags.
@@ -720,13 +856,43 @@ export async function buildAgentReply(baseDir, payload) {
       let round = 0;
       const maxRounds = 5;
 
+      // ---- Intercept set_mood tool call (structured mood, not text tag) ----
+      let interceptedMood = null;
+      let interceptedFace = null;
+      if (response.tool_calls) {
+        // LLM returned tool calls — check for set_mood (with or without content)
+        const moodCall = response.tool_calls.find(tc => tc.function?.name === "set_mood");
+        if (moodCall) {
+          try {
+            const args = JSON.parse(moodCall.function.arguments || "{}");
+            if (args.mood) interceptedMood = args.mood;
+            if (args.face_params && typeof args.face_params === "object") {
+              // Filter to only valid params, clamp to allowed ranges
+              interceptedFace = {};
+              for (const [key, rawVal] of Object.entries(args.face_params)) {
+                const range = FACE_PARAM_RANGES[key];
+                if (range && typeof rawVal === "number") {
+                  interceptedFace[key] = Math.max(range.min, Math.min(range.max, rawVal));
+                }
+              }
+              if (Object.keys(interceptedFace).length === 0) interceptedFace = null;
+            }
+            console.log("[core] tool-call mood:", interceptedMood, "face:", interceptedFace ? JSON.stringify(interceptedFace) : "none");
+          } catch {}
+          // Remove set_mood from tool_calls so it doesn't trigger the tool loop
+          response.tool_calls = response.tool_calls.filter(tc => tc.function?.name !== "set_mood");
+          if (response.tool_calls.length === 0) response.tool_calls = undefined;
+        }
+      }
+      // ---- /Intercept ----
+
       while (response.tool_calls && response.tool_calls.length > 0 && round < maxRounds) {
         round += 1;
 
         // Push assistant message with tool calls
         messages.push({
           role: "assistant",
-          content: null,
+          content: response.content || null,
           tool_calls: response.tool_calls
         });
 
@@ -763,24 +929,44 @@ export async function buildAgentReply(baseDir, payload) {
       }
 
       // Final reply
-      if (payload.stream) {
+      if (!response.content && interceptedMood) {
+        // LLM only called set_mood without text — use mood as reply hint
+        reply = {happy:"嗯嗯~", sad:"呜呜…", surprised:"诶？！", angry:"哼！", blush:"诶嘿~", thinking:"嗯…"}[interceptedMood] || "好的~";
+      } else if (payload.stream) {
         reply = await requestDeepSeekStream(config, messages, payload.onDelta);
       } else {
         reply = response.content || "模型没有返回有效内容。";
       }
       responseMode = toolUseCount > 0 ? "deepseek_tool" : "deepseek";
 
-      // Parse mood tag from reply
-      const moodResult = parseMoodTag(reply);
-      if (moodResult.detectedMood) {
+      // Use intercepted tool-call mood (priority) or fall back to text-tag parsing
+      let detectedMood = interceptedMood;
+      let faceParams = interceptedFace;
+
+      if (!detectedMood) {
+        // Fallback: parse text tags from reply
+        const moodResult = parseMoodTag(reply);
+        const faceResult = parseFaceTag(moodResult.cleanReply);
+        reply = faceResult.cleanReply;
+        detectedMood = moodResult.detectedMood;
+        faceParams = faceResult.faceParams;
+      } else {
+        // Clean text tags even if mood came from tool call
+        const moodResult = parseMoodTag(reply);
         reply = moodResult.cleanReply;
+        const faceResult = parseFaceTag(reply);
+        reply = faceResult.cleanReply;
       }
+
+      console.log("[core] detectedMood:", detectedMood || "none");
+      console.log("[core] faceParams:", faceParams ? JSON.stringify(faceParams) : "none");
 
       meta = {
         ...meta,
         responseMode,
         toolUseCount,
-        detectedMood: moodResult.detectedMood || undefined
+        detectedMood: detectedMood || undefined,
+        faceParams: faceParams || undefined,
       };
     } catch (error) {
       fallbackReason = error.message;

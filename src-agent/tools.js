@@ -365,6 +365,31 @@ const switch_workspace = {
   }
 };
 
+// ---- Mood tool (LLM must call this each turn) ----
+
+const set_mood = {
+  type: "function",
+  function: {
+    name: "set_mood",
+    description: "每轮对话结束时必须调用。设置桌宠情绪和面部动作。",
+    parameters: {
+      type: "object",
+      properties: {
+        mood: {
+          type: "string",
+          enum: ["happy", "sad", "surprised", "angry", "blush", "thinking"],
+          description: "情绪：happy=开心,sad=难过,surprised=惊讶,angry=生气,blush=害羞,thinking=思考"
+        },
+        face_params: {
+          type: "object",
+          description: "面部动作参数，值必须是数字。动作清单：张嘴→ParamMouthOpenY(0.8-1) 吐舌→Param70(1) 嘟嘴→Param76(1) 脸红→Param54(1) 眼泪→Param56(1) 生气→Param90(1) 眯眼笑→ParamEyeLSmile+ParamEyeRSmile(0.6-1) 歪头→ParamAngleZ(-15~15) 前倾→ParamBodyAngleX(-8~8) 嘴角→ParamMouthForm(-1下弯~1上翘)。多个动作可组合。"
+        }
+      },
+      required: ["mood"]
+    }
+  }
+};
+
 // ---- All tools array ----
 
 export const ALL_TOOLS = [
@@ -393,5 +418,7 @@ export const ALL_TOOLS = [
   rebuild_rag_index,
   // Workspace
   list_workspace,
-  switch_workspace
+  switch_workspace,
+  // Mood
+  set_mood
 ];

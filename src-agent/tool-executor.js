@@ -140,6 +140,10 @@ export async function executeTool(name, args = {}, context = {}) {
         return { ok: true, reply: result?.reply || "" };
       }
 
+      // ---- Mood (handled by core.js interceptor, fallback no-op) ----
+      case "set_mood":
+        return { ok: true };
+
       default:
         return { ok: false, error: `未知工具: ${name}` };
     }

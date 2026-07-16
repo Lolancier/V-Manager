@@ -57,6 +57,8 @@ interface ChatResult {
     fallbackReason: string;
     localTool?: string;
     model?: string;
+    detectedMood?: string;
+    faceParams?: Record<string, number>;
   };
 }
 
@@ -185,5 +187,6 @@ interface Window {
     onPositionLockUpdated: (callback: (locked: boolean) => void) => () => void;
     onTriggerExpression: (callback: (name: string) => void) => () => void;
     onClearExpressions: (callback: () => void) => () => void;
+    onMoodUpdated?: (callback: (payload: { mood: string; faceParams: Record<string, number> | null }) => void) => () => void;
   };
 }

@@ -1,10 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  activeModel, EXPRESSION_PARAMS, IDLE_PROP_ACTIONS, IDLE_ACTION_INTERVAL,
+  activeModel, EXPRESSION_PARAMS, FaceParams,
+  IDLE_PROP_ACTIONS, IDLE_ACTION_INTERVAL,
   MOOD_LABEL_MAP, MoodParamPreset, ParamOscillation, ParamTarget, PetMood,
+  pickMoodCombo,
 } from "./live2dConfig";
 
-type Live2DPreviewProps = { mood: PetMood; scale: number; activeExpressionSet: Set<string> };
+type Live2DPreviewProps = {
+  mood: PetMood;
+  scale: number;
+  activeExpressionSet: Set<string>;
+  faceParams: FaceParams | null;
+};
 type CubismModelRef = { setParameterValueById: (id: string, value: number, weight?: number) => void };
 type RuntimeModel = { getModel: () => CubismModelRef | null; setExpression: (id: string) => void; setParamOverrides: (overrides: Map<string, number>) => void };
 type RuntimeManager = { _models: RuntimeModel[] };
@@ -81,7 +88,7 @@ function ensureScript(src: string) {
 
 const moodLabelMap: Record<PetMood, string> = MOOD_LABEL_MAP;
 
-export default function Live2DPreview({ mood, scale, activeExpressionSet }: Live2DPreviewProps) {
+export default function Live2DPreview({ mood, scale, activeExpressionSet, faceParams }: Live2DPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const runtimeRef = useRef<any>(null);
   const frameRef = useRef<number | null>(null);
@@ -90,15 +97,23 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet }: Live
   const idleTimerRef = useRef<number | null>(null);
   const idleClearRef = useRef<number | null>(null);
   const prevMoodRef = useRef<PetMood>("idle");
-  const activeExprRef = useRef<Set<string>>(new Set());
+  const activeExprRef = useRef<Set<string>>(new Set());     // manual panel
+  const moodComboRef = useRef<string[]>([]);                 // mood-driven combo
+  const idlePropRef = useRef<string | null>(null);           // idle random prop
   const prevExprRef = useRef<Set<string>>(new Set());
+  const faceRef = useRef<FaceParams | null>(null);           // LLM face tag
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [msg, setMsg] = useState("正在启动...");
 
-  // Sync activeExpressionSet to ref (for per-frame access in rAF loop)
+  // Sync activeExpressionSet to ref (manual panel toggles)
   useEffect(() => {
     activeExprRef.current = activeExpressionSet;
   }, [activeExpressionSet]);
+
+  // Sync faceParams to ref
+  useEffect(() => {
+    faceRef.current = faceParams;
+  }, [faceParams]);
 
   // ---- SDK bootstrap ----
   useEffect(() => {
@@ -144,20 +159,43 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet }: Live
             if (cm) { animatorRef.current.setModel(cm); modelWired = true; }
           }
 
-          // ---- Combinable expressions: compute param overrides ----
-          const activeSet = activeExprRef.current;
+          // ---- Combinable expressions: merge mood combo + manual + face → overrides ----
           if (m) {
             const overrides = new Map<string, number>();
-            if (activeSet.size > 0) {
-              for (const exprName of activeSet) {
-                const params = EXPRESSION_PARAMS[exprName];
-                if (params) {
-                  for (const p of params) {
-                    overrides.set(p.id, p.value);
-                  }
-                }
+
+            // Layer 1: mood combo expressions (base)
+            for (const exprName of moodComboRef.current) {
+              const params = EXPRESSION_PARAMS[exprName];
+              if (params) {
+                for (const p of params) overrides.set(p.id, p.value);
               }
             }
+
+            // Layer 1.5: idle random prop (only when mood=idle, auto-clears on mood change)
+            const idleExpr = idlePropRef.current;
+            if (idleExpr) {
+              const params = EXPRESSION_PARAMS[idleExpr];
+              if (params) {
+                for (const p of params) overrides.set(p.id, p.value);
+              }
+            }
+
+            // Layer 2: manual panel expressions (override mood)
+            for (const exprName of activeExprRef.current) {
+              const params = EXPRESSION_PARAMS[exprName];
+              if (params) {
+                for (const p of params) overrides.set(p.id, p.value);
+              }
+            }
+
+            // Layer 3: LLM face params (fine-tune, highest priority)
+            const face = faceRef.current;
+            if (face) {
+              for (const [paramId, value] of Object.entries(face)) {
+                overrides.set(paramId, value);
+              }
+            }
+
             m.setParamOverrides(overrides);
           }
           // ---- /Combinable expressions ----
@@ -188,13 +226,19 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet }: Live
     };
   }, []);
 
-  // ---- Mood → preset ----
+  // ---- Mood → preset + combo ----
   useEffect(() => {
     if (!runtimeRef.current || loadState !== "ready") return;
     if (mood === prevMoodRef.current) return;
     prevMoodRef.current = mood;
+
+    // 1. Apply parameter targets/oscillations
     const preset = activeModel.moodParams[mood];
     if (preset) animatorRef.current.applyPreset(preset);
+
+    // 2. Pick and apply mood combo expressions
+    const combo = pickMoodCombo(mood);
+    moodComboRef.current = combo;
   }, [loadState, mood]);
 
   // ---- Combinable expression toggle: reset removed expression params ----
@@ -220,28 +264,28 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet }: Live
     prevExprRef.current = new Set(next);
   }, [loadState, activeExpressionSet]);
 
-  // ---- Idle prop action cycle ----
+  // ---- Idle prop action cycle (uses override system, auto-clears on mood change) ----
   useEffect(() => {
-    if (loadState !== "ready" || mood !== "idle") return;
+    if (loadState !== "ready" || mood !== "idle") {
+      idlePropRef.current = null;
+      return;
+    }
 
     const schedule = () => {
       const delay = IDLE_ACTION_INTERVAL.minMs + Math.random() * (IDLE_ACTION_INTERVAL.maxMs - IDLE_ACTION_INTERVAL.minMs);
       idleTimerRef.current = window.setTimeout(() => {
         const action = IDLE_PROP_ACTIONS[Math.floor(Math.random() * IDLE_PROP_ACTIONS.length)];
         const dur = action.minMs + Math.random() * (action.maxMs - action.minMs);
-        const mgr = runtimeRef.current?.runtime.getLive2DManager();
-        const model = mgr?._models?.[0];
-        if (model) {
-          try { model.setExpression(action.expr); } catch {}
-          if ((action as any).moodExpr) {
-            setTimeout(() => { try { model.setExpression((action as any).moodExpr); } catch {} }, 80);
-          }
-        }
-        idleClearRef.current = window.setTimeout(() => { schedule(); }, dur);
+        idlePropRef.current = action.expr;
+        idleClearRef.current = window.setTimeout(() => {
+          idlePropRef.current = null;
+          schedule();
+        }, dur);
       }, delay);
     };
     schedule();
     return () => {
+      idlePropRef.current = null;
       if (idleTimerRef.current !== null) { window.clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
       if (idleClearRef.current !== null) { window.clearTimeout(idleClearRef.current); idleClearRef.current = null; }
     };

@@ -9,7 +9,7 @@ import {
   useState
 } from "react";
 import Live2DPreview from "./pet/Live2DPreview";
-import { PetMood } from "./pet/live2dConfig";
+import { FaceParams, PetMood } from "./pet/live2dConfig";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -130,6 +130,7 @@ function App() {
   const [dragging, setDragging] = useState(false);
   const [posLocked, setPosLocked] = useState(false);
   const [activeExpressionSet, setActiveExpressionSet] = useState<Set<string>>(new Set());
+  const [faceParams, setFaceParams] = useState<Record<string, number> | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const bubbleTimersRef = useRef<number[]>([]);
@@ -256,6 +257,19 @@ function App() {
       }
     });
 
+    const offMoodUpdated = bridge.onMoodUpdated?.((payload: { mood: string; faceParams: Record<string, number> | null }) => {
+      if (viewMode === "pet" && payload?.mood) {
+        console.log("[App] received mood from LLM:", payload.mood);
+        setActiveExpressionSet(new Set()); // clear manual panel
+        setPetMood(payload.mood as PetMood);
+        window.setTimeout(() => setPetMood("idle"), 10000);
+        if (payload.faceParams) {
+          setFaceParams(payload.faceParams);
+          window.setTimeout(() => setFaceParams(null), 10000);
+        }
+      }
+    });
+
     const offMenu = bridge.onMenuAction((action) => {
       if (action === "focus-composer" || action === "expand-composer") {
         if (viewMode === "composer") {
@@ -301,6 +315,7 @@ function App() {
       offPosLock?.();
       offTriggerExpr?.();
       offClearExpr?.();
+      offMoodUpdated?.();
     };
   }, [bridge, viewMode]);
 
@@ -529,9 +544,7 @@ function App() {
       setMessages(result.messages);
       setKnowledge(result.knowledge);
       setLastReplyMeta(result.lastReplyMeta);
-      setPetMood("talking");
-      window.setTimeout(() => setPetMood("happy"), 1400);
-      window.setTimeout(() => setPetMood("idle"), 2600);
+      // Mood application is handled by main process → agent:mood-updated → pet window
     } finally {
       setSending(false);
     }
@@ -1375,7 +1388,7 @@ function App() {
             onPointerUp={handleInteractionPointerEnd}
             onPointerCancel={handleInteractionPointerEnd}
           >
-            <Live2DPreview mood={petMood} scale={petScale} activeExpressionSet={activeExpressionSet} />
+            <Live2DPreview mood={petMood} scale={petScale} activeExpressionSet={activeExpressionSet} faceParams={faceParams} />
           </div>
         </div>
       </div>

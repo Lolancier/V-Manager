@@ -18,22 +18,82 @@ export const MOOD_TRANSITION_MAP: Record<PetMood, Array<[PetMood, number]>> = {
   blush: [["blush", 2200], ["idle", 0]]
 };
 
-// ---- Expression pools (random variety per mood) ----
+// ---- Mood combo presets (8 moods × multi-expression combinations) ----
+// Each mood has 2-3 combo variants; one is randomly picked on mood change.
 
-const MOOD_EXPRESSION_POOL: Record<PetMood, string[]> = {
-  idle: [], thinking: [], talking: [],
-  happy: ["expression12", "expression1", "expression11", "expression15", "expression18"],
-  sad: ["expression5", "expression9", "expression10"],
-  surprised: ["expression14", "expression7", "expression8", "expression13"],
-  angry: ["expression19", "expression4"],
-  blush: ["expression2", "expression3", "expression16", "expression17"],
+export const MOOD_COMBO_EXPRESSIONS: Record<PetMood, string[][]> = {
+  idle: [],
+  thinking: [
+    ["expression7", "expression6"],            // 问号 + 眼珠转动
+    ["expression8", "expression20"],           // 问号2 + 长发
+    ["expression6", "expression25"],           // 眼珠 + 笔记本R
+  ],
+  talking: [
+    ["expression1", "expression30"],           // 星星眼 + 话筒
+    ["expression12", "expression18"],          // 爱心眼 + 星星
+    ["expression15", "expression1"],           // 吐舌 + 星星眼
+  ],
+  happy: [
+    ["expression12", "expression18", "expression31"], // 爱心眼 + 星星 + 比心
+    ["expression1", "expression15", "expression18"],  // 星星眼 + 吐舌 + 星星
+    ["expression12", "expression30", "expression18"], // 爱心眼 + 话筒 + 星星
+  ],
+  sad: [
+    ["expression5", "expression22", "expression16"],  // 眼泪 + 垂耳 + 嘟嘴
+    ["expression5", "expression9", "expression22"],   // 眼泪 + 流汗 + 垂耳
+  ],
+  surprised: [
+    ["expression14", "expression7", "expression9"],   // 空白眼 + 问号 + 流汗
+    ["expression13", "expression8", "expression17"],  // 轮回眼 + 问号2 + 鼓嘴
+  ],
+  angry: [
+    ["expression19", "expression4", "expression17"],  // 生气 + 黑脸 + 鼓嘴
+    ["expression19", "expression6", "expression4"],   // 生气 + 眼珠 + 黑脸
+  ],
+  blush: [
+    ["expression2", "expression12", "expression16"],  // 脸红 + 爱心眼 + 嘟嘴
+    ["expression2", "expression15", "expression22"],  // 脸红 + 吐舌 + 垂耳
+    ["expression3", "expression17", "expression12"],  // 脸红2 + 鼓嘴 + 爱心眼
+  ],
 };
 
-export function getExpressionForMood(mood: PetMood): string | null {
-  const pool = MOOD_EXPRESSION_POOL[mood];
-  if (!pool || pool.length === 0) return null;
+export function pickMoodCombo(mood: PetMood): string[] {
+  const pool = MOOD_COMBO_EXPRESSIONS[mood];
+  if (!pool || pool.length === 0) return [];
   return pool[Math.floor(Math.random() * pool.length)];
 }
+
+// ---- LLM face parameter whitelist ----
+// Parameters the LLM can control via [face:Param=value,...] tags.
+// Values are clamped to [min, max] at parse time.
+
+export const FACE_PARAM_WHITELIST: Record<string, { min: number; max: number; desc: string }> = {
+  "ParamEyeLOpen":   { min: 0, max: 1,   desc: "左眼 0闭→1开" },
+  "ParamEyeROpen":   { min: 0, max: 1,   desc: "右眼 0闭→1开" },
+  "ParamEyeLSmile":  { min: 0, max: 1,   desc: "左眼笑眯" },
+  "ParamEyeRSmile":  { min: 0, max: 1,   desc: "右眼笑眯" },
+  "ParamEyeBallX":   { min: -1, max: 1,  desc: "眼球左右 -1左→1右" },
+  "ParamEyeBallY":   { min: -1, max: 1,  desc: "眼球上下 -1下→1上" },
+  "ParamBrowLY":     { min: -1, max: 1,  desc: "左眉 -1低→1抬" },
+  "ParamBrowRY":     { min: -1, max: 1,  desc: "右眉 -1低→1抬" },
+  "ParamMouthOpenY": { min: 0, max: 1,   desc: "张嘴 0闭→1开" },
+  "ParamMouthForm":  { min: -1, max: 1,  desc: "嘴角 -1下弯→1上翘" },
+  "ParamAngleX":     { min: -30, max: 30, desc: "头左右转" },
+  "ParamAngleY":     { min: -30, max: 30, desc: "头俯仰" },
+  "ParamAngleZ":     { min: -30, max: 30, desc: "头歪" },
+  "ParamBodyAngleX": { min: -10, max: 10, desc: "身体前后倾" },
+  "ParamBodyAngleZ": { min: -10, max: 10, desc: "身体左右摇" },
+  "ParamBreath":     { min: 0, max: 1,   desc: "呼吸幅度" },
+  "Param70":         { min: 0, max: 1,   desc: "吐舌" },
+  "Param76":         { min: 0, max: 1,   desc: "嘟嘴" },
+  "Param83":         { min: 0, max: 1,   desc: "鼓嘴" },
+  "Param54":         { min: 0, max: 1,   desc: "脸红" },
+  "Param56":         { min: 0, max: 1,   desc: "眼泪" },
+  "Param90":         { min: 0, max: 1,   desc: "生气标记" },
+  "Param87":         { min: 0, max: 1,   desc: "无语" },
+};
+
+export type FaceParams = Record<string, number>;
 
 // ---- Idle prop actions ----
 
@@ -64,6 +124,8 @@ export const QIANQIAN_MOOD_PARAMS: Record<PetMood, MoodParamPreset> = {
       { id: "ParamAngleZ", value: 0 },
       { id: "ParamBodyAngleX", value: 0 },
       { id: "ParamMouthOpenY", value: 0 },
+      { id: "ParamEyeLSmile", value: 0, weight: 0.3 },
+      { id: "ParamEyeRSmile", value: 0, weight: 0.3 },
     ],
     expression: null,
   },
@@ -71,7 +133,7 @@ export const QIANQIAN_MOOD_PARAMS: Record<PetMood, MoodParamPreset> = {
     targets: [{ id: "ParamMouthOpenY", value: 0 }],
     oscillations: [
       { id: "ParamAngleZ", amplitude: 0.15, center: 0, periodMs: 2800 },
-      { id: "ParamEyeBallX", amplitude: 0.2, center: 0, periodMs: 3500 },
+      { id: "ParamEyeBallX", amplitude: 0.3, center: 0, periodMs: 3500 },
     ],
     expression: null,
   },
@@ -79,6 +141,7 @@ export const QIANQIAN_MOOD_PARAMS: Record<PetMood, MoodParamPreset> = {
     oscillations: [
       { id: "ParamMouthOpenY", amplitude: 0.45, center: 0.25, periodMs: 280 },
       { id: "ParamAngleZ", amplitude: 0.06, center: 0, periodMs: 1200 },
+      { id: "ParamBodyAngleZ", amplitude: 0.04, center: 0, periodMs: 1600 },
     ],
     expression: null,
   },
@@ -86,44 +149,50 @@ export const QIANQIAN_MOOD_PARAMS: Record<PetMood, MoodParamPreset> = {
     targets: [
       { id: "ParamEyeLSmile", value: 0.7, weight: 0.8 },
       { id: "ParamEyeRSmile", value: 0.7, weight: 0.8 },
+      { id: "ParamMouthForm", value: 0.3, weight: 0.5 },
     ],
     oscillations: [
       { id: "ParamAngleZ", amplitude: 0.1, center: 0.05, periodMs: 1800 },
     ],
-    expression: getExpressionForMood("happy"),
+    expression: null,
   },
   sad: {
     targets: [
       { id: "ParamEyeLSmile", value: 0 },
       { id: "ParamEyeRSmile", value: 0 },
-      { id: "ParamBrowLY", value: -0.3 },
+      { id: "ParamBrowLY", value: -0.4 },
+      { id: "ParamMouthForm", value: -0.3, weight: 0.6 },
       { id: "ParamAngleZ", value: -0.06 },
     ],
-    expression: getExpressionForMood("sad"),
+    expression: null,
   },
   surprised: {
     targets: [
       { id: "ParamEyeLOpen", value: 1.0, weight: 0.9 },
       { id: "ParamEyeROpen", value: 1.0, weight: 0.9 },
       { id: "ParamMouthOpenY", value: 0.55 },
+      { id: "ParamBrowLY", value: 0.6 },
       { id: "ParamBodyAngleX", value: -0.12 },
     ],
-    expression: getExpressionForMood("surprised"),
+    expression: null,
   },
   angry: {
     targets: [
-      { id: "ParamBrowLY", value: 0.4 },
+      { id: "ParamBrowLY", value: 0.5 },
+      { id: "ParamBrowRY", value: 0.5 },
       { id: "ParamEyeLSmile", value: 0 },
       { id: "ParamEyeRSmile", value: 0 },
+      { id: "ParamMouthForm", value: -0.4, weight: 0.7 },
     ],
-    expression: getExpressionForMood("angry"),
+    expression: null,
   },
   blush: {
     targets: [
       { id: "ParamEyeLSmile", value: 0.4, weight: 0.5 },
       { id: "ParamEyeRSmile", value: 0.4, weight: 0.5 },
+      { id: "ParamBrowLY", value: 0.2, weight: 0.4 },
     ],
-    expression: getExpressionForMood("blush"),
+    expression: null,
   },
 };
 

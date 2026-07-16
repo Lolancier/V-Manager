@@ -780,6 +780,15 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
+
+  // Push detected mood to pet window model
+  if (result.meta?.detectedMood) {
+    petWindow?.webContents.send("agent:mood-updated", {
+      mood: result.meta.detectedMood,
+      faceParams: result.meta.faceParams || null
+    });
+  }
+
   return chatState;
 });
 
