@@ -1,0 +1,157 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "芊芊.moc3",
+		"Textures": [
+			"芊芊.4096/texture_00.png",
+			"芊芊.4096/texture_01.png",
+			"芊芊.4096/texture_02.png",
+			"芊芊.4096/texture_03.png",
+			"芊芊.4096/texture_04.png"
+		],
+		"Physics": "芊芊.physics3.json",
+		"DisplayInfo": "芊芊.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "expression1",
+				"File": "xingxingyan.exp3.json"
+			},
+			{
+				"Name": "expression2",
+				"File": "lianhong.exp3.json"
+			},
+			{
+				"Name": "expression3",
+				"File": "lianhong2.exp3.json"
+			},
+			{
+				"Name": "expression4",
+				"File": "heilian.exp3.json"
+			},
+			{
+				"Name": "expression5",
+				"File": "yanlei.exp3.json"
+			},
+			{
+				"Name": "expression6",
+				"File": "yanzhu.exp3.json"
+			},
+			{
+				"Name": "expression7",
+				"File": "wenhao.exp3.json"
+			},
+			{
+				"Name": "expression8",
+				"File": "wenhao2.exp3.json"
+			},
+			{
+				"Name": "expression9",
+				"File": "liuhan.exp3.json"
+			},
+			{
+				"Name": "expression10",
+				"File": "wuyu.exp3.json"
+			},
+			{
+				"Name": "expression11",
+				"File": "qianyan.exp3.json"
+			},
+			{
+				"Name": "expression12",
+				"File": "aixinyan.exp3.json"
+			},
+			{
+				"Name": "expression13",
+				"File": "lunhuiyan.exp3.json"
+			},
+			{
+				"Name": "expression14",
+				"File": "kongbaiyan.exp3.json"
+			},
+			{
+				"Name": "expression15",
+				"File": "tushe.exp3.json"
+			},
+			{
+				"Name": "expression16",
+				"File": "duzui.exp3.json"
+			},
+			{
+				"Name": "expression17",
+				"File": "guzui.exp3.json"
+			},
+			{
+				"Name": "expression18",
+				"File": "xingxing.exp3.json"
+			},
+			{
+				"Name": "expression19",
+				"File": "shengqi.exp3.json"
+			},
+			{
+				"Name": "expression20",
+				"File": "changfa.exp3.json"
+			},
+			{
+				"Name": "expression21",
+				"File": "shuangmawei.exp3.json"
+			},
+			{
+				"Name": "expression22",
+				"File": "chuier.exp3.json"
+			},
+			{
+				"Name": "expression23",
+				"File": "jingzi.exp3.json"
+			},
+			{
+				"Name": "expression24",
+				"File": "huli.exp3.json"
+			},
+			{
+				"Name": "expression25",
+				"File": "bijiben.exp3.json"
+			},
+			{
+				"Name": "expression26",
+				"File": "bijiben2.exp3.json"
+			},
+			{
+				"Name": "expression27",
+				"File": "dayouxi.exp3.json"
+			},
+			{
+				"Name": "expression28",
+				"File": "baohuli.exp3.json"
+			},
+			{
+				"Name": "expression29",
+				"File": "shanzi.exp3.json"
+			},
+			{
+				"Name": "expression30",
+				"File": "huatong.exp3.json"
+			},
+			{
+				"Name": "expression31",
+				"File": "bixin.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		},
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		}
+	],
+	"HitAreas": []
+}

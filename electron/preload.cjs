@@ -20,9 +20,14 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openComposerWindow: () => ipcRenderer.invoke("agent:open-composer-window"),
   openChatWindow: () => ipcRenderer.invoke("agent:open-chat-window"),
   openScaleWindow: () => ipcRenderer.invoke("agent:open-scale-window"),
+  openExpressionWindow: () => ipcRenderer.invoke("agent:open-expression-window"),
+  triggerExpression: (name) => ipcRenderer.invoke("agent:trigger-expression", name),
+  clearExpressions: () => ipcRenderer.invoke("agent:clear-expressions"),
   getChatState: () => ipcRenderer.invoke("agent:get-chat-state"),
   getPetWindowBounds: () => ipcRenderer.invoke("agent:get-pet-window-bounds"),
   getPetScale: () => ipcRenderer.invoke("agent:get-pet-scale"),
+  getPositionLock: () => ipcRenderer.invoke("agent:get-position-lock"),
+  setPositionLock: (locked) => ipcRenderer.invoke("agent:set-position-lock", locked),
   setPetWindowPosition: (x, y) => ipcRenderer.invoke("agent:set-pet-window-position", { x, y }),
   updatePetWindowLayout: (scale) => ipcRenderer.invoke("agent:update-pet-window-layout", { scale }),
   getDataPath: () => ipcRenderer.invoke("agent:get-data-path"),
@@ -46,5 +51,20 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on("agent:chat-state-updated", listener);
     return () => ipcRenderer.removeListener("agent:chat-state-updated", listener);
+  },
+  onPositionLockUpdated: (callback) => {
+    const listener = (_event, locked) => callback(locked);
+    ipcRenderer.on("agent:position-lock-updated", listener);
+    return () => ipcRenderer.removeListener("agent:position-lock-updated", listener);
+  },
+  onTriggerExpression: (callback) => {
+    const listener = (_event, name) => callback(name);
+    ipcRenderer.on("agent:trigger-expression", listener);
+    return () => ipcRenderer.removeListener("agent:trigger-expression", listener);
+  },
+  onClearExpressions: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("agent:clear-expressions", listener);
+    return () => ipcRenderer.removeListener("agent:clear-expressions", listener);
   }
 });

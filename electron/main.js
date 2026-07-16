@@ -32,7 +32,9 @@ let scaleWindow = null;
 let composerWindow = null;
 let chatWindow = null;
 let bubbleWindow = null;
+let expressionWindow = null;
 let petWindowScale = 1;
+let positionLocked = false;
 let chatState = {
   messages: [
     {
@@ -64,8 +66,8 @@ function getPetWindowSize(scale = petWindowScale) {
   const normalized = Math.max(0.8, Math.min(1.16, scale));
   const delta = normalized - 1;
   return {
-    width: Math.round(440 + delta * 760),
-    height: Math.round(860 + delta * 1350)
+    width: Math.round(640 + delta * 800),
+    height: Math.round(960 + delta * 1400)
   };
 }
 
@@ -123,8 +125,8 @@ function getBubbleWindowBounds() {
 
   const bounds = petWindow.getBounds();
   return {
-    x: bounds.x + bounds.width - 28,
-    y: bounds.y + 28,
+    x: Math.round(bounds.x + bounds.width * 0.68),
+    y: Math.round(bounds.y + bounds.height * 0.08),
     width: 290,
     height: 220
   };
@@ -135,8 +137,8 @@ function createPetWindow() {
   const win = new BrowserWindow({
     width: initialSize.width,
     height: initialSize.height,
-    minWidth: 360,
-    minHeight: 700,
+    minWidth: 480,
+    minHeight: 800,
     frame: false,
     transparent: true,
     hasShadow: true,
@@ -426,6 +428,57 @@ function ensureBubbleWindow() {
   return bubbleWindow;
 }
 
+function createExpressionWindow() {
+  const win = new BrowserWindow({
+    width: 420,
+    height: 560,
+    minWidth: 360,
+    minHeight: 440,
+    backgroundColor: "#0f1118",
+    autoHideMenuBar: true,
+    show: false,
+    resizable: true,
+    title: "表情与动作",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  loadView(win, "expressions");
+
+  win.on("close", (event) => {
+    if (!app.isQuiting) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+
+  win.on("closed", () => {
+    if (expressionWindow === win) {
+      expressionWindow = null;
+    }
+  });
+
+  expressionWindow = win;
+  return win;
+}
+
+function ensureExpressionWindow() {
+  if (!expressionWindow || expressionWindow.isDestroyed()) {
+    return createExpressionWindow();
+  }
+  return expressionWindow;
+}
+
+function openExpressionWindow() {
+  const win = ensureExpressionWindow();
+  win.show();
+  win.focus();
+  return true;
+}
+
 function openSettingsWindow() {
   const win = ensureSettingsWindow();
   win.show();
@@ -519,6 +572,11 @@ function buildPetContextMenu() {
           label: "表情与动作",
           submenu: [
             {
+              label: "打开表情面板",
+              click: () => openExpressionWindow()
+            },
+            { type: "separator" },
+            {
               label: "待机",
               click: () => sendPetAction("pet-idle")
             },
@@ -564,6 +622,16 @@ function buildPetContextMenu() {
     {
       label: "窗口",
       submenu: [
+        {
+          label: "固定位置",
+          type: "checkbox",
+          checked: positionLocked,
+          click: () => {
+            positionLocked = !positionLocked;
+            petWindow?.webContents.send("agent:position-lock-updated", positionLocked);
+          }
+        },
+        { type: "separator" },
         {
           label: petWindow?.isAlwaysOnTop() ? "取消置顶" : "保持置顶",
           click: () => {
@@ -788,12 +856,36 @@ ipcMain.handle("agent:open-scale-window", async () => {
   return openScaleWindow();
 });
 
+ipcMain.handle("agent:open-expression-window", async () => {
+  return openExpressionWindow();
+});
+
+ipcMain.handle("agent:trigger-expression", async (_event, expressionName) => {
+  petWindow?.webContents.send("agent:trigger-expression", expressionName);
+  return true;
+});
+
+ipcMain.handle("agent:clear-expressions", async () => {
+  petWindow?.webContents.send("agent:clear-expressions");
+  return true;
+});
+
 ipcMain.handle("agent:get-chat-state", async () => {
   return chatState;
 });
 
 ipcMain.handle("agent:get-pet-scale", async () => {
   return petWindowScale;
+});
+
+ipcMain.handle("agent:get-position-lock", async () => {
+  return positionLocked;
+});
+
+ipcMain.handle("agent:set-position-lock", async (_event, locked) => {
+  positionLocked = Boolean(locked);
+  petWindow?.webContents.send("agent:position-lock-updated", positionLocked);
+  return positionLocked;
 });
 
 ipcMain.handle("agent:get-pet-window-bounds", async () => {

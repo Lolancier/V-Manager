@@ -621,7 +621,24 @@ export class LAppModel extends CubismUserModel {
     // UpdateSchedulerによる一括エフェクト更新
     this._updateScheduler.onLateUpdate(this._model, deltaTimeSeconds);
 
+    // ---- External parameter overrides (combinable expressions) ----
+    if (this._paramOverrides.size > 0) {
+      for (const [paramId, value] of this._paramOverrides) {
+        const idHandle = CubismFramework.getIdManager().getId(paramId);
+        this._model.setParameterValueById(idHandle, value);
+      }
+    }
+    // ---- /External parameter overrides ----
+
     this._model.update();
+  }
+
+  /**
+   * Set external parameter overrides (applied every frame during update cycle).
+   * Used for combinable expressions that bypass the expression manager.
+   */
+  public setParamOverrides(overrides: Map<string, number>): void {
+    this._paramOverrides = overrides;
   }
 
   /**
@@ -1043,6 +1060,7 @@ export class LAppModel extends CubismUserModel {
 
   private _updateScheduler: CubismUpdateScheduler; // アップデートスケジューラー
   private _motionUpdated: boolean; // モーション更新フラグ
+  private _paramOverrides: Map<string, number> = new Map(); // 外部パラメータ上書き
   private _subdelegate: LAppSubdelegate; // サブデリゲート
 
   _modelSetting: ICubismModelSetting; // モデルセッティング情報

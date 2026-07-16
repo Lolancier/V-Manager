@@ -471,9 +471,47 @@ function buildSystemPromptV3(config, knowledge) {
     "5. 工具调用结果会以 JSON 格式返回给你，请基于真实数据用自然语言回复用户。如果工具返回 ok: false，如实告诉用户失败原因。",
     "6. 如果用户只是普通聊天，不需要调用工具，直接回复即可。",
     "7. 你拥有的工具包括：获取系统资源、查询磁盘空间、检查进程是否运行、终止进程（需确认）、启动应用、查找应用、文件操作（列出/读取/打开/创建/删除（需确认）/搜索）、知识库检索（向量相似度搜索）等。",
+    "8. 你是一个有情感的 Live2D 桌宠角色。在每次回复的末尾，根据你当前的情绪附加一个标签（独占一行）：",
+    "   [mood:happy] — 开心（用户夸奖你、对话愉快、任务成功完成）",
+    "   [mood:sad] — 难过（听到不好的消息、用户情绪低落、操作失败需要安慰）",
+    "   [mood:surprised] — 惊讶（用户说了出乎意料的话、发现有趣的事）",
+    "   [mood:angry] — 生气（遇到不公、被冒犯、反复失败）",
+    "   [mood:blush] — 害羞（被夸奖或暧昧对话）",
+    "   标签必须放在回复的最末尾。如果不适合附加情绪标签，就默认不加。不要在思考中提及这个标签机制。",
     "",
     knowledgeBlock
   ].join("\n");
+}
+
+// ---- Mood tag parsing ----
+
+const MOOD_TAG_RE = /\[mood:(happy|sad|surprised|angry|blush|thinking)\]/i;
+
+/**
+ * Extract the first mood tag from reply text and strip all mood tags.
+ * Returns { cleanReply, detectedMood }.
+ */
+function parseMoodTag(reply) {
+  if (!reply) return { cleanReply: reply, detectedMood: null };
+
+  let detectedMood = null;
+  const lines = reply.split("\n");
+
+  for (const line of lines) {
+    const match = line.trim().match(MOOD_TAG_RE);
+    if (match) {
+      detectedMood = match[1].toLowerCase();
+      break;
+    }
+  }
+
+  // Strip all mood tags from the reply (they're on their own lines)
+  const cleanReply = lines
+    .filter((line) => !MOOD_TAG_RE.test(line.trim()))
+    .join("\n")
+    .trim();
+
+  return { cleanReply, detectedMood };
 }
 
 // ---- Fallback replies ----
@@ -732,10 +770,17 @@ export async function buildAgentReply(baseDir, payload) {
       }
       responseMode = toolUseCount > 0 ? "deepseek_tool" : "deepseek";
 
+      // Parse mood tag from reply
+      const moodResult = parseMoodTag(reply);
+      if (moodResult.detectedMood) {
+        reply = moodResult.cleanReply;
+      }
+
       meta = {
         ...meta,
         responseMode,
-        toolUseCount
+        toolUseCount,
+        detectedMood: moodResult.detectedMood || undefined
       };
     } catch (error) {
       fallbackReason = error.message;

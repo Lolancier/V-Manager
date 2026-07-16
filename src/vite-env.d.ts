@@ -166,9 +166,14 @@ interface Window {
     openComposerWindow: () => Promise<boolean>;
     openChatWindow: () => Promise<boolean>;
     openScaleWindow: () => Promise<boolean>;
+    openExpressionWindow: () => Promise<boolean>;
+    triggerExpression: (name: string) => Promise<boolean>;
+    clearExpressions: () => Promise<boolean>;
     getChatState: () => Promise<ChatWindowState>;
     getPetWindowBounds: () => Promise<{ x: number; y: number; width: number; height: number }>;
     getPetScale: () => Promise<number>;
+    getPositionLock: () => Promise<boolean>;
+    setPositionLock: (locked: boolean) => Promise<boolean>;
     setPetWindowPosition: (x: number, y: number) => Promise<boolean>;
     updatePetWindowLayout: (scale: number) => Promise<{ width: number; height: number } | null>;
     getDataPath: () => Promise<{ baseDir: string; dataDir: string; configPath: string; memoryPath: string; knowledgeDir: string; ragDir: string; registryDir: string }>;
@@ -177,5 +182,8 @@ interface Window {
     onConfigUpdated: (callback: (config: AgentConfig) => void) => () => void;
     onPetScaleUpdated: (callback: (scale: number) => void) => () => void;
     onChatStateUpdated: (callback: (state: ChatWindowState) => void) => () => void;
+    onPositionLockUpdated: (callback: (locked: boolean) => void) => () => void;
+    onTriggerExpression: (callback: (name: string) => void) => () => void;
+    onClearExpressions: (callback: () => void) => () => void;
   };
 }

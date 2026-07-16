@@ -20,7 +20,7 @@ type RuntimeReplyMeta = ChatResult["meta"] & {
   sourceLabel: string;
 };
 
-type WindowView = "pet" | "settings" | "scale" | "composer" | "chat" | "bubble";
+type WindowView = "pet" | "settings" | "scale" | "composer" | "chat" | "bubble" | "expressions";
 
 const starterMessages: ChatMessage[] = [
   {
@@ -75,7 +75,7 @@ const deepSeekModelPresets = [
 function getViewMode(): WindowView {
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view");
-  if (view === "settings" || view === "scale" || view === "composer" || view === "chat" || view === "bubble") {
+  if (view === "settings" || view === "scale" || view === "composer" || view === "chat" || view === "bubble" || view === "expressions") {
     return view;
   }
 
@@ -128,6 +128,8 @@ function App() {
   const [bubbleVisible, setBubbleVisible] = useState(viewMode !== "pet");
   const [bubbleFading, setBubbleFading] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [posLocked, setPosLocked] = useState(false);
+  const [activeExpressionSet, setActiveExpressionSet] = useState<Set<string>>(new Set());
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const bubbleTimersRef = useRef<number[]>([]);
@@ -193,6 +195,10 @@ function App() {
           const dp = await bridge.getDataPath();
           setDataPathInfo(dp);
         } catch { /* preview mode */ }
+        try {
+          const locked = await bridge.getPositionLock();
+          setPosLocked(locked);
+        } catch { /* ignore */ }
       } catch {
         setBootstrap(previewBootstrap);
         setConfigDraft(previewBootstrap.config);
@@ -230,6 +236,26 @@ function App() {
       setLastReplyMeta(nextState.lastReplyMeta);
     });
 
+    const offPosLock = bridge.onPositionLockUpdated((locked: boolean) => {
+      setPosLocked(locked);
+    });
+
+    const offTriggerExpr = bridge.onTriggerExpression((name: string) => {
+      if (viewMode === "pet") {
+        setActiveExpressionSet(prev => {
+          const next = new Set(prev);
+          if (next.has(name)) next.delete(name); else next.add(name);
+          return next;
+        });
+      }
+    });
+
+    const offClearExpr = bridge.onClearExpressions(() => {
+      if (viewMode === "pet") {
+        setActiveExpressionSet(new Set());
+      }
+    });
+
     const offMenu = bridge.onMenuAction((action) => {
       if (action === "focus-composer" || action === "expand-composer") {
         if (viewMode === "composer") {
@@ -253,14 +279,17 @@ function App() {
 
       if (action === "pet-idle") {
         setPetMood("idle");
+        setActiveExpressionSet(new Set());
       }
 
       if (action === "pet-happy") {
         setPetMood("happy");
+        setActiveExpressionSet(new Set());
       }
 
       if (action === "pet-thinking") {
         setPetMood("thinking");
+        setActiveExpressionSet(new Set());
       }
     });
 
@@ -269,6 +298,9 @@ function App() {
       offScale();
       offChatState();
       offMenu();
+      offPosLock?.();
+      offTriggerExpr?.();
+      offClearExpr?.();
     };
   }, [bridge, viewMode]);
 
@@ -464,6 +496,7 @@ function App() {
 
     setSending(true);
     setPetMood("thinking");
+    setActiveExpressionSet(new Set());
     setInput("");
 
     try {
@@ -576,6 +609,8 @@ function App() {
     if (target.closest("button, input, textarea")) {
       return;
     }
+
+    if (posLocked) return;
 
     const bounds = await bridge.getPetWindowBounds();
     dragStateRef.current = {
@@ -1218,6 +1253,81 @@ function App() {
     );
   }
 
+
+  if (viewMode === "expressions") {
+    const expressions = [
+      { name: "expression1", label: "星星眼", cat: "情绪" },
+      { name: "expression2", label: "脸红", cat: "情绪" },
+      { name: "expression3", label: "脸红2", cat: "情绪" },
+      { name: "expression4", label: "黑脸", cat: "情绪" },
+      { name: "expression5", label: "眼泪", cat: "情绪" },
+      { name: "expression6", label: "眼珠", cat: "情绪" },
+      { name: "expression7", label: "问号", cat: "情绪" },
+      { name: "expression8", label: "问号2", cat: "情绪" },
+      { name: "expression9", label: "流汗", cat: "情绪" },
+      { name: "expression10", label: "无语", cat: "情绪" },
+      { name: "expression11", label: "钱眼", cat: "情绪" },
+      { name: "expression12", label: "爱心眼", cat: "情绪" },
+      { name: "expression13", label: "轮回眼", cat: "情绪" },
+      { name: "expression14", label: "空白眼", cat: "情绪" },
+      { name: "expression15", label: "吐舌", cat: "情绪" },
+      { name: "expression16", label: "嘟嘴", cat: "情绪" },
+      { name: "expression17", label: "鼓嘴", cat: "情绪" },
+      { name: "expression18", label: "星星", cat: "情绪" },
+      { name: "expression19", label: "生气", cat: "情绪" },
+      { name: "expression20", label: "长发", cat: "形态" },
+      { name: "expression21", label: "双马尾", cat: "形态" },
+      { name: "expression22", label: "垂耳", cat: "形态" },
+      { name: "expression23", label: "照镜子", cat: "动作" },
+      { name: "expression24", label: "狐狸", cat: "形态" },
+      { name: "expression25", label: "笔记本R", cat: "动作" },
+      { name: "expression26", label: "笔记本L", cat: "动作" },
+      { name: "expression27", label: "打游戏", cat: "动作" },
+      { name: "expression28", label: "抱狐狸", cat: "动作" },
+      { name: "expression29", label: "扇子", cat: "动作" },
+      { name: "expression30", label: "话筒", cat: "动作" },
+      { name: "expression31", label: "比心", cat: "动作" },
+    ];
+    const cats = ["情绪", "形态", "动作"];
+    return (
+      <div className="settings-shell" style={{padding: '14px'}}>
+        <header className="settings-header" style={{marginBottom: '10px', padding: '14px 18px'}}>
+          <p className="eyebrow">表情与动作</p>
+          <h1>芊芊</h1>
+          <p className="settings-subtitle">点击开关，可多选组合</p>
+        </header>
+        <div style={{marginBottom: '12px', padding: '0 14px'}}>
+          <button
+            className="ghost-button compact"
+            style={{width: '100%', padding: '8px', fontSize: '12px'}}
+            onClick={() => bridge?.clearExpressions()}
+          >
+            全部清除
+          </button>
+        </div>
+        {cats.map(cat => (
+          <section key={cat} className="panel-block" style={{marginBottom: '12px', padding: '14px'}}>
+            <p className="eyebrow">{cat}</p>
+            <div style={{display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px'}}>
+              {expressions.filter(e => e.cat === cat).map(e => (
+                <button
+                  key={e.name}
+                  className="ghost-button compact"
+                  style={{padding: '8px 6px', fontSize: '12px', textAlign: 'center'}}
+                  onClick={() => bridge?.triggerExpression(e.name)}
+                >
+                  {e.label}
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    );
+  }
+
+
+
   if (viewMode === "bubble") {
     return (
       <div className="bubble-window-shell">
@@ -1265,7 +1375,7 @@ function App() {
             onPointerUp={handleInteractionPointerEnd}
             onPointerCancel={handleInteractionPointerEnd}
           >
-            <Live2DPreview mood={petMood} scale={petScale} />
+            <Live2DPreview mood={petMood} scale={petScale} activeExpressionSet={activeExpressionSet} />
           </div>
         </div>
       </div>

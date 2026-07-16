@@ -33,7 +33,7 @@ export const ViewLogicalMaxBottom = -2.0;
 export const ViewLogicalMaxTop = 2.0;
 
 // 相対パス
-export const ResourcesPath = '/live2d-official/resources/';
+export const ResourcesPath = '/live2d/qianqian/';
 
 // シェーダー相対パス
 export const ShaderPath = '/live2d-official/shaders/WebGL/';
@@ -51,13 +51,14 @@ export const PowerImageName = 'CloseNormal.png';
 // モデルを配置したディレクトリ名の配列
 // ディレクトリ名とmodel3.jsonの名前を一致させておくこと
 export const ModelDir: string[] = [
-  'Hiyori'
+  '芊芊'
 ];
 export const ModelDirSize: number = ModelDir.length;
 
-// 外部定義ファイル（json）と合わせる
-export const MotionGroupIdle = 'Idle'; // アイドリング
-export const MotionGroupTapBody = 'TapBody'; // 体をタップしたとき
+// モデルにモーションが定義されていない場合でも SDK 初期化が通るよう、
+// フォールバックとして定義。実際のモーションは ParameterAnimator が担当。
+export const MotionGroupIdle = 'Idle';
+export const MotionGroupTapBody = 'TapBody';
 
 // 外部定義ファイル（json）と合わせる
 export const HitAreaNameHead = 'Head';
