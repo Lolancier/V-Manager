@@ -135,6 +135,7 @@ function App() {
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const bubbleTimersRef = useRef<number[]>([]);
   const bubbleStreamingRef = useRef(false);
+  const streamingRef = useRef(false);                        // tracks isReplyStreaming for mood timeouts
   const dragStateRef = useRef<{
     pointerId: number;
     startScreenX: number;
@@ -260,11 +261,24 @@ function App() {
     const offMoodUpdated = bridge.onMoodUpdated?.((payload: { mood: string; faceParams: Record<string, number> | null }) => {
       if (viewMode === "pet" && payload?.mood) {
         console.log("[App] received mood from LLM:", payload.mood);
+        const llmMood = payload.mood as PetMood;
+        // Cancel any pending talking→idle grace timeout (LLM mood takes priority)
+        if (talkingHoldRef.current !== null) {
+          window.clearTimeout(talkingHoldRef.current);
+          talkingHoldRef.current = null;
+        }
         setActiveExpressionSet(new Set()); // clear manual panel
-        setPetMood(payload.mood as PetMood);
-        window.setTimeout(() => setPetMood("idle"), 10000);
+        setPetMood(llmMood);
+        // After 10s, revert to idle (or back to talking if still streaming)
+        window.setTimeout(() => {
+          setPetMood(prev => {
+            if (prev === llmMood) return streamingRef.current ? "talking" : "idle";
+            return prev;
+          });
+        }, 10000);
+        // Always update faceParams (null = clear previous stale params)
+        setFaceParams(payload.faceParams ?? null);
         if (payload.faceParams) {
-          setFaceParams(payload.faceParams);
           window.setTimeout(() => setFaceParams(null), 10000);
         }
       }
@@ -360,6 +374,41 @@ function App() {
 
     showBubble(true);
   }, [isReplyStreaming, lastAssistantMessage.content, viewMode]);
+
+  // ---- Auto mood: thinking → talking → idle based on AI streaming state ----
+  // During AI text generation: mouth moves (talking oscillation). LLM moods override.
+  // Starts only when content actually arrives (not during network latency / LLM thinking).
+  const talkingHoldRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    streamingRef.current = isReplyStreaming;
+
+    if (isReplyStreaming && lastAssistantMessage.content) {
+      // Text actually flowing → start mouth animation
+      setPetMood(prev => {
+        if (prev === "idle" || prev === "thinking") return "talking";
+        return prev; // keep LLM-set moods (happy/sad/etc.)
+      });
+    } else if (!isReplyStreaming) {
+      // AI just finished — hold talking briefly (grace period for LLM mood IPC to arrive)
+      // If no mood arrives within the grace period, fade back to idle.
+      if (talkingHoldRef.current !== null) window.clearTimeout(talkingHoldRef.current);
+      talkingHoldRef.current = window.setTimeout(() => {
+        talkingHoldRef.current = null;
+        setPetMood(prev => {
+          if (prev === "talking") return "idle";
+          return prev;
+        });
+      }, 500);
+    }
+
+    return () => {
+      if (talkingHoldRef.current !== null) {
+        window.clearTimeout(talkingHoldRef.current);
+        talkingHoldRef.current = null;
+      }
+    };
+  }, [isReplyStreaming, lastAssistantMessage.content]);
 
   useEffect(() => {
     if (viewMode !== "chat" || !historyListRef.current) {
@@ -1269,6 +1318,7 @@ function App() {
 
   if (viewMode === "expressions") {
     const expressions = [
+      { name: "expression0", label: "豆豆眼", cat: "情绪" },
       { name: "expression1", label: "星星眼", cat: "情绪" },
       { name: "expression2", label: "脸红", cat: "情绪" },
       { name: "expression3", label: "脸红2", cat: "情绪" },

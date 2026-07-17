@@ -12,24 +12,24 @@ type Live2DPreviewProps = {
   activeExpressionSet: Set<string>;
   faceParams: FaceParams | null;
 };
-type CubismModelRef = { setParameterValueById: (id: string, value: number, weight?: number) => void };
-type RuntimeModel = { getModel: () => CubismModelRef | null; setExpression: (id: string) => void; setParamOverrides: (overrides: Map<string, number>) => void };
-type RuntimeManager = { _models: RuntimeModel[] };
 
 // ---- ParameterAnimator ----
+// NOTE: The animator returns computed values as a Map<string, number> instead of
+// calling setParameterValueById directly, because Cubism 5's CubismModel expects
+// CubismIdHandle objects, not plain strings (getParameterIndex uses != comparison
+// which fails when comparing string vs CubismId). All values are applied via
+// LAppModel.setParamOverrides() which does proper CubismIdHandle conversion.
 
 const INTERPOLATE_SPEED = 4.0;
 
 class ParameterAnimator {
-  private model: CubismModelRef | null = null;
+  private currentValues: Map<string, number> = new Map();
   private targets: ParamTarget[] = [];
   private oscillations: ParamOscillation[] = [];
   private expressionName: string | null = null;
   private lastExpression: string | null = null;
   private lastTimestamp = 0;
   private elapsed = 0;
-
-  setModel(m: CubismModelRef | null) { this.model = m; }
 
   applyPreset(preset: MoodParamPreset) {
     this.targets = preset.targets ?? [];
@@ -48,22 +48,33 @@ class ParameterAnimator {
     return null;
   }
 
-  update(timestampMs: number) {
-    if (!this.model) return;
+  /** Compute animated values for this frame. Returns the merged parameter map. */
+  update(timestampMs: number): Map<string, number> {
     const dt = this.lastTimestamp > 0 ? Math.min((timestampMs - this.lastTimestamp) / 1000, 0.1) : 0.016;
     this.lastTimestamp = timestampMs;
     this.elapsed += dt;
 
+    const result = new Map<string, number>();
+
     for (const t of this.targets) {
-      this.model.setParameterValueById(t.id, t.value, (t.weight ?? 1) * Math.min(INTERPOLATE_SPEED * dt, 1));
+      const weight = (t.weight ?? 1) * Math.min(INTERPOLATE_SPEED * dt, 1);
+      // Simple exponential ease toward target
+      const prev = this.currentValues.get(t.id) ?? 0;
+      const next = prev + (t.value - prev) * weight;
+      this.currentValues.set(t.id, next);
+      result.set(t.id, next);
     }
     for (const o of this.oscillations) {
       const v = o.center + o.amplitude * Math.sin(this.elapsed * 1000 * 2 * Math.PI / o.periodMs);
-      this.model.setParameterValueById(o.id, v, 0.8);
+      this.currentValues.set(o.id, v);
+      result.set(o.id, v);
     }
+
+    return result;
   }
 
   reset() {
+    this.currentValues.clear();
     this.targets = []; this.oscillations = [];
     this.expressionName = null; this.lastExpression = null;
     this.lastTimestamp = 0; this.elapsed = 0;
@@ -146,24 +157,25 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
         // Initial preset
         animatorRef.current.applyPreset(activeModel.moodParams.idle);
 
-        let modelWired = false;
         const loop = (ts: number) => {
           if (disposed || !runtimeRef.current) return;
           runtimeRef.current.pal.updateTime();
 
-          // Lazy-connect animator to model
           const mgr = rt.getLive2DManager();
           const m = mgr?._models?.[0];
-          if (m && !modelWired) {
-            const cm = m.getModel();
-            if (cm) { animatorRef.current.setModel(cm); modelWired = true; }
-          }
 
-          // ---- Combinable expressions: merge mood combo + manual + face → overrides ----
+          // ---- Combinable expressions: merge all layers → overrides ----
           if (m) {
             const overrides = new Map<string, number>();
 
-            // Layer 1: mood combo expressions (base)
+            // Layer 0: animator-computed values (mood preset targets/oscillations)
+            // These come FIRST so that expression combos and face params can override.
+            const animValues = animatorRef.current.update(ts);
+            for (const [paramId, value] of animValues) {
+              overrides.set(paramId, value);
+            }
+
+            // Layer 1: mood combo expressions (override animator)
             for (const exprName of moodComboRef.current) {
               const params = EXPRESSION_PARAMS[exprName];
               if (params) {
@@ -201,11 +213,9 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
           // ---- /Combinable expressions ----
 
           runtimeRef.current.runtime.update();
-          const anim = animatorRef.current;
-          anim.update(ts);
 
-          // Expression (mood-driven, via expression manager)
-          const expr = anim.getPendingExpression();
+          // Expression (mood-driven, via expression manager — used for motion-type effects)
+          const expr = animatorRef.current.getPendingExpression();
           if (expr !== null && m) { try { if (expr) m.setExpression(expr); } catch {} }
 
           frameRef.current = window.requestAnimationFrame(loop);
@@ -241,28 +251,10 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
     moodComboRef.current = combo;
   }, [loadState, mood]);
 
-  // ---- Combinable expression toggle: reset removed expression params ----
+  // ---- Combinable expression toggle: track changes for reset (reset handled by per-frame override rebuild) ----
   useEffect(() => {
-    if (loadState !== "ready") return;
-    const mgr = runtimeRef.current?.runtime.getLive2DManager();
-    const model = mgr?._models?.[0];
-    if (!model) return;
-
-    const prev = prevExprRef.current;
-    const next = activeExpressionSet;
-
-    // Reset params for expressions that were removed
-    for (const exprName of prev) {
-      if (!next.has(exprName)) {
-        const params = EXPRESSION_PARAMS[exprName];
-        if (params) {
-          for (const p of params) model.getModel()?.setParameterValueById(p.id, 0);
-        }
-      }
-    }
-
-    prevExprRef.current = new Set(next);
-  }, [loadState, activeExpressionSet]);
+    prevExprRef.current = new Set(activeExpressionSet);
+  }, [activeExpressionSet]);
 
   // ---- Idle prop action cycle (uses override system, auto-clears on mood change) ----
   useEffect(() => {

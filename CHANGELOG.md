@@ -1,6 +1,6 @@
 # V-Manager 开发日志
 
-> 版本 **0.2.1** | LLM mood/face 工具调用 + 表情组合系统
+> 版本 **0.2.2** | 表情管线修复 + 对话自动张嘴动画
 >
 > **项目定位**：日常二次元赛博陪伴 + 电脑助手辅助
 >
@@ -15,6 +15,7 @@
 | **0.1.0** | 桌面 Agent 完整底座：对话记忆、21 个本地工具、RAG 向量检索、Live2D 桌宠壳 | ✅ 完成 |
 | **0.2.0** | Live2D 表情联动：LLM 驱动神态、多选组合开关、右键表情面板 | ✅ 完成 |
 | **0.2.1** | LLM mood/face 工具调用、8 情绪组合预设、对话动作指令 | ✅ 完成 |
+| **0.2.2** | 表情管线修复、参数白名单校准、对话自动张嘴动画 | ✅ 完成 |
 | 0.3.0 | 代码代理：工作区搜代码、改文件、跑命令 | ⬜ 规划中 |
 | 0.4.0 | Live2D 皮肤换壳：多模型加载、皮肤切换、模型配置化 | ⬜ 规划中 |
 | 0.5.0 | 语音全链路：STT 语音输入 + TTS 语音输出（含 ASMR 耳语）+ Live2D 口型同步 | ⬜ 规划中 |
@@ -63,6 +64,51 @@
 - [x] preload 补全 `clearExpressions` / `onClearExpressions` / `onMoodUpdated`
 - [x] `vite-env.d.ts` 补全所有缺失类型声明
 - [x] `.gitignore` 修复，排除根目录重复模型文件
+
+---
+
+## 0.2.2 完成清单
+
+### 表情管线修复（Critical Bug Fix）
+
+**根因：`ParameterAnimator` 将字符串 ID 直传 Cubism 5 SDK 的 `setParameterValueById()`，但 SDK 要求 `CubismIdHandle` 对象。`getParameterIndex()` 用 `!=` 比对，`CubismId` 无 `toString()`，`"[object Object]" != "ParamBrowLY"` 永远为 true，所有 mood preset 的 targets 和 oscillations 静默失效。**
+
+- [x] Animator 重写：不再直调 SDK，改为每帧返回 `Map<string, number>`，统一通过 `LAppModel.setParamOverrides()` 应用（该路径正确转换 `CubismIdHandle`）
+- [x] 删除死代码：`modelWired`、`setModel()`、`CubismModelRef`、`RuntimeModel` 等无效逻辑
+- [x] 表达式面板重置改用 per-frame override 重建自动清除
+
+### 参数白名单校准
+
+- [x] `FACE_PARAM_WHITELIST`：23 个参数 → 43 个（全部在 Live2D Cubism Viewer 5.3 中逐个验证）
+- [x] 移除无效参数：`ParamEyeLSmile`、`ParamEyeRSmile`、`ParamBrowRY`、`ParamBodyAngleX/Y/Z`、`ParamBreath`
+- [x] 新增实测参数：`ParamBrowLForm`（囧眉）、`Param52`（豆豆眼）及全部 toggle 参数
+- [x] 修复范围：`ParamEyeLOpen`/`ROpen` 从 `0-1` → `0-2`（1 为居中默认值）
+- [x] `QIANQIAN_MOOD_PARAMS` 8 个 mood 预设全部用实测有效参数重写
+- [x] `EXPRESSION_PARAMS` 新增 `expression0` → Param52（豆豆眼）
+- [x] `MOOD_COMBO_EXPRESSIONS` thinking/surprised 各新增含豆豆眼的组合
+
+### LLM 输出修复
+
+- [x] System prompt 删除内联参数示例（旧版 `"吐舌=Param70:1 皱眉=ParamBrowLY:-0.6+ParamBrowRY:-0.6"` 导致 LLM 把参数名当文本模板抄进回复）
+- [x] `set_mood` 工具 description 从 200+ 字参数清单精简为引导式描述
+- [x] `FACE_PARAM_RANGES` 与前端白名单完全对齐
+- [x] `expressions.md` 知识库模板更新为实测参数
+- [x] `agent-data/knowledge/expressions.md` 手动创建（含参数表 + 6 个表情预设）
+
+### 对话自动张嘴动画
+
+- [x] 新增 auto mood 状态机：thinking → talking → idle，基于 `isReplyStreaming` 自动切换
+- [x] 嘴巴仅在文字实际到达时开始张合（不包含网络等待和 LLM 思考时间）
+- [x] 张嘴频率调优：周期 280ms → 420ms，振幅 0.45 → 0.35
+- [x] 流式结束 500ms 宽限期，允许 LLM mood IPC 先到达，避免 idle→happy 中间闪白
+- [x] LLM mood 过期后智能回退：还在流式 → talking，已结束 → idle
+
+### 协同修复
+
+- [x] Stale faceParams：新 mood 不含 faceParams 时主动清除上一轮残留
+- [x] `agent:mood-updated` 到达时取消 talking→idle 宽限定时器，无缝过渡
+
+---
 
 ### 0.4.0 皮肤换壳 — 详细规划
 

@@ -382,7 +382,7 @@ const set_mood = {
         },
         face_params: {
           type: "object",
-          description: "面部动作参数，值必须是数字。动作清单：张嘴→ParamMouthOpenY(0.8-1) 吐舌→Param70(1) 嘟嘴→Param76(1) 脸红→Param54(1) 眼泪→Param56(1) 生气→Param90(1) 眯眼笑→ParamEyeLSmile+ParamEyeRSmile(0.6-1) 歪头→ParamAngleZ(-15~15) 前倾→ParamBodyAngleX(-8~8) 嘴角→ParamMouthForm(-1下弯~1上翘)。多个动作可组合。"
+          description: "可选。控制面部细节，参数名和有效值参考知识库 expressions.md。示例：{\"Param70\":1} 吐舌，{\"ParamMouthForm\":0.4,\"ParamAngleZ\":8} 微笑歪头。不要将参数名写进对话文本。"
         }
       },
       required: ["mood"]
