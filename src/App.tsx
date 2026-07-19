@@ -8,6 +8,7 @@ import {
   useRef,
   useState
 } from "react";
+import { LoaderCircle, Mic, RotateCcw, Square, Volume2 } from "lucide-react";
 import Live2DPreview from "./pet/Live2DPreview";
 import { FaceParams, LIVE2D_MODEL_PRESETS, PetMood } from "./pet/live2dConfig";
 
@@ -79,6 +80,12 @@ const previewConfig: AgentConfig = {
     asmrMode: "sleep",
     asmrPrompt: "",
     asmrScript: ""
+  },
+  speechInput: {
+    provider: "local_whisper",
+    model: "small-q5_1",
+    language: "zh",
+    silenceMs: 1100
   },
   memory: {
     maxMessages: 40,
@@ -262,6 +269,49 @@ function splitSpeechText(text: string, maxLength = 4800) {
   return chunks;
 }
 
+function encodeWavFromChunks(chunks: Float32Array[], sourceSampleRate: number) {
+  const sourceLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const source = new Float32Array(sourceLength);
+  let sourceOffset = 0;
+  chunks.forEach((chunk) => {
+    source.set(chunk, sourceOffset);
+    sourceOffset += chunk.length;
+  });
+
+  const targetSampleRate = 16000;
+  const ratio = sourceSampleRate / targetSampleRate;
+  const targetLength = Math.max(1, Math.round(source.length / ratio));
+  const pcm = new Int16Array(targetLength);
+  for (let index = 0; index < targetLength; index += 1) {
+    const position = index * ratio;
+    const left = Math.floor(position);
+    const right = Math.min(left + 1, source.length - 1);
+    const value = source[left] + (source[right] - source[left]) * (position - left);
+    pcm[index] = Math.round(Math.max(-1, Math.min(1, value)) * 32767);
+  }
+
+  const buffer = new ArrayBuffer(44 + pcm.byteLength);
+  const view = new DataView(buffer);
+  const writeText = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
+  };
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + pcm.byteLength, true);
+  writeText(8, "WAVE");
+  writeText(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, pcm.byteLength, true);
+  new Int16Array(buffer, 44).set(pcm);
+  return new Uint8Array(buffer);
+}
+
 function moodForTextSegment(segment: string, fallbackMood: PetMood): PetMood {
   if (/[？?]|怎么|什么|要不|还是说/.test(segment)) return "surprised";
   if (/宝宝|乖|嘿嘿|摸摸头|想我|陪你|待在|呀/.test(segment)) return "blush";
@@ -359,6 +409,13 @@ function App() {
   const [accountVoices, setAccountVoices] = useState<ElevenLabsVoiceOption[]>([]);
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [previewingVoice, setPreviewingVoice] = useState(false);
+  const [localSttStatus, setLocalSttStatus] = useState<LocalSttStatus | null>(null);
+  const [installingLocalStt, setInstallingLocalStt] = useState(false);
+  const [localSttProgress, setLocalSttProgress] = useState<{ phase: "runtime" | "model"; percent: number } | null>(null);
+  const [recordingVoiceInput, setRecordingVoiceInput] = useState(false);
+  const [transcribingVoiceInput, setTranscribingVoiceInput] = useState(false);
+  const [voiceInputMessage, setVoiceInputMessage] = useState("");
+  const [messageVoiceState, setMessageVoiceState] = useState<{ index: number; status: "loading" | "playing" | "error" } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [posLocked, setPosLocked] = useState(false);
   const [activeExpressionSet, setActiveExpressionSet] = useState<Set<string>>(new Set());
@@ -378,6 +435,19 @@ function App() {
   const bubbleAudioRef = useRef<HTMLAudioElement | null>(null);
   const voicePreviewAudioRef = useRef<HTMLAudioElement | null>(null);
   const voicePreviewTokenRef = useRef(0);
+  const messageVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const messageVoiceTokenRef = useRef(0);
+  const recordingRef = useRef(false);
+  const microphoneStreamRef = useRef<MediaStream | null>(null);
+  const microphoneContextRef = useRef<AudioContext | null>(null);
+  const microphoneSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const microphoneProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const microphoneGainRef = useRef<GainNode | null>(null);
+  const microphoneChunksRef = useRef<Float32Array[]>([]);
+  const microphoneSampleRateRef = useRef(48000);
+  const microphoneStartedAtRef = useRef(0);
+  const microphoneLastVoiceAtRef = useRef(0);
+  const microphoneHeardSpeechRef = useRef(false);
   const streamingRef = useRef(false);                        // tracks isReplyStreaming for mood timeouts
   const talkingHoldRef = useRef<number | null>(null);
   const moodTimerRef = useRef<number | null>(null);
@@ -404,6 +474,22 @@ function App() {
     const theme = configDraft?.appearance?.theme ?? "light";
     document.documentElement.dataset.theme = theme;
   }, [configDraft?.appearance?.theme]);
+
+  useEffect(() => {
+    if (!bridge || !configDraft || (viewMode !== "settings" && viewMode !== "chat")) return;
+    let cancelled = false;
+    bridge.getLocalSttStatus(configDraft.speechInput.model)
+      .then((status) => { if (!cancelled) setLocalSttStatus(status); })
+      .catch(() => { if (!cancelled) setLocalSttStatus(null); });
+    return () => { cancelled = true; };
+  }, [bridge, configDraft?.speechInput.model, viewMode]);
+
+  useEffect(() => {
+    if (!bridge) return;
+    return bridge.onLocalSttProgress((progress) => {
+      setLocalSttProgress({ phase: progress.phase, percent: progress.percent });
+    });
+  }, [bridge]);
 
   function clearTimer(timerRef: { current: number | null }) {
     if (timerRef.current !== null) {
@@ -514,6 +600,9 @@ function App() {
       clearTimer(bubbleSegmentTimerRef);
       bubbleAudioRef.current?.pause();
       voicePreviewAudioRef.current?.pause();
+      messageVoiceAudioRef.current?.pause();
+      microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+      void microphoneContextRef.current?.close();
     };
   }, []);
 
@@ -1226,6 +1315,170 @@ function App() {
         voicePreviewAudioRef.current = null;
         setPreviewingVoice(false);
       }
+    }
+  }
+
+  async function handleInstallLocalStt() {
+    if (!bridge || !configDraft || installingLocalStt) return;
+    setInstallingLocalStt(true);
+    setLocalSttProgress({ phase: "runtime", percent: 0 });
+    setVoiceInputMessage("正在准备本地语音识别组件...");
+    try {
+      const status = await bridge.installLocalStt(configDraft.speechInput.model);
+      setLocalSttStatus(status);
+      setVoiceInputMessage("本地语音识别已就绪，录音不会上传到网络。");
+    } catch (error) {
+      setVoiceInputMessage(`安装失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setInstallingLocalStt(false);
+      setLocalSttProgress(null);
+    }
+  }
+
+  async function handleMessageVoice(index: number, text: string) {
+    if (!bridge || !configDraft?.voice.apiKey || !text.trim()) return;
+    if (messageVoiceState?.index === index && messageVoiceState.status !== "error") {
+      messageVoiceTokenRef.current += 1;
+      messageVoiceAudioRef.current?.pause();
+      messageVoiceAudioRef.current = null;
+      setMessageVoiceState(null);
+      return;
+    }
+
+    messageVoiceTokenRef.current += 1;
+    const token = messageVoiceTokenRef.current;
+    messageVoiceAudioRef.current?.pause();
+    setMessageVoiceState({ index, status: "loading" });
+    try {
+      const chunks = splitSpeechText(sanitizeBubbleReply(text));
+      for (const chunk of chunks) {
+        if (messageVoiceTokenRef.current !== token) return;
+        const result = await bridge.synthesizeSpeech(chunk, Boolean(configDraft.voice.asmrEnabled), configDraft.voice);
+        if (messageVoiceTokenRef.current !== token) return;
+        setMessageVoiceState({ index, status: "playing" });
+        await new Promise<void>((resolve, reject) => {
+          const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
+          messageVoiceAudioRef.current = audio;
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error("音频播放失败。"));
+          audio.play().catch(reject);
+        });
+      }
+      if (messageVoiceTokenRef.current === token) setMessageVoiceState(null);
+    } catch (error) {
+      console.warn("[voice] message playback failed:", error);
+      if (messageVoiceTokenRef.current === token) setMessageVoiceState({ index, status: "error" });
+    }
+  }
+
+  function releaseMicrophone() {
+    microphoneProcessorRef.current?.disconnect();
+    microphoneSourceRef.current?.disconnect();
+    microphoneGainRef.current?.disconnect();
+    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+    microphoneProcessorRef.current = null;
+    microphoneSourceRef.current = null;
+    microphoneGainRef.current = null;
+    microphoneStreamRef.current = null;
+    const context = microphoneContextRef.current;
+    microphoneContextRef.current = null;
+    if (context) void context.close();
+  }
+
+  async function stopVoiceInput() {
+    if (!recordingRef.current) return;
+    recordingRef.current = false;
+    setRecordingVoiceInput(false);
+    const chunks = microphoneChunksRef.current;
+    const sampleRate = microphoneSampleRateRef.current;
+    const heardSpeech = microphoneHeardSpeechRef.current;
+    microphoneChunksRef.current = [];
+    releaseMicrophone();
+
+    if (!heardSpeech || chunks.length === 0) {
+      setVoiceInputMessage("没有检测到清晰语音，请靠近麦克风后重试。");
+      return;
+    }
+    if (!bridge) return;
+    setTranscribingVoiceInput(true);
+    setVoiceInputMessage("正在本地识别，不会上传录音...");
+    try {
+      const wav = encodeWavFromChunks(chunks, sampleRate);
+      const result = await bridge.transcribeLocalSpeech(wav);
+      setInput((current) => current.trim() ? `${current.trim()} ${result.text}` : result.text);
+      setVoiceInputMessage("识别结果已填入输入框，可修改后发送。");
+      window.setTimeout(() => composerRef.current?.focus(), 30);
+    } catch (error) {
+      setVoiceInputMessage(`识别失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setTranscribingVoiceInput(false);
+    }
+  }
+
+  async function startVoiceInput() {
+    if (recordingRef.current) {
+      await stopVoiceInput();
+      return;
+    }
+    let currentSttStatus = localSttStatus;
+    if (!currentSttStatus?.installed && bridge && configDraft) {
+      currentSttStatus = await bridge.getLocalSttStatus(configDraft.speechInput.model).catch(() => null);
+      setLocalSttStatus(currentSttStatus);
+    }
+    if (!currentSttStatus?.installed) {
+      setVoiceInputMessage("请先在“设置 → 语音与 ASMR”安装本地 Whisper 模型。");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false
+      });
+      const context = new AudioContext();
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      const gain = context.createGain();
+      gain.gain.value = 0;
+      source.connect(processor);
+      processor.connect(gain);
+      gain.connect(context.destination);
+
+      microphoneStreamRef.current = stream;
+      microphoneContextRef.current = context;
+      microphoneSourceRef.current = source;
+      microphoneProcessorRef.current = processor;
+      microphoneGainRef.current = gain;
+      microphoneChunksRef.current = [];
+      microphoneSampleRateRef.current = context.sampleRate;
+      microphoneStartedAtRef.current = Date.now();
+      microphoneLastVoiceAtRef.current = Date.now();
+      microphoneHeardSpeechRef.current = false;
+      recordingRef.current = true;
+      setRecordingVoiceInput(true);
+      setVoiceInputMessage("正在聆听，说完后静音会自动结束，也可再次点击停止。");
+
+      processor.onaudioprocess = (event) => {
+        if (!recordingRef.current) return;
+        const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
+        microphoneChunksRef.current.push(chunk);
+        let energy = 0;
+        for (const sample of chunk) energy += sample * sample;
+        const rms = Math.sqrt(energy / chunk.length);
+        const now = Date.now();
+        if (rms >= 0.018) {
+          microphoneHeardSpeechRef.current = true;
+          microphoneLastVoiceAtRef.current = now;
+        }
+        const silentLongEnough = microphoneHeardSpeechRef.current
+          && now - microphoneLastVoiceAtRef.current >= (configDraft?.speechInput.silenceMs ?? 1100);
+        if (silentLongEnough || now - microphoneStartedAtRef.current >= 60000) void stopVoiceInput();
+      };
+    } catch (error) {
+      releaseMicrophone();
+      recordingRef.current = false;
+      setRecordingVoiceInput(false);
+      setVoiceInputMessage(`无法使用麦克风：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -1949,7 +2202,7 @@ function App() {
                     voice: { ...configDraft.voice, enabled: event.target.checked }
                   })}
                 />
-                启用语音输出
+                自动朗读回复
               </label>
             </div>
 
@@ -2079,6 +2332,58 @@ function App() {
                 </button>
                 <span>{elevenLabsModelPresets.find((model) => model.value === configDraft.voice.model)?.hint}</span>
               </div>
+            </div>
+
+            <div className="local-stt-settings">
+              <div className="asmr-workspace-heading">
+                <div>
+                  <strong>本地语音输入</strong>
+                  <span>whisper.cpp 在本机转写，识别结果只填入输入框</span>
+                </div>
+                <span className={`local-stt-status ${localSttStatus?.installed ? "is-ready" : ""}`}>
+                  {localSttStatus?.installed ? "已就绪" : "未安装"}
+                </span>
+              </div>
+              <div className="voice-config-grid">
+                <label>
+                  本地模型
+                  <select
+                    value={configDraft.speechInput.model}
+                    onChange={(event) => setConfigDraft({
+                      ...configDraft,
+                      speechInput: { ...configDraft.speechInput, model: event.target.value as AgentConfig["speechInput"]["model"] }
+                    })}
+                  >
+                    <option value="small-q5_1">Small Q5 · 推荐中文准确率 · 约 190 MB</option>
+                    <option value="base-q5_1">Base Q5 · 速度优先 · 约 60 MB</option>
+                  </select>
+                </label>
+                <label className="voice-speed-control">
+                  <span>自动结束静音 <strong>{(configDraft.speechInput.silenceMs / 1000).toFixed(1)} 秒</strong></span>
+                  <input
+                    type="range"
+                    min="700"
+                    max="2000"
+                    step="100"
+                    value={configDraft.speechInput.silenceMs}
+                    onChange={(event) => setConfigDraft({
+                      ...configDraft,
+                      speechInput: { ...configDraft.speechInput, silenceMs: Number(event.target.value) }
+                    })}
+                  />
+                </label>
+              </div>
+              <div className="asmr-actions">
+                <button className="primary-button" type="button" onClick={() => void handleInstallLocalStt()} disabled={installingLocalStt || localSttStatus?.installed}>
+                  {installingLocalStt
+                    ? `${localSttProgress?.phase === "model" ? "下载模型" : "安装运行时"} ${localSttProgress?.percent || 0}%`
+                    : localSttStatus?.installed ? "本地识别已安装" : "安装本地语音识别"}
+                </button>
+                <button className="ghost-button compact" type="button" onClick={() => void bridge?.openLocalSttFolder()}>
+                  打开模型目录
+                </button>
+              </div>
+              {voiceInputMessage ? <p className="feedback-text">{voiceInputMessage}</p> : null}
             </div>
 
             <div className="asmr-workspace">
@@ -2288,12 +2593,30 @@ function App() {
           </div>
 
           <div className="chat-window-list" ref={historyListRef}>
-            {messages.map((message, index) => (
+            {messages.map((message, index) => {
+              const voiceState = messageVoiceState?.index === index ? messageVoiceState.status : null;
+              const replyStillStreaming = isReplyStreaming && index === messages.length - 1;
+              return (
               <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-                <span className="message-role">{message.role === "assistant" ? configDraft.personaName : "你"}</span>
+                <div className="chat-message-header">
+                  <span className="message-role">{message.role === "assistant" ? configDraft.personaName : "你"}</span>
+                  {message.role === "assistant" ? (
+                    <button
+                      className={`message-voice-button ${voiceState ? `is-${voiceState}` : ""}`}
+                      type="button"
+                      title={voiceState === "playing" ? "停止播放" : voiceState === "loading" ? "正在生成语音" : voiceState === "error" ? "重试语音" : "朗读这条回复"}
+                      aria-label={voiceState === "playing" ? "停止播放" : "朗读这条回复"}
+                      disabled={!configDraft.voice.apiKey || !message.content.trim() || replyStillStreaming}
+                      onClick={() => void handleMessageVoice(index, message.content)}
+                    >
+                      {voiceState === "loading" ? <LoaderCircle size={15} /> : voiceState === "playing" ? <Square size={13} /> : voiceState === "error" ? <RotateCcw size={15} /> : <Volume2 size={16} />}
+                    </button>
+                  ) : null}
+                </div>
                 <p>{message.content}</p>
               </article>
-            ))}
+              );
+            })}
           </div>
 
           <form className="chat-window-composer" onSubmit={handleSend}>
@@ -2305,7 +2628,19 @@ function App() {
               onKeyDown={handleComposerKeyDown}
               rows={4}
             />
+            {voiceInputMessage ? <p className="voice-input-feedback">{voiceInputMessage}</p> : null}
             <div className="pet-history-actions">
+              <button
+                className={`voice-input-button ${recordingVoiceInput ? "is-recording" : ""}`}
+                type="button"
+                title={recordingVoiceInput ? "停止录音" : "语音输入"}
+                aria-label={recordingVoiceInput ? "停止录音" : "语音输入"}
+                disabled={transcribingVoiceInput}
+                onClick={() => void startVoiceInput()}
+              >
+                {transcribingVoiceInput ? <LoaderCircle size={17} /> : recordingVoiceInput ? <Square size={15} /> : <Mic size={18} />}
+                <span>{transcribingVoiceInput ? "识别中" : recordingVoiceInput ? "停止" : "语音输入"}</span>
+              </button>
               <button className="ghost-button compact" type="button" onClick={() => setInput("")}>
                 清空输入
               </button>

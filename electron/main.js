@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, session, shell } from "electron";
+import { createHash } from "node:crypto";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -27,6 +28,7 @@ import {
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode } from "../src-agent/code-executor.js";
 import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
+import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,8 +78,40 @@ function mergeAgentConfig(nextConfig = {}) {
       model: nextConfig.voice?.model || defaultConfig.voice.model,
       voice: nextConfig.voice?.voice || defaultConfig.voice.voice
     },
+    speechInput: { ...defaultConfig.speechInput, ...(nextConfig.speechInput ?? {}) },
     memory: { ...defaultConfig.memory, ...(nextConfig.memory ?? {}) }
   };
+}
+
+async function synthesizeSpeechWithCache(voiceConfig, text, asmr) {
+  const cacheDir = path.join(app.getPath("userData"), "agent-data", "audio-cache");
+  const cacheKey = createHash("sha256").update(JSON.stringify({
+    text,
+    asmr,
+    baseUrl: voiceConfig.baseUrl,
+    model: voiceConfig.model,
+    voice: voiceConfig.voice,
+    outputFormat: voiceConfig.outputFormat,
+    speed: voiceConfig.speed,
+    stability: voiceConfig.stability,
+    similarityBoost: voiceConfig.similarityBoost
+  })).digest("hex");
+  const audioPath = path.join(cacheDir, `${cacheKey}.mp3`);
+  const cached = await fs.readFile(audioPath).catch(() => null);
+  if (cached) {
+    return { audioBase64: cached.toString("base64"), mimeType: "audio/mpeg", requestId: "cache", characterCost: "0", cached: true };
+  }
+
+  const result = await synthesizeElevenLabsSpeech(voiceConfig, text, { asmr });
+  await fs.mkdir(cacheDir, { recursive: true });
+  await fs.writeFile(audioPath, Buffer.from(result.audioBase64, "base64"));
+  return { ...result, cached: false };
+}
+
+function broadcastSttProgress(progress) {
+  for (const win of [settingsWindow, chatWindow, composerWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:local-stt-progress", progress);
+  }
 }
 
 function getLive2DModelsDirectory() {
@@ -977,6 +1011,13 @@ function buildPetContextMenu() {
 
 app.whenReady().then(async () => {
   await ensureDataFiles(app.getPath("userData"));
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
+    return permission === "media" && details.mediaType !== "video";
+  });
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    const audioOnly = permission === "media" && !details.mediaTypes?.includes("video");
+    callback(audioOnly);
+  });
   const startupConfig = await loadConfig(app.getPath("userData"));
   currentAgentConfig = mergeAgentConfig(startupConfig);
   currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
@@ -1090,7 +1131,27 @@ ipcMain.handle("agent:list-elevenlabs-voices", async (_event, voiceOverride) => 
 ipcMain.handle("agent:synthesize-speech", async (_event, payload) => {
   const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
   const voiceConfig = { ...config.voice, ...(payload?.voiceConfig ?? {}) };
-  return synthesizeElevenLabsSpeech(voiceConfig, payload?.text, { asmr: Boolean(payload?.asmr) });
+  return synthesizeSpeechWithCache(voiceConfig, payload?.text, Boolean(payload?.asmr));
+});
+
+ipcMain.handle("agent:get-local-stt-status", async (_event, modelId) => {
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  return getLocalSttStatus(app.getPath("userData"), modelId || config.speechInput.model);
+});
+
+ipcMain.handle("agent:install-local-stt", async (_event, modelId) => {
+  return installLocalStt(app.getPath("userData"), modelId, broadcastSttProgress);
+});
+
+ipcMain.handle("agent:transcribe-local-speech", async (_event, audioBytes) => {
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  return transcribeLocalSpeech(app.getPath("userData"), audioBytes, config.speechInput);
+});
+
+ipcMain.handle("agent:open-local-stt-folder", async () => {
+  const status = await getLocalSttStatus(app.getPath("userData"), currentAgentConfig.speechInput.model);
+  await fs.mkdir(status.root, { recursive: true });
+  return shell.openPath(status.root);
 });
 
 ipcMain.handle("agent:chat", async (_event, payload) => {

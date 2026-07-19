@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   generateAsmrScript: (mode, prompt) => ipcRenderer.invoke("agent:generate-asmr-script", { mode, prompt }),
   listElevenLabsVoices: (voiceConfig) => ipcRenderer.invoke("agent:list-elevenlabs-voices", voiceConfig),
   synthesizeSpeech: (text, asmr, voiceConfig) => ipcRenderer.invoke("agent:synthesize-speech", { text, asmr, voiceConfig }),
+  getLocalSttStatus: (modelId) => ipcRenderer.invoke("agent:get-local-stt-status", modelId),
+  installLocalStt: (modelId) => ipcRenderer.invoke("agent:install-local-stt", modelId),
+  transcribeLocalSpeech: (audioBytes) => ipcRenderer.invoke("agent:transcribe-local-speech", audioBytes),
+  openLocalSttFolder: () => ipcRenderer.invoke("agent:open-local-stt-folder"),
   chat: (payload) => ipcRenderer.invoke("agent:chat", payload),
   searchFiles: (query) => ipcRenderer.invoke("agent:search-files", query),
   getAppRegistry: () => ipcRenderer.invoke("agent:get-app-registry"),
@@ -74,6 +78,11 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = (_event, placement) => callback(placement);
     ipcRenderer.on("agent:bubble-placement-updated", listener);
     return () => ipcRenderer.removeListener("agent:bubble-placement-updated", listener);
+  },
+  onLocalSttProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("agent:local-stt-progress", listener);
+    return () => ipcRenderer.removeListener("agent:local-stt-progress", listener);
   },
   onPositionLockUpdated: (callback) => {
     const listener = (_event, locked) => callback(locked);

@@ -50,6 +50,12 @@ interface AgentConfig {
     asmrPrompt: string;
     asmrScript: string;
   };
+  speechInput: {
+    provider: "local_whisper";
+    model: "base-q5_1" | "small-q5_1";
+    language: string;
+    silenceMs: number;
+  };
   memory: {
     maxMessages: number;
     knowledgeTopK: number;
@@ -70,6 +76,16 @@ interface ElevenLabsVoiceOption {
   name: string;
   category: string;
   previewUrl: string;
+}
+
+interface LocalSttStatus {
+  installed: boolean;
+  runtimeInstalled: boolean;
+  modelInstalled: boolean;
+  executablePath: string;
+  modelPath: string;
+  root: string;
+  modelId: string;
 }
 
 interface AgentBootstrap {
@@ -208,7 +224,11 @@ interface Window {
     selectAsmrTextFile: () => Promise<{ path: string; content: string } | null>;
     generateAsmrScript: (mode: string, prompt: string) => Promise<string>;
     listElevenLabsVoices: (voiceConfig?: AgentConfig["voice"]) => Promise<ElevenLabsVoiceOption[]>;
-    synthesizeSpeech: (text: string, asmr: boolean, voiceConfig?: AgentConfig["voice"]) => Promise<{ audioBase64: string; mimeType: string; requestId: string; characterCost: string }>;
+    synthesizeSpeech: (text: string, asmr: boolean, voiceConfig?: AgentConfig["voice"]) => Promise<{ audioBase64: string; mimeType: string; requestId: string; characterCost: string; cached: boolean }>;
+    getLocalSttStatus: (modelId?: string) => Promise<LocalSttStatus>;
+    installLocalStt: (modelId: string) => Promise<LocalSttStatus>;
+    transcribeLocalSpeech: (audioBytes: Uint8Array) => Promise<{ text: string; modelId: string; language: string }>;
+    openLocalSttFolder: () => Promise<string>;
     chat: (payload: { message: string }) => Promise<ChatWindowState>;
     searchFiles: (query: string) => Promise<FileSearchResult[]>;
     getAppRegistry: () => Promise<AppRegistrySnapshot>;
@@ -250,6 +270,7 @@ interface Window {
     onPetScaleUpdated: (callback: (scale: number) => void) => () => void;
     onChatStateUpdated: (callback: (state: ChatWindowState) => void) => () => void;
     onBubblePlacementUpdated: (callback: (placement: "left" | "right") => void) => () => void;
+    onLocalSttProgress: (callback: (progress: { phase: "runtime" | "model"; received: number; total: number; percent: number }) => void) => () => void;
     onPositionLockUpdated: (callback: (locked: boolean) => void) => () => void;
     onTriggerExpression: (callback: (name: string) => void) => () => void;
     onClearExpressions: (callback: () => void) => () => void;

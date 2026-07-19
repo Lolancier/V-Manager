@@ -58,6 +58,12 @@ export const defaultConfig = {
     asmrPrompt: "",
     asmrScript: ""
   },
+  speechInput: {
+    provider: "local_whisper",
+    model: "small-q5_1",
+    language: "zh",
+    silenceMs: 1100
+  },
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
@@ -97,6 +103,10 @@ function mergeConfig(rawConfig = {}) {
       baseUrl: rawConfig.voice?.baseUrl || defaultConfig.voice.baseUrl,
       model: rawConfig.voice?.model || defaultConfig.voice.model,
       voice: rawConfig.voice?.voice || defaultConfig.voice.voice
+    },
+    speechInput: {
+      ...defaultConfig.speechInput,
+      ...(rawConfig.speechInput ?? {})
     },
     memory: {
       ...defaultConfig.memory,
