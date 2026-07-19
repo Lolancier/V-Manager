@@ -9,7 +9,7 @@ import {
   useState
 } from "react";
 import Live2DPreview from "./pet/Live2DPreview";
-import { FaceParams, PetMood } from "./pet/live2dConfig";
+import { FaceParams, LIVE2D_MODEL_PRESETS, PetMood } from "./pet/live2dConfig";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -20,7 +20,23 @@ type RuntimeReplyMeta = ChatResult["meta"] & {
   sourceLabel: string;
 };
 
-type WindowView = "pet" | "settings" | "scale" | "composer" | "chat" | "bubble" | "expressions";
+type MoodBeat = {
+  mood: PetMood;
+  atMs: number;
+};
+
+type WindowView = "pet" | "settings" | "scale" | "composer" | "chat" | "bubble" | "expressions" | "code";
+type SettingsSection = "appearance" | "persona" | "intelligence" | "voice" | "abilities" | "storage";
+type AsmrMode = "sleep" | "casual" | "custom";
+
+const settingsSections: Array<{ id: SettingsSection; label: string; description: string }> = [
+  { id: "appearance", label: "个性化", description: "主题与窗口外观" },
+  { id: "persona", label: "角色与陪伴", description: "称呼、性格和表达方式" },
+  { id: "intelligence", label: "模型与记忆", description: "对话模型、知识库和上下文" },
+  { id: "voice", label: "语音与 ASMR", description: "语音接口、耳语脚本和音色" },
+  { id: "abilities", label: "桌面能力", description: "系统状态、文件和本地工具" },
+  { id: "storage", label: "数据与隐私", description: "本地数据位置和管理" }
+];
 
 const starterMessages: ChatMessage[] = [
   {
@@ -43,6 +59,26 @@ const previewConfig: AgentConfig = {
     apiKey: "",
     baseUrl: "https://api.siliconflow.cn/v1",
     model: "BAAI/bge-m3"
+  },
+  appearance: {
+    theme: "light",
+    live2dModel: "qianqian"
+  },
+  voice: {
+    enabled: false,
+    provider: "elevenlabs",
+    baseUrl: "https://api.elevenlabs.io/v1",
+    apiKey: "",
+    model: "eleven_v3",
+    voice: "pFZP5JQG7iQjIQuC4Bku",
+    outputFormat: "mp3_44100_128",
+    speed: 1,
+    stability: 0.5,
+    similarityBoost: 0.75,
+    asmrEnabled: false,
+    asmrMode: "sleep",
+    asmrPrompt: "",
+    asmrScript: ""
   },
   memory: {
     maxMessages: 40,
@@ -72,10 +108,51 @@ const deepSeekModelPresets = [
   { value: "deepseek-reasoner", label: "deepseek-reasoner（兼容别名）", hint: "兼容旧 ID，体验上更接近深度推理模式。" }
 ] as const;
 
+const elevenLabsModelPresets = [
+  { value: "eleven_v3", label: "Eleven v3", hint: "情绪表现最丰富，支持耳语标签，单次最多 5,000 字符" },
+  { value: "eleven_multilingual_v2", label: "Multilingual v2", hint: "长文本稳定并支持中文，单次最多 10,000 字符" },
+  { value: "eleven_flash_v2_5", label: "Flash v2.5", hint: "低延迟实时语音，单次最多 40,000 字符" }
+] as const;
+
+const elevenLabsVoicePresets: ElevenLabsVoiceOption[] = [
+  { voiceId: "hpp4J3VqNfWAUOO0d1Us", name: "Bella", category: "官方预置 · 温暖女声", previewUrl: "" },
+  { voiceId: "EXAVITQu4vr4xnSDxMaL", name: "Sarah", category: "官方预置 · 安心女声", previewUrl: "" },
+  { voiceId: "FGY2WhTYpPnrIDTdsKH5", name: "Laura", category: "官方预置 · 活泼女声", previewUrl: "" },
+  { voiceId: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice", category: "官方预置 · 清晰女声", previewUrl: "" },
+  { voiceId: "XrExE9yKIg1WjnnlVkGX", name: "Matilda", category: "官方预置 · 知性女声", previewUrl: "" },
+  { voiceId: "cgSgspJ2msm6clMCkdW9", name: "Jessica", category: "官方预置 · 明亮女声", previewUrl: "" },
+  { voiceId: "pFZP5JQG7iQjIQuC4Bku", name: "Lily", category: "官方预置 · 丝绒女声", previewUrl: "" },
+  { voiceId: "CwhRBWXzGAHq8TQ4Fs17", name: "Roger", category: "官方预置 · 轻松男声", previewUrl: "" },
+  { voiceId: "IKne3meq5aSn9XLyUdCD", name: "Charlie", category: "官方预置 · 深沉男声", previewUrl: "" },
+  { voiceId: "JBFqnCBsd6RMkjVDRZzb", name: "George", category: "官方预置 · 叙事男声", previewUrl: "" },
+  { voiceId: "N2lVS1w4EtoT3dr4eOWO", name: "Callum", category: "官方预置 · 沙哑男声", previewUrl: "" },
+  { voiceId: "SAz9YHcvj6GT2YYXdXww", name: "River", category: "官方预置 · 中性男声", previewUrl: "" },
+  { voiceId: "SOYHLrjzK2X1ezoPC6cr", name: "Harry", category: "官方预置 · 强烈男声", previewUrl: "" },
+  { voiceId: "TX3LPaxmHKxFdv7VOQHJ", name: "Liam", category: "官方预置 · 活力男声", previewUrl: "" },
+  { voiceId: "bIHbv24MWmeRgasZH58o", name: "Will", category: "官方预置 · 乐观男声", previewUrl: "" },
+  { voiceId: "cjVigY5qzO86Huf0OWal", name: "Eric", category: "官方预置 · 可信男声", previewUrl: "" },
+  { voiceId: "iP95p4xoKVk53GoZ742B", name: "Chris", category: "官方预置 · 自然男声", previewUrl: "" },
+  { voiceId: "nPczCjzI2devNBz1zQrb", name: "Brian", category: "官方预置 · 共鸣男声", previewUrl: "" },
+  { voiceId: "onwK4e9ZLuTAKqWW03F9", name: "Daniel", category: "官方预置 · 稳定男声", previewUrl: "" },
+  { voiceId: "pNInz6obpgDQGcFmaJgB", name: "Adam", category: "官方预置 · 坚定男声", previewUrl: "" },
+  { voiceId: "pqHfZKP75CvOlQylNhV4", name: "Bill", category: "官方预置 · 成熟男声", previewUrl: "" }
+];
+
+const asmrModes: Array<{ id: AsmrMode; label: string; description: string }> = [
+  { id: "sleep", label: "哄睡", description: "缓慢安抚与睡前陪伴" },
+  { id: "casual", label: "闲聊", description: "轻松自然的耳边谈话" },
+  { id: "custom", label: "自定义", description: "粘贴或导入自己的文本" }
+];
+
+const asmrTemplates: Record<Exclude<AsmrMode, "custom">, string> = {
+  sleep: "好啦，今天已经辛苦很久了。现在把肩膀慢慢放松，呼吸也不用着急。\n\n我会在这里陪着你。你不需要再想明天的事情，也不用担心还有什么没有完成。闭上眼睛，听着我的声音，慢慢吸气，再轻轻呼出来。\n\n晚安。今晚就安心睡吧，剩下的事情，等醒来以后再说。",
+  casual: "现在想聊点什么呢？不用特意找话题，我们就这样慢慢说也很好。\n\n你可以讲讲今天遇到的小事，开心的、麻烦的，或者只是刚才突然想到的东西。我会认真听着，不催你，也不会打断你。\n\n偶尔停一会儿也没关系。安静本身，也是陪伴的一部分。"
+};
+
 function getViewMode(): WindowView {
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view");
-  if (view === "settings" || view === "scale" || view === "composer" || view === "chat" || view === "bubble" || view === "expressions") {
+  if (view === "settings" || view === "scale" || view === "composer" || view === "chat" || view === "bubble" || view === "expressions" || view === "code") {
     return view;
   }
 
@@ -88,7 +165,140 @@ function clearBubbleTimers(timers: { current: number[] }) {
 }
 
 function clampPetScale(scale: number) {
-  return Math.max(0.8, Math.min(1.16, Number(scale) || 1));
+  return Math.max(0.8, Math.min(1.5, Number(scale) || 1));
+}
+
+const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
+
+function retainPersistentShapes(expressions: Set<string>) {
+  return new Set([...expressions].filter((name) => persistentShapeExpressions.has(name)));
+}
+
+function clampDuration(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function estimateSpeechDurationMs(text: string) {
+  const compact = text.replace(/\s+/g, "");
+  const cjkCount = compact.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  const latinWordCount = text.match(/[A-Za-z0-9]+/g)?.length ?? 0;
+  const punctuationCount = text.match(/[，。！？、,.!?;；:：]/g)?.length ?? 0;
+  const lineBreakCount = text.match(/\n/g)?.length ?? 0;
+
+  return clampDuration(
+    700 + cjkCount * 95 + latinWordCount * 230 + punctuationCount * 180 + lineBreakCount * 260,
+    1400,
+    16000
+  );
+}
+
+function estimateExpressionDurationMs(text: string) {
+  return clampDuration(Math.max(10000, estimateSpeechDurationMs(text) + 3000), 3600, 22000);
+}
+
+function sanitizeBubbleReply(text: string) {
+  return text
+    .split("\n")
+    .filter((line) => !/^\s*\[(?:mood|face):.*\]\s*$/i.test(line))
+    .join("\n");
+}
+
+function takeCompleteSentences(text: string) {
+  const sentences: string[] = [];
+  let start = 0;
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (/[。！？!?]/.test(char) || char === "\n") {
+      let end = index + 1;
+      while (end < text.length && /[。！？!?…\n”’」』）)]/.test(text[end])) end += 1;
+      const sentence = text.slice(start, end);
+      if (sentence.trim()) sentences.push(sentence);
+      start = end;
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return { sentences, consumed: start, remainder: text.slice(start) };
+}
+
+function groupBubbleSentences(sentences: string[]) {
+  const groups: string[] = [];
+  const pending = [...sentences];
+  while (pending.length > 0) {
+    const firstLength = Array.from(pending[0].replace(/\s+/g, "")).length;
+    const takeCount = firstLength >= 42 ? 1 : Math.min(2, pending.length);
+    const group = pending.splice(0, takeCount).join("").trim();
+    if (group) groups.push(group);
+  }
+  return groups;
+}
+
+function splitSpeechText(text: string, maxLength = 4800) {
+  const segments = text
+    .split(/(?<=[。！？!?；;\n])/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const chunks: string[] = [];
+  let current = "";
+  for (const segment of segments) {
+    if (segment.length > maxLength) {
+      if (current) chunks.push(current);
+      for (let start = 0; start < segment.length; start += maxLength) {
+        chunks.push(segment.slice(start, start + maxLength));
+      }
+      current = "";
+      continue;
+    }
+    if (current && current.length + segment.length > maxLength) {
+      chunks.push(current);
+      current = segment;
+    } else {
+      current += segment;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function moodForTextSegment(segment: string, fallbackMood: PetMood): PetMood {
+  if (/[？?]|怎么|什么|要不|还是说/.test(segment)) return "surprised";
+  if (/宝宝|乖|嘿嘿|摸摸头|想我|陪你|待在|呀/.test(segment)) return "blush";
+  if (/累|辛苦|熬夜|费神|休息|喝口水|伸个懒腰|别太/.test(segment)) return "sad";
+  if (/生气|皱眉|不许|别又/.test(segment)) return "angry";
+  if (/好|可以|配合|全力|放松|开心|啦|～|~/.test(segment)) return "happy";
+  return fallbackMood;
+}
+
+function buildMoodBeats(text: string, fallbackMood: PetMood, speechMs: number): MoodBeat[] {
+  const rawSegments = text
+    .split(/(?<=[。！？!?；;~～\n])/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (rawSegments.length <= 1) {
+    return [{ mood: fallbackMood, atMs: 0 }];
+  }
+
+  const beats: MoodBeat[] = [];
+  let elapsedWeight = 0;
+  const weightedSegments = rawSegments.map((segment) => ({
+    segment,
+    weight: Math.max(4, segment.replace(/\s+/g, "").length)
+  }));
+  const totalWeight = weightedSegments.reduce((sum, item) => sum + item.weight, 0);
+
+  for (const item of weightedSegments) {
+    const atMs = Math.round((elapsedWeight / totalWeight) * speechMs);
+    const mood = moodForTextSegment(item.segment, fallbackMood);
+    if (beats.length === 0 || beats[beats.length - 1].mood !== mood) {
+      beats.push({ mood, atMs });
+    }
+    elapsedWeight += item.weight;
+  }
+
+  return beats.slice(0, 5);
 }
 
 function getModelPresetValue(model: string) {
@@ -99,14 +309,26 @@ function App() {
   const viewMode = useMemo(() => getViewMode(), []);
   const [bootstrap, setBootstrap] = useState<AgentBootstrap | null>(null);
   const [configDraft, setConfigDraft] = useState<AgentConfig | null>(null);
+  const [live2dModels, setLive2dModels] = useState<Live2DModelOption[]>(
+    LIVE2D_MODEL_PRESETS.map((model) => ({ id: model.id, label: model.name, detail: model.detail, builtIn: true }))
+  );
+  const [scanningModels, setScanningModels] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(starterMessages);
   const [input, setInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("persona");
   const [sending, setSending] = useState(false);
   const [knowledge, setKnowledge] = useState<AgentKnowledge[]>([]);
   const [lastReplyMeta, setLastReplyMeta] = useState<RuntimeReplyMeta | null>(null);
   const [fileQuery, setFileQuery] = useState("");
   const [fileResults, setFileResults] = useState<FileSearchResult[]>([]);
+  const [codeWorkspace, setCodeWorkspace] = useState<CodeWorkspaceSnapshot | null>(null);
+  const [collapsedCodeDirs, setCollapsedCodeDirs] = useState<Set<string>>(new Set());
+  const [codeFilter, setCodeFilter] = useState("");
+  const [activeCodePath, setActiveCodePath] = useState("");
+  const [activeCodeContent, setActiveCodeContent] = useState("");
+  const [codeFileLoading, setCodeFileLoading] = useState(false);
+  const [codeWorkspaceError, setCodeWorkspaceError] = useState("");
   const [systemSnapshot, setSystemSnapshot] = useState<SystemResourceSnapshot | null>(null);
   const [fileSnapshot, setFileSnapshot] = useState<FileManagerSnapshot | null>(null);
   const [saveMessage, setSaveMessage] = useState("");
@@ -127,15 +349,41 @@ function App() {
   const [draftPetScale, setDraftPetScale] = useState(1);
   const [bubbleVisible, setBubbleVisible] = useState(viewMode !== "pet");
   const [bubbleFading, setBubbleFading] = useState(false);
+  const [bubblePlacement, setBubblePlacement] = useState<"left" | "right">("right");
+  const [bubbleSegmentText, setBubbleSegmentText] = useState("");
+  const [asmrMode, setAsmrMode] = useState<AsmrMode>("sleep");
+  const [asmrPrompt, setAsmrPrompt] = useState("");
+  const [asmrScript, setAsmrScript] = useState("");
+  const [asmrMessage, setAsmrMessage] = useState("");
+  const [generatingAsmr, setGeneratingAsmr] = useState(false);
+  const [accountVoices, setAccountVoices] = useState<ElevenLabsVoiceOption[]>([]);
+  const [loadingVoices, setLoadingVoices] = useState(false);
+  const [previewingVoice, setPreviewingVoice] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [posLocked, setPosLocked] = useState(false);
   const [activeExpressionSet, setActiveExpressionSet] = useState<Set<string>>(new Set());
   const [faceParams, setFaceParams] = useState<Record<string, number> | null>(null);
+  const [petSpeaking, setPetSpeaking] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const bubbleTimersRef = useRef<number[]>([]);
+  const bubbleCardRef = useRef<HTMLElement | null>(null);
   const bubbleStreamingRef = useRef(false);
+  const bubbleSourceRef = useRef("");
+  const bubbleConsumedRef = useRef(0);
+  const bubblePendingSentencesRef = useRef<string[]>([]);
+  const bubbleSegmentQueueRef = useRef<string[]>([]);
+  const bubbleSegmentTextRef = useRef("");
+  const bubbleSegmentTimerRef = useRef<number | null>(null);
+  const bubbleAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voicePreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voicePreviewTokenRef = useRef(0);
   const streamingRef = useRef(false);                        // tracks isReplyStreaming for mood timeouts
+  const talkingHoldRef = useRef<number | null>(null);
+  const moodTimerRef = useRef<number | null>(null);
+  const faceTimerRef = useRef<number | null>(null);
+  const speakingTimerRef = useRef<number | null>(null);
+  const moodBeatTimersRef = useRef<number[]>([]);
   const dragStateRef = useRef<{
     pointerId: number;
     startScreenX: number;
@@ -146,6 +394,52 @@ function App() {
     lastY: number;
   } | null>(null);
   const bridge = window.agentDesktop;
+  const availableVoiceOptions = useMemo(() => {
+    const voices = new Map(elevenLabsVoicePresets.map((voice) => [voice.voiceId, voice]));
+    accountVoices.forEach((voice) => voices.set(voice.voiceId, voice));
+    return [...voices.values()];
+  }, [accountVoices]);
+
+  useEffect(() => {
+    const theme = configDraft?.appearance?.theme ?? "light";
+    document.documentElement.dataset.theme = theme;
+  }, [configDraft?.appearance?.theme]);
+
+  function clearTimer(timerRef: { current: number | null }) {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  function holdSpeaking(durationMs: number) {
+    clearTimer(speakingTimerRef);
+    setPetSpeaking(true);
+    speakingTimerRef.current = window.setTimeout(() => {
+      speakingTimerRef.current = null;
+      setPetSpeaking(false);
+    }, durationMs);
+  }
+
+  function clearMoodBeatTimers() {
+    moodBeatTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    moodBeatTimersRef.current = [];
+  }
+
+  function playMoodBeats(replyText: string, fallbackMood: PetMood, speechMs: number) {
+    clearMoodBeatTimers();
+    const beats = buildMoodBeats(replyText, fallbackMood, speechMs);
+    for (const beat of beats) {
+      if (beat.atMs <= 0) {
+        setPetMood(beat.mood);
+        continue;
+      }
+      const timer = window.setTimeout(() => {
+        setPetMood(beat.mood);
+      }, beat.atMs);
+      moodBeatTimersRef.current.push(timer);
+    }
+  }
 
   function showBubble(autoHide = true) {
     if (viewMode !== "bubble") {
@@ -186,6 +480,10 @@ function App() {
         const result = await bridge.getBootstrap();
         setBootstrap(result);
         setConfigDraft(result.config);
+        setAsmrMode(result.config.voice.asmrMode ?? "sleep");
+        setAsmrPrompt(result.config.voice.asmrPrompt ?? "");
+        setAsmrScript(result.config.voice.asmrScript ?? "");
+        if (result.live2dModels?.length) setLive2dModels(result.live2dModels);
         const runtimeScale = clampPetScale(await bridge.getPetScale());
         setPetScale(runtimeScale);
         setDraftPetScale(runtimeScale);
@@ -213,8 +511,30 @@ function App() {
   useEffect(() => {
     return () => {
       clearBubbleTimers(bubbleTimersRef);
+      clearTimer(bubbleSegmentTimerRef);
+      bubbleAudioRef.current?.pause();
+      voicePreviewAudioRef.current?.pause();
     };
   }, []);
+
+  useEffect(() => {
+    if (!bridge || viewMode !== "bubble") return;
+    return bridge.onBubblePlacementUpdated(setBubblePlacement);
+  }, [bridge, viewMode]);
+
+  useEffect(() => {
+    if (!bridge || viewMode !== "code") return;
+    let cancelled = false;
+    bridge.getCodeWorkspace()
+      .then((snapshot) => {
+        if (cancelled) return;
+        applyCodeWorkspaceSnapshot(snapshot);
+      })
+      .catch((error) => {
+        if (!cancelled) setCodeWorkspaceError(error instanceof Error ? error.message : String(error));
+      });
+    return () => { cancelled = true; };
+  }, [bridge, viewMode]);
 
   useEffect(() => {
     if (!bridge) {
@@ -258,33 +578,52 @@ function App() {
       }
     });
 
-    const offMoodUpdated = bridge.onMoodUpdated?.((payload: { mood: string; faceParams: Record<string, number> | null }) => {
+    const offLive2DModels = bridge.onLive2DModelsUpdated(setLive2dModels);
+
+    const offExpressionsUpdated = bridge.onExpressionsUpdated((expressions) => {
+      setActiveExpressionSet(new Set(expressions));
+    });
+
+    const offMoodUpdated = bridge.onMoodUpdated?.((payload: { mood: string; faceParams: Record<string, number> | null; reply?: string }) => {
       if (viewMode === "pet" && payload?.mood) {
         console.log("[App] received mood from LLM:", payload.mood);
         const llmMood = payload.mood as PetMood;
-        // Cancel any pending talking→idle grace timeout (LLM mood takes priority)
-        if (talkingHoldRef.current !== null) {
-          window.clearTimeout(talkingHoldRef.current);
-          talkingHoldRef.current = null;
-        }
-        setActiveExpressionSet(new Set()); // clear manual panel
-        setPetMood(llmMood);
-        // After 10s, revert to idle (or back to talking if still streaming)
-        window.setTimeout(() => {
+        const replyContent = payload.reply ?? [...messages].reverse().find((message) => message.role === "assistant")?.content ?? "";
+        const speechMs = estimateSpeechDurationMs(replyContent);
+        const expressionMs = estimateExpressionDurationMs(replyContent);
+        clearTimer(talkingHoldRef);
+        clearTimer(moodTimerRef);
+        clearTimer(faceTimerRef);
+        setActiveExpressionSet(retainPersistentShapes);
+        playMoodBeats(replyContent, llmMood, speechMs);
+        holdSpeaking(speechMs);
+        moodTimerRef.current = window.setTimeout(() => {
+          moodTimerRef.current = null;
+          clearMoodBeatTimers();
           setPetMood(prev => {
-            if (prev === llmMood) return streamingRef.current ? "talking" : "idle";
-            return prev;
+            return streamingRef.current ? "thinking" : "idle";
           });
-        }, 10000);
+        }, expressionMs);
         // Always update faceParams (null = clear previous stale params)
         setFaceParams(payload.faceParams ?? null);
         if (payload.faceParams) {
-          window.setTimeout(() => setFaceParams(null), 10000);
+          faceTimerRef.current = window.setTimeout(() => {
+            faceTimerRef.current = null;
+            setFaceParams(null);
+          }, expressionMs);
         }
       }
     });
 
     const offMenu = bridge.onMenuAction((action) => {
+      if (viewMode === "settings" && action === "open-settings-general") {
+        setSettingsSection("persona");
+      }
+
+      if (viewMode === "settings" && action === "open-settings-llm") {
+        setSettingsSection("intelligence");
+      }
+
       if (action === "focus-composer" || action === "expand-composer") {
         if (viewMode === "composer") {
           window.setTimeout(() => composerRef.current?.focus(), 60);
@@ -307,33 +646,37 @@ function App() {
 
       if (action === "pet-idle") {
         setPetMood("idle");
-        setActiveExpressionSet(new Set());
+        setActiveExpressionSet(retainPersistentShapes);
       }
 
       if (action === "pet-happy") {
         setPetMood("happy");
-        setActiveExpressionSet(new Set());
+        setActiveExpressionSet(retainPersistentShapes);
       }
 
       if (action === "pet-thinking") {
         setPetMood("thinking");
-        setActiveExpressionSet(new Set());
+        setActiveExpressionSet(retainPersistentShapes);
       }
     });
 
     return () => {
       offConfig();
+      offLive2DModels();
       offScale();
       offChatState();
       offMenu();
       offPosLock?.();
       offTriggerExpr?.();
       offClearExpr?.();
+      offExpressionsUpdated?.();
       offMoodUpdated?.();
     };
-  }, [bridge, viewMode]);
+  }, [bridge, viewMode, messages]);
 
   const ready = Boolean(bootstrap && configDraft);
+  const selectedLive2DModel = live2dModels.find((model) => model.id === configDraft?.appearance?.live2dModel)
+    ?? live2dModels[0];
   const selectedModelPreset = configDraft ? getModelPresetValue(configDraft.deepseek.model) : "deepseek-v4-flash";
   const isReplyStreaming = lastReplyMeta?.sourceLabel === "生成中...";
   const statusText = useMemo(() => {
@@ -351,6 +694,114 @@ function App() {
   const lastAssistantMessage = useMemo(() => {
     return [...messages].reverse().find((message) => message.role === "assistant") ?? starterMessages[0];
   }, [messages]);
+
+  useEffect(() => {
+    if (viewMode !== "bubble") return;
+    const source = sanitizeBubbleReply(lastAssistantMessage.content);
+
+    if (!source.startsWith(bubbleSourceRef.current)) {
+      bubbleConsumedRef.current = 0;
+      bubblePendingSentencesRef.current = [];
+      bubbleSegmentQueueRef.current = [];
+      bubbleSegmentTextRef.current = "";
+      setBubbleSegmentText("");
+    }
+    bubbleSourceRef.current = source;
+
+    const unread = source.slice(bubbleConsumedRef.current);
+    const parsed = takeCompleteSentences(unread);
+    bubbleConsumedRef.current += parsed.consumed;
+    bubblePendingSentencesRef.current.push(...parsed.sentences);
+
+    while (isReplyStreaming && (
+      bubblePendingSentencesRef.current.length >= 2
+      || Array.from((bubblePendingSentencesRef.current[0] ?? "").replace(/\s+/g, "")).length >= 42
+    )) {
+      const firstLength = Array.from(bubblePendingSentencesRef.current[0].replace(/\s+/g, "")).length;
+      const takeCount = firstLength >= 42 ? 1 : 2;
+      bubbleSegmentQueueRef.current.push(bubblePendingSentencesRef.current.splice(0, takeCount).join("").trim());
+    }
+
+    if (!isReplyStreaming) {
+      if (parsed.remainder.trim()) {
+        bubblePendingSentencesRef.current.push(parsed.remainder);
+        bubbleConsumedRef.current = source.length;
+      }
+      bubbleSegmentQueueRef.current.push(...groupBubbleSentences(bubblePendingSentencesRef.current));
+      bubblePendingSentencesRef.current = [];
+    }
+
+    if (!bubbleSegmentTextRef.current && bubbleSegmentQueueRef.current.length > 0) {
+      const next = bubbleSegmentQueueRef.current.shift() ?? "";
+      bubbleSegmentTextRef.current = next;
+      setBubbleSegmentText(next);
+    }
+  }, [isReplyStreaming, lastAssistantMessage.content, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "bubble" || !bubbleSegmentText) return;
+    clearBubbleTimers(bubbleTimersRef);
+    setBubbleVisible(true);
+    setBubbleFading(false);
+    clearTimer(bubbleSegmentTimerRef);
+    bubbleAudioRef.current?.pause();
+    let cancelled = false;
+
+    const advance = () => {
+      if (cancelled) return;
+      const next = bubbleSegmentQueueRef.current.shift();
+      if (next) {
+        bubbleSegmentTextRef.current = next;
+        setBubbleSegmentText(next);
+      } else {
+        bubbleSegmentTextRef.current = "";
+        if (!streamingRef.current) showBubble(true);
+      }
+    };
+
+    const scheduleTextFallback = () => {
+      const duration = clampDuration(1400 + Array.from(bubbleSegmentText).length * 72, 2200, 6800);
+      bubbleSegmentTimerRef.current = window.setTimeout(advance, duration);
+    };
+
+    const voiceReady = Boolean(
+      bridge
+      && configDraft?.voice.enabled
+      && configDraft.voice.apiKey
+      && configDraft.voice.voice
+      && configDraft.voice.model
+    );
+
+    if (voiceReady) {
+      bridge.synthesizeSpeech(bubbleSegmentText, Boolean(configDraft?.voice.asmrEnabled))
+        .then((result) => {
+          if (cancelled) return;
+          const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
+          bubbleAudioRef.current = audio;
+          audio.onended = () => {
+            if (!cancelled) bubbleSegmentTimerRef.current = window.setTimeout(advance, 320);
+          };
+          audio.onerror = () => {
+            if (!cancelled) scheduleTextFallback();
+          };
+          return audio.play();
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          console.warn("[voice] ElevenLabs playback failed, using text timing:", error);
+          scheduleTextFallback();
+        });
+    } else {
+      scheduleTextFallback();
+    }
+
+    return () => {
+      cancelled = true;
+      clearTimer(bubbleSegmentTimerRef);
+      bubbleAudioRef.current?.pause();
+      bubbleAudioRef.current = null;
+    };
+  }, [bridge, bubbleSegmentText, configDraft?.voice.apiKey, configDraft?.voice.asmrEnabled, configDraft?.voice.enabled, configDraft?.voice.model, configDraft?.voice.voice, viewMode]);
 
   useEffect(() => {
     if (viewMode !== "bubble") {
@@ -375,43 +826,69 @@ function App() {
     showBubble(true);
   }, [isReplyStreaming, lastAssistantMessage.content, viewMode]);
 
-  // ---- Auto mood: thinking → talking → idle based on AI streaming state ----
-  // During AI text generation: mouth moves (talking oscillation). LLM moods override.
-  // Starts only when content actually arrives (not during network latency / LLM thinking).
-  const talkingHoldRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!bridge || viewMode !== "bubble" || !bubbleVisible || !bubbleCardRef.current) return;
 
+    const textLength = Array.from(bubbleSegmentText.replace(/\s+/g, "")).length;
+    const cardWidth = Math.max(300, Math.min(640, Math.round(250 + Math.sqrt(Math.max(1, textLength)) * 20)));
+    const card = bubbleCardRef.current;
+    card.style.width = `${cardWidth}px`;
+
+    const frame = window.requestAnimationFrame(() => {
+      const width = cardWidth + 24;
+      const height = Math.ceil(card.offsetHeight) + 28;
+      void bridge.updateBubbleWindowSize(width, height).then((layout) => {
+        if (layout?.placement) setBubblePlacement(layout.placement);
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [bridge, bubbleSegmentText, bubbleVisible, lastReplyMeta, viewMode]);
+
+  // ---- Auto mouth movement: thinking + speaking while text is streaming ----
+  // Mouth movement is independent from the emotion mood, so expressions are not overwritten.
+  // Starts only when content actually arrives (not during network latency / LLM thinking).
   useEffect(() => {
     streamingRef.current = isReplyStreaming;
 
     if (isReplyStreaming && lastAssistantMessage.content) {
-      // Text actually flowing → start mouth animation
+      clearTimer(speakingTimerRef);
+      setPetSpeaking(true);
+      // Text actually flowing → keep a thinking base mood unless a richer mood is active.
       setPetMood(prev => {
-        if (prev === "idle" || prev === "thinking") return "talking";
+        if (prev === "idle" || prev === "talking") return "thinking";
         return prev; // keep LLM-set moods (happy/sad/etc.)
       });
     } else if (!isReplyStreaming) {
       // AI just finished — hold talking briefly (grace period for LLM mood IPC to arrive)
       // If no mood arrives within the grace period, fade back to idle.
-      if (talkingHoldRef.current !== null) window.clearTimeout(talkingHoldRef.current);
+      clearTimer(talkingHoldRef);
       talkingHoldRef.current = window.setTimeout(() => {
         talkingHoldRef.current = null;
-        setPetMood(prev => {
-          if (prev === "talking") return "idle";
-          return prev;
-        });
+        if (!lastReplyMeta?.detectedMood) {
+          setPetSpeaking(false);
+          setPetMood(prev => (prev === "thinking" || prev === "talking" ? "idle" : prev));
+        }
       }, 500);
     }
 
     return () => {
-      if (talkingHoldRef.current !== null) {
-        window.clearTimeout(talkingHoldRef.current);
-        talkingHoldRef.current = null;
-      }
+      clearTimer(talkingHoldRef);
     };
-  }, [isReplyStreaming, lastAssistantMessage.content]);
+  }, [isReplyStreaming, lastAssistantMessage.content, lastReplyMeta?.detectedMood]);
 
   useEffect(() => {
-    if (viewMode !== "chat" || !historyListRef.current) {
+    return () => {
+      clearTimer(talkingHoldRef);
+      clearTimer(moodTimerRef);
+      clearTimer(faceTimerRef);
+      clearTimer(speakingTimerRef);
+      clearMoodBeatTimers();
+    };
+  }, []);
+
+  useEffect(() => {
+    if ((viewMode !== "chat" && viewMode !== "code") || !historyListRef.current) {
       return;
     }
 
@@ -430,7 +907,16 @@ function App() {
 
     setSaving(true);
     try {
-      const saved = await bridge.saveConfig(configDraft);
+      const draftWithAsmr = {
+        ...configDraft,
+        voice: {
+          ...configDraft.voice,
+          asmrMode,
+          asmrPrompt,
+          asmrScript
+        }
+      };
+      const saved = await bridge.saveConfig(draftWithAsmr);
       setConfigDraft(saved);
       setSaveMessage("设置已保存到桌面端配置文件。");
     } finally {
@@ -560,7 +1046,7 @@ function App() {
 
     setSending(true);
     setPetMood("thinking");
-    setActiveExpressionSet(new Set());
+    setActiveExpressionSet(retainPersistentShapes);
     setInput("");
 
     try {
@@ -584,8 +1070,15 @@ function App() {
           fallbackReason: "当前为预览模式",
           sourceLabel: "预览模式"
         });
-        setPetMood("talking");
-        window.setTimeout(() => setPetMood("idle"), 2200);
+        const previewSpeechMs = estimateSpeechDurationMs(previewReply);
+        playMoodBeats(previewReply, "happy", previewSpeechMs);
+        holdSpeaking(previewSpeechMs);
+        clearTimer(moodTimerRef);
+        moodTimerRef.current = window.setTimeout(() => {
+          moodTimerRef.current = null;
+          clearMoodBeatTimers();
+          setPetMood("idle");
+        }, estimateExpressionDurationMs(previewReply));
         return;
       }
 
@@ -623,6 +1116,188 @@ function App() {
 
     const results = await bridge.searchFiles(fileQuery);
     setFileResults(results);
+  }
+
+  function handleCreateAsmrTemplate() {
+    if (asmrMode === "custom") {
+      setAsmrMessage("自定义模式可直接粘贴内容，或从 TXT / Markdown 文件导入。");
+      return;
+    }
+
+    setAsmrScript(asmrTemplates[asmrMode]);
+    setAsmrMessage(`已生成${asmrMode === "sleep" ? "哄睡" : "闲聊"}本地草稿，可继续编辑。`);
+  }
+
+  async function handleImportAsmrText() {
+    if (!bridge) {
+      setAsmrMessage("预览模式下无法打开本地文件选择器。");
+      return;
+    }
+
+    try {
+      const result = await bridge.selectAsmrTextFile();
+      if (!result) return;
+      setAsmrMode("custom");
+      setAsmrScript(result.content);
+      setAsmrMessage(`已导入 ${result.path.split(/[\\/]/).pop() ?? "文本文件"}。`);
+    } catch (error) {
+      setAsmrMessage(`导入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function handleGenerateAsmrScript() {
+    if (!bridge) {
+      setAsmrMessage("预览模式下无法调用模型生成脚本。");
+      return;
+    }
+
+    setGeneratingAsmr(true);
+    setAsmrMessage("");
+    try {
+      const prompt = asmrPrompt.trim() || (
+        asmrMode === "sleep"
+          ? "生成一段约 3 分钟的温柔哄睡耳语。"
+          : asmrMode === "casual"
+            ? "生成一段约 3 分钟的轻松休闲耳语谈话。"
+            : "生成一段自然、亲近、适合耳语朗读的 ASMR 文本。"
+      );
+      const script = await bridge.generateAsmrScript(asmrMode, prompt);
+      setAsmrScript(script);
+      setAsmrMessage("AI 耳语脚本已生成，可编辑后用于后续语音合成。");
+    } catch (error) {
+      setAsmrMessage(`生成失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setGeneratingAsmr(false);
+    }
+  }
+
+  async function handleLoadElevenLabsVoices() {
+    if (!bridge || !configDraft) return;
+    setLoadingVoices(true);
+    setAsmrMessage("");
+    try {
+      const voices = await bridge.listElevenLabsVoices(configDraft.voice);
+      setAccountVoices(voices);
+      setAsmrMessage(`ElevenLabs 已连接，读取到 ${voices.length} 个账号可用音色。`);
+    } catch (error) {
+      setAsmrMessage(`ElevenLabs 连接失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setLoadingVoices(false);
+    }
+  }
+
+  async function handlePreviewAsmrVoice() {
+    if (!bridge || !configDraft) return;
+    if (previewingVoice) {
+      voicePreviewTokenRef.current += 1;
+      voicePreviewAudioRef.current?.pause();
+      voicePreviewAudioRef.current = null;
+      setPreviewingVoice(false);
+      setAsmrMessage("试听已停止。");
+      return;
+    }
+
+    const text = asmrScript.trim() || "你好，我是 Vivi。接下来，我会用这个声音陪你说话。";
+    const chunks = splitSpeechText(text);
+    const token = voicePreviewTokenRef.current + 1;
+    voicePreviewTokenRef.current = token;
+    setPreviewingVoice(true);
+    setAsmrMessage(`正在使用 ${configDraft.voice.model} 合成试听...`);
+    try {
+      for (const chunk of chunks) {
+        if (voicePreviewTokenRef.current !== token) return;
+        const result = await bridge.synthesizeSpeech(chunk, true, configDraft.voice);
+        if (voicePreviewTokenRef.current !== token) return;
+        await new Promise<void>((resolve, reject) => {
+          const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
+          voicePreviewAudioRef.current = audio;
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error("音频播放失败。"));
+          audio.play().catch(reject);
+        });
+      }
+      setAsmrMessage(`试听完成，共播放 ${chunks.length} 个语音片段。`);
+    } catch (error) {
+      if (voicePreviewTokenRef.current === token) {
+        setAsmrMessage(`试听失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    } finally {
+      if (voicePreviewTokenRef.current === token) {
+        voicePreviewAudioRef.current = null;
+        setPreviewingVoice(false);
+      }
+    }
+  }
+
+  async function refreshLive2DModelList() {
+    if (!bridge || scanningModels) return;
+    setScanningModels(true);
+    try {
+      setLive2dModels(await bridge.refreshLive2DModels());
+    } finally {
+      setScanningModels(false);
+    }
+  }
+
+  async function openCodeFile(path: string) {
+    if (!bridge) return;
+    setCodeFileLoading(true);
+    setCodeWorkspaceError("");
+    try {
+      const result = await bridge.readCodeFile(path);
+      setActiveCodePath(result.path);
+      setActiveCodeContent(result.content);
+    } catch (error) {
+      setCodeWorkspaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCodeFileLoading(false);
+    }
+  }
+
+  function applyCodeWorkspaceSnapshot(snapshot: CodeWorkspaceSnapshot) {
+    setCodeWorkspace(snapshot);
+    setCollapsedCodeDirs(new Set(
+      snapshot.entries
+        .filter((entry) => entry.type === "directory" && entry.depth >= 1)
+        .map((entry) => entry.path)
+    ));
+    setActiveCodePath("");
+    setActiveCodeContent("");
+    setCodeFilter("");
+    const firstFile = snapshot.entries.find((entry) => entry.path === "README.md")
+      ?? snapshot.entries.find((entry) => entry.path === "package.json")
+      ?? snapshot.entries.find((entry) => entry.type === "file");
+    if (firstFile) void openCodeFile(firstFile.path);
+  }
+
+  async function selectCodeWorkspace() {
+    if (!bridge) return;
+    setCodeWorkspaceError("");
+    try {
+      const snapshot = await bridge.selectCodeWorkspace();
+      if (snapshot) applyCodeWorkspaceSnapshot(snapshot);
+    } catch (error) {
+      setCodeWorkspaceError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function refreshCodeWorkspace() {
+    if (!bridge) return;
+    setCodeWorkspaceError("");
+    try {
+      applyCodeWorkspaceSnapshot(await bridge.getCodeWorkspace());
+    } catch (error) {
+      setCodeWorkspaceError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function toggleCodeDirectory(path: string) {
+    setCollapsedCodeDirs((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -735,7 +1410,98 @@ function App() {
           </div>
         </header>
 
-        <div className="settings-grid">
+        <div className="settings-product-layout">
+          <nav className="settings-navigation" aria-label="设置分类">
+            <div className="settings-nav-title">
+              <strong>设置</strong>
+              <span>{statusText}</span>
+            </div>
+            <div className="settings-nav-items">
+              {settingsSections.map((section) => (
+                <button
+                  className={settingsSection === section.id ? "is-active" : ""}
+                  type="button"
+                  key={section.id}
+                  onClick={() => setSettingsSection(section.id)}
+                >
+                  <strong>{section.label}</strong>
+                  <span>{section.description}</span>
+                </button>
+              ))}
+            </div>
+            <div className="settings-nav-footer">
+              <button className="settings-save-button" type="button" onClick={handleSave} disabled={saving}>
+                {saving ? "正在保存..." : "保存更改"}
+              </button>
+              {saveMessage ? <p>{saveMessage}</p> : null}
+            </div>
+          </nav>
+
+          <div className={`settings-grid settings-tab-${settingsSection}`}>
+          <section className="panel-block personalization-panel">
+            <p className="eyebrow">个性化</p>
+            <p className="settings-section-description">选择更适合当前环境的界面主题。保存后会同步到所有日常窗口。</p>
+            <div className="theme-choice-grid" role="radiogroup" aria-label="界面主题">
+              <button
+                className={`theme-choice ${configDraft.appearance?.theme !== "dark" ? "is-selected" : ""}`}
+                type="button"
+                role="radio"
+                aria-checked={configDraft.appearance?.theme !== "dark"}
+                onClick={() => setConfigDraft({ ...configDraft, appearance: { ...configDraft.appearance, theme: "light" } })}
+              >
+                <span className="theme-preview theme-preview-light"><i /><i /><i /></span>
+                <strong>明亮</strong>
+                <small>清爽、柔和，适合白天使用</small>
+              </button>
+              <button
+                className={`theme-choice ${configDraft.appearance?.theme === "dark" ? "is-selected" : ""}`}
+                type="button"
+                role="radio"
+                aria-checked={configDraft.appearance?.theme === "dark"}
+                onClick={() => setConfigDraft({ ...configDraft, appearance: { ...configDraft.appearance, theme: "dark" } })}
+              >
+                <span className="theme-preview theme-preview-dark"><i /><i /><i /></span>
+                <strong>暗色</strong>
+                <small>低亮度、沉浸，适合夜间使用</small>
+              </button>
+            </div>
+            <div className="model-choice-section">
+              <p className="eyebrow">Live2D 模型</p>
+              <div className="model-choice-grid" role="radiogroup" aria-label="Live2D 模型">
+                {live2dModels.map((model) => (
+                  <button
+                    className={`model-choice ${configDraft.appearance?.live2dModel === model.id ? "is-selected" : ""}`}
+                    type="button"
+                    role="radio"
+                    aria-checked={configDraft.appearance?.live2dModel === model.id}
+                    key={model.id}
+                    onClick={() => setConfigDraft({
+                      ...configDraft,
+                      appearance: { ...configDraft.appearance, live2dModel: model.id }
+                    })}
+                  >
+                    <strong>{model.label}</strong>
+                    <small>{model.detail}</small>
+                  </button>
+                ))}
+              </div>
+              <div className="model-library-actions">
+                <input
+                  aria-label="用户模型目录"
+                  value={dataPathInfo ? `${dataPathInfo.dataDir}\\models` : "%APPDATA%\\v-manager\\agent-data\\models"}
+                  readOnly
+                  onClick={(event) => event.currentTarget.select()}
+                />
+                <button className="ghost-button compact" type="button" onClick={() => void bridge?.openLive2DModelsFolder()}>
+                  打开模型目录
+                </button>
+                <button className="ghost-button compact" type="button" disabled={scanningModels} onClick={() => void refreshLive2DModelList()}>
+                  {scanningModels ? "扫描中..." : "重新扫描"}
+                </button>
+              </div>
+            </div>
+          </section>
+
           <section className="panel-block">
             <p className="eyebrow">人设设定</p>
             <label>
@@ -1167,6 +1933,229 @@ function App() {
               <p className="knowledge-hint">数据存储在系统默认应用数据目录（%APPDATA%/v-manager/agent-data/）。</p>
             )}
           </section>
+
+          <section className="panel-block voice-settings-panel">
+            <div className="section-header-row voice-section-header">
+              <div>
+                <p className="eyebrow">语音与 ASMR</p>
+                <p className="settings-section-description">ElevenLabs V3 已接入。回复气泡会等待当前语音播放结束，再继续下一段。</p>
+              </div>
+              <label className="voice-switch">
+                <input
+                  type="checkbox"
+                  checked={configDraft.voice.enabled}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, enabled: event.target.checked }
+                  })}
+                />
+                启用语音输出
+              </label>
+            </div>
+
+            <div className="voice-config-grid">
+              <label className="voice-config-wide">
+                ElevenLabs Base URL
+                <input
+                  value={configDraft.voice.baseUrl}
+                  placeholder="https://api.elevenlabs.io/v1"
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, baseUrl: event.target.value }
+                  })}
+                />
+              </label>
+              <label>
+                API Key
+                <input
+                  type="password"
+                  value={configDraft.voice.apiKey}
+                  placeholder="sk-..."
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, apiKey: event.target.value }
+                  })}
+                />
+              </label>
+              <label>
+                语音模型
+                <select
+                  value={configDraft.voice.model}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, model: event.target.value }
+                  })}
+                >
+                  {elevenLabsModelPresets.map((model) => <option value={model.value} key={model.value}>{model.label}</option>)}
+                </select>
+              </label>
+              <label>
+                官方与账号音色
+                <select
+                  value={configDraft.voice.voice}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, voice: event.target.value }
+                  })}
+                >
+                  {!availableVoiceOptions.some((voice) => voice.voiceId === configDraft.voice.voice) && configDraft.voice.voice ? (
+                    <option value={configDraft.voice.voice}>自定义 · {configDraft.voice.voice}</option>
+                  ) : null}
+                  {availableVoiceOptions.map((voice) => (
+                    <option value={voice.voiceId} key={voice.voiceId}>{voice.name} · {voice.category}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                自定义 Voice ID
+                <input
+                  value={configDraft.voice.voice}
+                  placeholder="voice_id"
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, voice: event.target.value.trim() }
+                  })}
+                />
+              </label>
+              <label>
+                输出格式
+                <select
+                  value={configDraft.voice.outputFormat}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, outputFormat: event.target.value }
+                  })}
+                >
+                  <option value="mp3_44100_128">MP3 · 44.1kHz · 128kbps</option>
+                  <option value="mp3_22050_32">MP3 · 22.05kHz · 32kbps</option>
+                </select>
+              </label>
+              <label className="voice-speed-control">
+                <span>稳定度 <strong>{configDraft.voice.stability === 0 ? "Creative" : configDraft.voice.stability === 1 ? "Robust" : "Natural"}</strong></span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.5"
+                  value={configDraft.voice.stability}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, stability: Number(event.target.value) }
+                  })}
+                />
+              </label>
+              <label className="voice-speed-control">
+                <span>相似度 <strong>{Math.round(configDraft.voice.similarityBoost * 100)}%</strong></span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={configDraft.voice.similarityBoost}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, similarityBoost: Number(event.target.value) }
+                  })}
+                />
+              </label>
+              <label className="voice-speed-control">
+                <span>语速 <strong>{configDraft.voice.model === "eleven_v3" ? "V3 使用标签控制" : `${configDraft.voice.speed.toFixed(2)}x`}</strong></span>
+                <input
+                  type="range"
+                  min="0.7"
+                  max="1.2"
+                  step="0.05"
+                  value={configDraft.voice.speed}
+                  disabled={configDraft.voice.model === "eleven_v3"}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    voice: { ...configDraft.voice, speed: Number(event.target.value) }
+                  })}
+                />
+              </label>
+              <div className="voice-connect-row voice-config-wide">
+                <button className="ghost-button compact" type="button" onClick={() => void handleLoadElevenLabsVoices()} disabled={loadingVoices || !configDraft.voice.apiKey}>
+                  {loadingVoices ? "正在读取..." : "连接并刷新账号音色"}
+                </button>
+                <span>{elevenLabsModelPresets.find((model) => model.value === configDraft.voice.model)?.hint}</span>
+              </div>
+            </div>
+
+            <div className="asmr-workspace">
+              <div className="asmr-workspace-heading">
+                <div>
+                  <strong>耳语脚本</strong>
+                  <span>支持本地草稿、文本导入和模型生成</span>
+                </div>
+                <label className="voice-switch">
+                  <input
+                    type="checkbox"
+                    checked={configDraft.voice.asmrEnabled}
+                    onChange={(event) => setConfigDraft({
+                      ...configDraft,
+                      voice: { ...configDraft.voice, asmrEnabled: event.target.checked }
+                    })}
+                  />
+                  ASMR 模式
+                </label>
+              </div>
+
+              <div className="asmr-mode-selector" role="radiogroup" aria-label="ASMR 内容类型">
+                {asmrModes.map((mode) => (
+                  <button
+                    className={asmrMode === mode.id ? "is-active" : ""}
+                    type="button"
+                    role="radio"
+                    aria-checked={asmrMode === mode.id}
+                    key={mode.id}
+                    onClick={() => setAsmrMode(mode.id)}
+                  >
+                    <strong>{mode.label}</strong>
+                    <span>{mode.description}</span>
+                  </button>
+                ))}
+              </div>
+
+              <label>
+                生成要求
+                <input
+                  value={asmrPrompt}
+                  placeholder="例如：雨夜、语气很轻、约 5 分钟，不要重复句子"
+                  onChange={(event) => setAsmrPrompt(event.target.value)}
+                />
+              </label>
+              <label>
+                脚本文本
+                <textarea
+                  className="asmr-script-editor"
+                  rows={10}
+                  value={asmrScript}
+                  placeholder="在这里编辑耳语内容，或使用下方操作生成、导入。"
+                  onChange={(event) => setAsmrScript(event.target.value)}
+                />
+              </label>
+
+              <div className="asmr-actions">
+                <button className="primary-button" type="button" onClick={() => void handlePreviewAsmrVoice()} disabled={!configDraft.voice.apiKey || !configDraft.voice.voice}>
+                  {previewingVoice ? "停止试听" : "试听当前脚本"}
+                </button>
+                <button className="primary-button" type="button" onClick={() => void handleGenerateAsmrScript()} disabled={generatingAsmr}>
+                  {generatingAsmr ? "生成中..." : "AI 生成脚本"}
+                </button>
+                <button className="ghost-button compact" type="button" onClick={handleCreateAsmrTemplate} disabled={asmrMode === "custom"}>
+                  使用本地草稿
+                </button>
+                <button className="ghost-button compact" type="button" onClick={() => void handleImportAsmrText()}>
+                  导入文本
+                </button>
+                <button className="ghost-button compact" type="button" onClick={() => { setAsmrScript(""); setAsmrMessage(""); }} disabled={!asmrScript}>
+                  清空
+                </button>
+              </div>
+              {asmrMessage ? <p className="feedback-text">{asmrMessage}</p> : null}
+            </div>
+          </section>
+          </div>
         </div>
       </div>
     );
@@ -1175,11 +2164,12 @@ function App() {
   if (viewMode === "scale") {
     return (
       <div className="scale-window-shell">
+        <div className="window-drag-strip drag-region" aria-hidden="true" />
         <div className="scale-window-card">
-          <div className="panel-mini-header">
+          <div className="panel-mini-header drag-region scale-window-header">
             <div>
               <p className="eyebrow">模型大小</p>
-              <strong>稳定区间 80% - 116%</strong>
+              <strong>显示比例 80% - 150%</strong>
             </div>
             <span className="scale-value">{Math.round(draftPetScale * 100)}%</span>
           </div>
@@ -1187,11 +2177,24 @@ function App() {
           <input
             type="range"
             min={0.8}
-            max={1.16}
+            max={1.5}
             step={0.01}
             value={draftPetScale}
             onChange={(event) => setDraftPetScale(clampPetScale(Number(event.target.value)))}
           />
+
+          <div className="scale-presets" aria-label="常用模型比例">
+            {[0.8, 1, 1.25, 1.5].map((preset) => (
+              <button
+                className={Math.abs(draftPetScale - preset) < 0.005 ? "is-active" : ""}
+                type="button"
+                key={preset}
+                onClick={() => setDraftPetScale(preset)}
+              >
+                {Math.round(preset * 100)}%
+              </button>
+            ))}
+          </div>
 
           <p className="scale-hint">为避免桌宠主窗闪烁，当前改成单独窗口调节，点击应用后再更新模型。</p>
 
@@ -1272,8 +2275,9 @@ function App() {
   if (viewMode === "chat") {
     return (
       <div className="chat-window-shell">
+        <div className="window-drag-strip drag-region" aria-hidden="true" />
         <section className="chat-window-panel">
-          <div className="panel-mini-header">
+          <div className="panel-mini-header drag-region chat-window-header">
             <div>
               <p className="eyebrow">聊天栏</p>
               <strong>{configDraft.personaName} 历史上下文</strong>
@@ -1316,6 +2320,156 @@ function App() {
   }
 
 
+  if (viewMode === "code") {
+    const normalizedFilter = codeFilter.trim().toLowerCase();
+    const visibleEntries = codeWorkspace?.entries.filter((entry) => (
+      normalizedFilter
+        ? entry.path.toLowerCase().includes(normalizedFilter)
+        : ![...collapsedCodeDirs].some((directory) => (
+            entry.path !== directory
+            && (entry.path.startsWith(`${directory}\\`) || entry.path.startsWith(`${directory}/`))
+          ))
+    )) ?? [];
+    const codeLines = activeCodeContent.split(/\r?\n/).slice(0, 5000);
+
+    return (
+      <div className="code-workbench-shell">
+        <header className="code-workbench-header">
+          <div className="code-brand">
+            <strong>Vivi Code</strong>
+            <span>{codeWorkspace?.root ?? "正在读取工作区..."}</span>
+          </div>
+          <div className="code-header-actions">
+            <span className={`runtime-badge ${lastReplyMeta?.responseMode ?? "fallback_local"}`}>
+              {sending ? "Vivi 正在处理" : lastReplyMeta?.sourceLabel ?? "代码会话就绪"}
+            </span>
+            <button className="code-icon-button" type="button" aria-label="关闭代码工作台" title="关闭" onClick={() => window.close()}>
+              ×
+            </button>
+          </div>
+        </header>
+
+        <main className="code-workbench-grid">
+          <aside className="code-explorer">
+            <div className="code-pane-title">
+              <strong>资源管理器</strong>
+              <button className="code-refresh-button" type="button" title="刷新文件树" aria-label="刷新文件树" onClick={() => void refreshCodeWorkspace()}>
+                ↻
+              </button>
+            </div>
+            <div className="code-workspace-actions">
+              <button type="button" onClick={() => void selectCodeWorkspace()}>打开文件夹</button>
+              <button type="button" onClick={() => void bridge?.openChatWindow()}>日常对话</button>
+            </div>
+            <input
+              className="code-file-filter"
+              value={codeFilter}
+              onChange={(event) => setCodeFilter(event.target.value)}
+              placeholder="筛选文件"
+              aria-label="筛选工作区文件"
+            />
+            <div className="code-file-tree">
+              {visibleEntries.map((entry) => (
+                entry.type === "directory" ? (
+                  <button
+                    className={`code-tree-directory ${collapsedCodeDirs.has(entry.path) ? "is-collapsed" : ""}`}
+                    style={{ paddingLeft: 10 + entry.depth * 14 }}
+                    key={`directory-${entry.path}`}
+                    title={entry.path}
+                    type="button"
+                    onClick={() => toggleCodeDirectory(entry.path)}
+                  >
+                    <span>{collapsedCodeDirs.has(entry.path) ? "›" : "⌄"}</span>{entry.name}
+                  </button>
+                ) : (
+                  <button
+                    className={`code-tree-file ${activeCodePath === entry.path ? "is-active" : ""}`}
+                    style={{ paddingLeft: 24 + entry.depth * 14 }}
+                    type="button"
+                    key={`file-${entry.path}`}
+                    title={entry.path}
+                    onClick={() => void openCodeFile(entry.path)}
+                  >
+                    {entry.name}
+                  </button>
+                )
+              ))}
+            </div>
+          </aside>
+
+          <section className="code-editor-pane">
+            <div className="code-editor-tabbar">
+              <span className={activeCodePath ? "is-open" : ""}>{activeCodePath || "选择一个文件"}</span>
+              {codeFileLoading ? <small>读取中...</small> : <small>只读预览</small>}
+            </div>
+            {codeWorkspaceError ? <div className="code-empty-state">{codeWorkspaceError}</div> : null}
+            {!codeWorkspaceError && activeCodePath ? (
+              <pre className="code-editor-content" aria-label={activeCodePath}>
+                {codeLines.map((line, index) => (
+                  <div className="code-line" key={`${activeCodePath}-${index}`}>
+                    <span>{index + 1}</span>
+                    <code>{line || " "}</code>
+                  </div>
+                ))}
+              </pre>
+            ) : null}
+            {!codeWorkspaceError && !activeCodePath ? (
+              <div className="code-empty-state">从左侧选择文件，或直接让 Vivi 检查项目。</div>
+            ) : null}
+          </section>
+
+          <aside className="code-agent-pane">
+            <div className="code-pane-title code-agent-title">
+              <div>
+                <strong>{configDraft.personaName}</strong>
+                <span>代码会话与日常记忆共享</span>
+              </div>
+            </div>
+            <div className="code-terminal-chat" ref={historyListRef}>
+              {messages.map((message, index) => (
+                <article className={`code-terminal-message ${message.role}`} key={`code-${message.role}-${index}`}>
+                  <span>{message.role === "assistant" ? configDraft.personaName.toLowerCase() : "you"} &gt;</span>
+                  <p>{message.content}</p>
+                </article>
+              ))}
+            </div>
+            <div className="code-quick-actions">
+              <button type="button" onClick={() => setInput("检查当前项目结构并告诉我最值得处理的问题")}>检查项目</button>
+              <button
+                type="button"
+                disabled={!activeCodePath}
+                onClick={() => setInput(`解释 ${activeCodePath} 的职责和关键逻辑`)}
+              >
+                解释当前文件
+              </button>
+            </div>
+            <form className="code-agent-composer" onSubmit={handleSend}>
+              <textarea
+                ref={composerRef}
+                placeholder="和 Vivi 聊天，或让她搜索、解释、修改代码..."
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                rows={5}
+              />
+              <div className="code-composer-footer">
+                <span>Enter 发送 · Shift + Enter 换行</span>
+                <button className="primary-button compact-primary" type="submit" disabled={sending || !input.trim()}>
+                  {sending ? "处理中..." : "发送"}
+                </button>
+              </div>
+            </form>
+          </aside>
+        </main>
+      </div>
+    );
+  }
+
+  function handlePetInteractionChange(interactive: boolean) {
+    if (dragStateRef.current || !bridge || viewMode !== "pet") return;
+    bridge.setPetMousePassthrough(!interactive);
+  }
+
   if (viewMode === "expressions") {
     const expressions = [
       { name: "expression0", label: "豆豆眼", cat: "情绪" },
@@ -1353,16 +2507,15 @@ function App() {
     ];
     const cats = ["情绪", "形态", "动作"];
     return (
-      <div className="settings-shell" style={{padding: '14px'}}>
-        <header className="settings-header" style={{marginBottom: '10px', padding: '14px 18px'}}>
+      <div className="expression-window-shell">
+        <header className="expression-window-header">
           <p className="eyebrow">表情与动作</p>
           <h1>芊芊</h1>
           <p className="settings-subtitle">点击开关，可多选组合</p>
         </header>
-        <div style={{marginBottom: '12px', padding: '0 14px'}}>
+        <div className="expression-reset-bar">
           <button
-            className="ghost-button compact"
-            style={{width: '100%', padding: '8px', fontSize: '12px'}}
+            className="expression-reset-button"
             onClick={() => bridge?.clearExpressions()}
           >
             全部清除
@@ -1375,7 +2528,7 @@ function App() {
               {expressions.filter(e => e.cat === cat).map(e => (
                 <button
                   key={e.name}
-                  className="ghost-button compact"
+                  className={`ghost-button compact ${activeExpressionSet.has(e.name) ? "is-active" : ""}`}
                   style={{padding: '8px 6px', fontSize: '12px', textAlign: 'center'}}
                   onClick={() => bridge?.triggerExpression(e.name)}
                 >
@@ -1393,9 +2546,9 @@ function App() {
 
   if (viewMode === "bubble") {
     return (
-      <div className="bubble-window-shell">
+      <div className={`bubble-window-shell placement-${bubblePlacement}`}>
         {bubbleVisible ? (
-          <article className={`speech-bubble assistant-bubble bubble-window-card ${bubbleFading ? "is-fading" : ""}`}>
+          <article ref={bubbleCardRef} className={`speech-bubble assistant-bubble bubble-window-card ${bubbleFading ? "is-fading" : ""}`}>
             <div className="bubble-card-header">
               <span className="message-role">{configDraft.personaName}</span>
               <button
@@ -1419,7 +2572,7 @@ function App() {
                 </span>
               </div>
             ) : null}
-            <p>{lastAssistantMessage.content}</p>
+            <p>{bubbleSegmentText || "..."}</p>
           </article>
         ) : null}
       </div>
@@ -1438,7 +2591,17 @@ function App() {
             onPointerUp={handleInteractionPointerEnd}
             onPointerCancel={handleInteractionPointerEnd}
           >
-            <Live2DPreview mood={petMood} scale={petScale} activeExpressionSet={activeExpressionSet} faceParams={faceParams} />
+            <Live2DPreview
+              mood={petMood}
+              modelId={selectedLive2DModel?.id ?? "qianqian"}
+              modelName={selectedLive2DModel?.label}
+              modelDirectory={selectedLive2DModel?.directory}
+              modelFileName={selectedLive2DModel?.fileName}
+              activeExpressionSet={activeExpressionSet}
+              faceParams={faceParams}
+              speaking={petSpeaking}
+              onInteractionChange={handlePetInteractionChange}
+            />
           </div>
         </div>
       </div>

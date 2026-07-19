@@ -30,14 +30,51 @@ interface AgentConfig {
     baseUrl: string;
     model: string;
   };
+  appearance: {
+    theme: "light" | "dark";
+    live2dModel: string;
+  };
+  voice: {
+    enabled: boolean;
+    provider: "elevenlabs";
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    voice: string;
+    outputFormat: string;
+    speed: number;
+    stability: number;
+    similarityBoost: number;
+    asmrEnabled: boolean;
+    asmrMode: "sleep" | "casual" | "custom";
+    asmrPrompt: string;
+    asmrScript: string;
+  };
   memory: {
     maxMessages: number;
     knowledgeTopK: number;
   };
 }
 
+interface Live2DModelOption {
+  id: string;
+  label: string;
+  detail: string;
+  directory?: string;
+  fileName?: string;
+  builtIn: boolean;
+}
+
+interface ElevenLabsVoiceOption {
+  voiceId: string;
+  name: string;
+  category: string;
+  previewUrl: string;
+}
+
 interface AgentBootstrap {
   config: AgentConfig;
+  live2dModels?: Live2DModelOption[];
   knowledgeFiles: string[];
   abilities: AgentAbility[];
   runtime?: {
@@ -69,6 +106,20 @@ interface ChatWindowState {
   }>;
   knowledge: AgentKnowledge[];
   lastReplyMeta: (ChatResult["meta"] & { sourceLabel: string }) | null;
+}
+
+interface CodeWorkspaceEntry {
+  type: "file" | "directory";
+  name: string;
+  path: string;
+  depth: number;
+}
+
+interface CodeWorkspaceSnapshot {
+  ok: boolean;
+  root: string;
+  entries: CodeWorkspaceEntry[];
+  truncated: boolean;
 }
 
 interface FileSearchResult {
@@ -151,6 +202,13 @@ interface Window {
   agentDesktop?: {
     getBootstrap: () => Promise<AgentBootstrap>;
     saveConfig: (config: AgentConfig) => Promise<AgentConfig>;
+    getLive2DModels: () => Promise<Live2DModelOption[]>;
+    refreshLive2DModels: () => Promise<Live2DModelOption[]>;
+    openLive2DModelsFolder: () => Promise<string>;
+    selectAsmrTextFile: () => Promise<{ path: string; content: string } | null>;
+    generateAsmrScript: (mode: string, prompt: string) => Promise<string>;
+    listElevenLabsVoices: (voiceConfig?: AgentConfig["voice"]) => Promise<ElevenLabsVoiceOption[]>;
+    synthesizeSpeech: (text: string, asmr: boolean, voiceConfig?: AgentConfig["voice"]) => Promise<{ audioBase64: string; mimeType: string; requestId: string; characterCost: string }>;
     chat: (payload: { message: string }) => Promise<ChatWindowState>;
     searchFiles: (query: string) => Promise<FileSearchResult[]>;
     getAppRegistry: () => Promise<AppRegistrySnapshot>;
@@ -167,26 +225,35 @@ interface Window {
     openSettingsWindow: () => Promise<boolean>;
     openComposerWindow: () => Promise<boolean>;
     openChatWindow: () => Promise<boolean>;
+    openCodeWindow: () => Promise<boolean>;
     openScaleWindow: () => Promise<boolean>;
     openExpressionWindow: () => Promise<boolean>;
     triggerExpression: (name: string) => Promise<boolean>;
     clearExpressions: () => Promise<boolean>;
     getChatState: () => Promise<ChatWindowState>;
+    getCodeWorkspace: () => Promise<CodeWorkspaceSnapshot>;
+    selectCodeWorkspace: () => Promise<CodeWorkspaceSnapshot | null>;
+    readCodeFile: (path: string) => Promise<{ ok: boolean; path: string; content: string; truncated: boolean }>;
     getPetWindowBounds: () => Promise<{ x: number; y: number; width: number; height: number }>;
     getPetScale: () => Promise<number>;
     getPositionLock: () => Promise<boolean>;
     setPositionLock: (locked: boolean) => Promise<boolean>;
     setPetWindowPosition: (x: number, y: number) => Promise<boolean>;
+    setPetMousePassthrough: (ignore: boolean) => void;
     updatePetWindowLayout: (scale: number) => Promise<{ width: number; height: number } | null>;
+    updateBubbleWindowSize: (width: number, height: number) => Promise<{ placement: "left" | "right" } | null>;
     getDataPath: () => Promise<{ baseDir: string; dataDir: string; configPath: string; memoryPath: string; knowledgeDir: string; ragDir: string; registryDir: string }>;
     openDataFolder: () => Promise<boolean>;
     onMenuAction: (callback: (action: string) => void) => () => void;
     onConfigUpdated: (callback: (config: AgentConfig) => void) => () => void;
+    onLive2DModelsUpdated: (callback: (models: Live2DModelOption[]) => void) => () => void;
     onPetScaleUpdated: (callback: (scale: number) => void) => () => void;
     onChatStateUpdated: (callback: (state: ChatWindowState) => void) => () => void;
+    onBubblePlacementUpdated: (callback: (placement: "left" | "right") => void) => () => void;
     onPositionLockUpdated: (callback: (locked: boolean) => void) => () => void;
     onTriggerExpression: (callback: (name: string) => void) => () => void;
     onClearExpressions: (callback: () => void) => () => void;
-    onMoodUpdated?: (callback: (payload: { mood: string; faceParams: Record<string, number> | null }) => void) => () => void;
+    onExpressionsUpdated: (callback: (expressions: string[]) => void) => () => void;
+    onMoodUpdated?: (callback: (payload: { mood: string; faceParams: Record<string, number> | null; reply?: string }) => void) => () => void;
   };
 }

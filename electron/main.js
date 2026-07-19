@@ -1,4 +1,6 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from "electron";
+import { watch } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -7,22 +9,31 @@ import {
   defaultConfig,
   ensureDataFiles,
   getAppRegistrySnapshot,
+  getActiveWorkspaceDir,
   getConfigPath,
   getFileManagerSnapshot,
   getRagStatus,
   getSystemResourceSnapshot,
+  generateAsmrScript,
   listKnowledgeFiles,
   loadConfig,
   rebuildAppRegistry,
   rebuildKnowledgeIndex,
   saveConfig,
+  setActiveWorkspaceDir,
   searchLocalFiles,
   testDeepSeekConnection,
   testEmbeddingConnection
 } from "../src-agent/core.js";
+import { listWorkspaceCodeFiles, readWorkspaceCode } from "../src-agent/code-executor.js";
+import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: "vivi-model", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
+]);
 
 const isDev = !app.isPackaged;
 const devServerUrl = "http://localhost:5173";
@@ -32,9 +43,132 @@ let scaleWindow = null;
 let composerWindow = null;
 let chatWindow = null;
 let bubbleWindow = null;
+let bubbleContentSize = { width: 330, height: 180 };
 let expressionWindow = null;
+let codeWindow = null;
+let currentAppearanceTheme = "light";
+let currentAgentConfig = defaultConfig;
 let petWindowScale = 1;
 let positionLocked = false;
+let activeManualExpressions = new Set();
+const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
+const builtInLive2DModels = [
+  { id: "qianqian", label: "芊芊", detail: "完整表情、形态与动作适配", builtIn: true },
+  { id: "hiyori", label: "Hiyori", detail: "Cubism 官方示例模型", builtIn: true },
+  { id: "epsilon", label: "Epsilon", detail: "轻量免费示例模型", builtIn: true }
+];
+let live2dModelOptions = [...builtInLive2DModels];
+let customModelRoots = new Map();
+let modelDirectoryWatcher = null;
+let modelScanTimer = null;
+
+function mergeAgentConfig(nextConfig = {}) {
+  return {
+    ...defaultConfig,
+    ...nextConfig,
+    deepseek: { ...defaultConfig.deepseek, ...(nextConfig.deepseek ?? {}) },
+    embedding: { ...defaultConfig.embedding, ...(nextConfig.embedding ?? {}) },
+    appearance: { ...defaultConfig.appearance, ...(nextConfig.appearance ?? {}) },
+    voice: {
+      ...defaultConfig.voice,
+      ...(nextConfig.voice ?? {}),
+      baseUrl: nextConfig.voice?.baseUrl || defaultConfig.voice.baseUrl,
+      model: nextConfig.voice?.model || defaultConfig.voice.model,
+      voice: nextConfig.voice?.voice || defaultConfig.voice.voice
+    },
+    memory: { ...defaultConfig.memory, ...(nextConfig.memory ?? {}) }
+  };
+}
+
+function getLive2DModelsDirectory() {
+  return path.join(app.getPath("userData"), "agent-data", "models");
+}
+
+async function findModelFiles(root, directory = root, depth = 0) {
+  if (depth > 4) return [];
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const files = [];
+  for (const entry of entries) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await findModelFiles(root, target, depth + 1));
+    else if (entry.isFile() && entry.name.toLowerCase().endsWith(".model3.json")) files.push(target);
+  }
+  return files;
+}
+
+async function readCustomModelOption(modelsDirectory, modelFile) {
+  try {
+    const definition = JSON.parse(await fs.readFile(modelFile, "utf8"));
+    const modelRoot = path.dirname(modelFile);
+    const requiredFiles = [definition?.FileReferences?.Moc, ...(definition?.FileReferences?.Textures ?? [])]
+      .filter(Boolean)
+      .map((file) => path.resolve(modelRoot, file));
+    if (!definition?.FileReferences?.Moc || requiredFiles.some((file) => {
+      const relative = path.relative(modelRoot, file);
+      return relative.startsWith("..") || path.isAbsolute(relative);
+    })) return null;
+    for (const file of requiredFiles) await fs.access(file);
+
+    const relativeModelFile = path.relative(modelsDirectory, modelFile).replaceAll("\\", "/");
+    const id = `custom-${Buffer.from(relativeModelFile).toString("base64url")}`;
+    const baseName = path.basename(modelFile).replace(/\.model3\.json$/i, "");
+    const parentName = path.basename(modelRoot);
+    return {
+      id,
+      label: baseName || parentName,
+      detail: `用户模型 · ${path.relative(modelsDirectory, modelRoot) || parentName}`,
+      directory: `vivi-model://local/${encodeURIComponent(id)}/`,
+      fileName: path.basename(modelFile),
+      builtIn: false,
+      root: modelRoot
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function refreshLive2DModels({ broadcast = true } = {}) {
+  const modelsDirectory = getLive2DModelsDirectory();
+  await fs.mkdir(modelsDirectory, { recursive: true });
+  const customModels = (await Promise.all(
+    (await findModelFiles(modelsDirectory)).map((file) => readCustomModelOption(modelsDirectory, file))
+  )).filter(Boolean);
+
+  customModelRoots = new Map(customModels.map((model) => [model.id, model.root]));
+  live2dModelOptions = [
+    ...builtInLive2DModels,
+    ...customModels.map(({ root: _root, ...model }) => model)
+  ];
+
+  if (!live2dModelOptions.some((model) => model.id === currentAgentConfig.appearance?.live2dModel)) {
+    currentAgentConfig = mergeAgentConfig({
+      ...currentAgentConfig,
+      appearance: { ...currentAgentConfig.appearance, live2dModel: "qianqian" }
+    });
+    await saveConfig(app.getPath("userData"), currentAgentConfig);
+    broadcastConfigUpdated(currentAgentConfig);
+  }
+
+  if (broadcast) broadcastLive2DModels();
+  return live2dModelOptions;
+}
+
+function startLive2DModelWatcher() {
+  const modelsDirectory = getLive2DModelsDirectory();
+  modelDirectoryWatcher?.close();
+  modelDirectoryWatcher = watch(modelsDirectory, { recursive: true }, () => {
+    if (modelScanTimer) clearTimeout(modelScanTimer);
+    modelScanTimer = setTimeout(() => { void refreshLive2DModels(); }, 500);
+  });
+}
+
+function getModelContentType(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".json") return "application/json";
+  if (extension === ".png") return "image/png";
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  return "application/octet-stream";
+}
 let chatState = {
   messages: [
     {
@@ -45,6 +179,48 @@ let chatState = {
   knowledge: [],
   lastReplyMeta: null
 };
+
+function getTitleBarOverlay(theme = currentAppearanceTheme, forceDark = false) {
+  const dark = forceDark || theme === "dark";
+  return {
+    color: dark ? "#111417" : "#ffffff",
+    symbolColor: dark ? "#dce3e6" : "#31383c",
+    height: 36
+  };
+}
+
+function updateTitleBarOverlays() {
+  const themedWindows = [settingsWindow, chatWindow, scaleWindow, expressionWindow];
+  for (const win of themedWindows) {
+    if (win && !win.isDestroyed()) win.setTitleBarOverlay(getTitleBarOverlay());
+  }
+  if (codeWindow && !codeWindow.isDestroyed()) {
+    codeWindow.setTitleBarOverlay(getTitleBarOverlay("dark", true));
+  }
+}
+
+function getCodeWorkspaceStatePath() {
+  return path.join(app.getPath("userData"), "agent-data", "code-workspace.json");
+}
+
+async function restoreCodeWorkspace() {
+  try {
+    const saved = JSON.parse(await fs.readFile(getCodeWorkspaceStatePath(), "utf-8"));
+    const stat = await fs.stat(saved.path);
+    if (stat.isDirectory()) setActiveWorkspaceDir(saved.path);
+  } catch {
+    // First launch or a removed folder: keep the process working directory.
+  }
+}
+
+async function persistCodeWorkspace() {
+  await fs.mkdir(path.dirname(getCodeWorkspaceStatePath()), { recursive: true });
+  await fs.writeFile(
+    getCodeWorkspaceStatePath(),
+    JSON.stringify({ path: getActiveWorkspaceDir() }, null, 2),
+    "utf-8"
+  );
+}
 
 function getReplySourceLabel(meta) {
   if (!meta) {
@@ -63,11 +239,10 @@ function getReplySourceLabel(meta) {
 }
 
 function getPetWindowSize(scale = petWindowScale) {
-  const normalized = Math.max(0.8, Math.min(1.16, scale));
-  const delta = normalized - 1;
+  const normalized = Math.max(0.8, Math.min(1.5, scale));
   return {
-    width: Math.round(640 + delta * 800),
-    height: Math.round(960 + delta * 1400)
+    width: Math.round(640 * normalized),
+    height: Math.round(960 * normalized)
   };
 }
 
@@ -81,54 +256,61 @@ function loadView(win, view) {
   }
 }
 
-function getChatWindowBounds() {
-  if (!petWindow || petWindow.isDestroyed()) {
-    return {
-      width: 460,
-      height: 640
-    };
-  }
+function getWindowBoundsNearPet(width, height, verticalOffset) {
+  if (!petWindow || petWindow.isDestroyed()) return { width, height };
 
-  const bounds = petWindow.getBounds();
+  const petBounds = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(petBounds).workArea;
+  const gap = 18;
+  const spaceRight = workArea.x + workArea.width - (petBounds.x + petBounds.width);
+  const spaceLeft = petBounds.x - workArea.x;
+  const placeRight = spaceRight >= width + gap || spaceRight >= spaceLeft;
+  const desiredX = placeRight
+    ? petBounds.x + petBounds.width + gap
+    : petBounds.x - width - gap;
+  const desiredY = petBounds.y + verticalOffset;
+
   return {
-    x: bounds.x + bounds.width + 18,
-    y: bounds.y + 120,
-    width: 460,
-    height: 640
+    x: Math.round(Math.max(workArea.x, Math.min(desiredX, workArea.x + workArea.width - width))),
+    y: Math.round(Math.max(workArea.y, Math.min(desiredY, workArea.y + workArea.height - height))),
+    width,
+    height
   };
 }
 
-function getComposerWindowBounds() {
-  if (!petWindow || petWindow.isDestroyed()) {
-    return {
-      width: 430,
-      height: 280
-    };
-  }
+function getChatWindowBounds() {
+  return getWindowBoundsNearPet(460, 640, 96);
+}
 
-  const bounds = petWindow.getBounds();
-  return {
-    x: bounds.x + Math.max(40, Math.round(bounds.width * 0.08)),
-    y: bounds.y + bounds.height - 310,
-    width: 430,
-    height: 280
-  };
+function getComposerWindowBounds() {
+  return getWindowBoundsNearPet(430, 280, 180);
 }
 
 function getBubbleWindowBounds() {
   if (!petWindow || petWindow.isDestroyed()) {
     return {
-      width: 290,
-      height: 220
+      width: bubbleContentSize.width,
+      height: bubbleContentSize.height,
+      placement: "right"
     };
   }
 
   const bounds = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(bounds).workArea;
+  const width = Math.min(bubbleContentSize.width, workArea.width - 24);
+  const height = Math.min(bubbleContentSize.height, workArea.height - 24);
+  const petCenterX = bounds.x + bounds.width / 2;
+  const placement = petCenterX < workArea.x + workArea.width / 2 ? "right" : "left";
+  const desiredX = placement === "right"
+    ? bounds.x + bounds.width * 0.62
+    : bounds.x + bounds.width * 0.38 - width;
+  const desiredY = bounds.y + bounds.height * 0.08;
   return {
-    x: Math.round(bounds.x + bounds.width * 0.68),
-    y: Math.round(bounds.y + bounds.height * 0.08),
-    width: 290,
-    height: 220
+    x: Math.round(Math.max(workArea.x + 12, Math.min(desiredX, workArea.x + workArea.width - width - 12))),
+    y: Math.round(Math.max(workArea.y + 12, Math.min(desiredY, workArea.y + workArea.height - height - 12))),
+    width: Math.round(width),
+    height: Math.round(height),
+    placement
   };
 }
 
@@ -138,7 +320,7 @@ function createPetWindow() {
     width: initialSize.width,
     height: initialSize.height,
     minWidth: 480,
-    minHeight: 800,
+    minHeight: 720,
     frame: false,
     transparent: true,
     hasShadow: true,
@@ -189,11 +371,13 @@ function createPetWindow() {
 
 function createSettingsWindow() {
   const win = new BrowserWindow({
-    width: 480,
-    height: 780,
-    minWidth: 420,
-    minHeight: 720,
-    backgroundColor: "#0f1118",
+    width: 940,
+    height: 760,
+    minWidth: 760,
+    minHeight: 620,
+    backgroundColor: "#f3f5f6",
+    titleBarStyle: "hidden",
+    titleBarOverlay: getTitleBarOverlay(),
     autoHideMenuBar: true,
     show: false,
     title: "V-Manager 设置",
@@ -225,18 +409,21 @@ function createSettingsWindow() {
 
 function createScaleWindow() {
   const win = new BrowserWindow({
-    width: 360,
-    height: 250,
-    minWidth: 340,
-    minHeight: 230,
+    width: 420,
+    height: 380,
+    minWidth: 420,
+    minHeight: 380,
     maxWidth: 420,
-    maxHeight: 280,
+    maxHeight: 380,
     backgroundColor: "#0f1118",
+    titleBarStyle: "hidden",
+    titleBarOverlay: getTitleBarOverlay(),
     autoHideMenuBar: true,
     show: false,
     resizable: false,
     maximizable: false,
     minimizable: false,
+    alwaysOnTop: true,
     title: "模型大小",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -281,6 +468,7 @@ function createComposerWindow() {
     resizable: false,
     maximizable: false,
     minimizable: false,
+    alwaysOnTop: true,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     show: false,
@@ -320,7 +508,10 @@ function createChatWindow() {
     y: bounds.y,
     minWidth: 400,
     minHeight: 520,
+    alwaysOnTop: true,
     backgroundColor: "#0f1118",
+    titleBarStyle: "hidden",
+    titleBarOverlay: getTitleBarOverlay(),
     autoHideMenuBar: true,
     show: false,
     title: "聊天栏",
@@ -347,6 +538,42 @@ function createChatWindow() {
   });
 
   chatWindow = win;
+  return win;
+}
+
+function createCodeWindow() {
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    minWidth: 960,
+    minHeight: 620,
+    backgroundColor: "#0b0d10",
+    titleBarStyle: "hidden",
+    titleBarOverlay: getTitleBarOverlay("dark", true),
+    autoHideMenuBar: true,
+    show: false,
+    title: "Vivi Code",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  loadView(win, "code");
+
+  win.on("close", (event) => {
+    if (!app.isQuiting) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+
+  win.on("closed", () => {
+    if (codeWindow === win) codeWindow = null;
+  });
+
+  codeWindow = win;
   return win;
 }
 
@@ -377,6 +604,10 @@ function createBubbleWindow() {
   });
 
   loadView(win, "bubble");
+
+  win.webContents.on("did-finish-load", () => {
+    updateBubbleWindowLayout();
+  });
 
   win.on("closed", () => {
     if (bubbleWindow === win) {
@@ -420,6 +651,11 @@ function ensureChatWindow() {
   return chatWindow;
 }
 
+function ensureCodeWindow() {
+  if (!codeWindow || codeWindow.isDestroyed()) return createCodeWindow();
+  return codeWindow;
+}
+
 function ensureBubbleWindow() {
   if (!bubbleWindow || bubbleWindow.isDestroyed()) {
     return createBubbleWindow();
@@ -435,6 +671,8 @@ function createExpressionWindow() {
     minWidth: 360,
     minHeight: 440,
     backgroundColor: "#0f1118",
+    titleBarStyle: "hidden",
+    titleBarOverlay: getTitleBarOverlay(),
     autoHideMenuBar: true,
     show: false,
     resizable: true,
@@ -447,6 +685,10 @@ function createExpressionWindow() {
   });
 
   loadView(win, "expressions");
+
+  win.webContents.on("did-finish-load", () => {
+    win.webContents.send("agent:expressions-updated", [...activeManualExpressions]);
+  });
 
   win.on("close", (event) => {
     if (!app.isQuiting) {
@@ -476,6 +718,7 @@ function openExpressionWindow() {
   const win = ensureExpressionWindow();
   win.show();
   win.focus();
+  win.webContents.send("agent:expressions-updated", [...activeManualExpressions]);
   return true;
 }
 
@@ -488,7 +731,9 @@ function openSettingsWindow() {
 
 function openScaleWindow() {
   const win = ensureScaleWindow();
+  win.setAlwaysOnTop(true, "floating");
   win.show();
+  win.moveTop();
   win.focus();
   win.webContents.send("agent:pet-scale-updated", petWindowScale);
   return true;
@@ -496,7 +741,10 @@ function openScaleWindow() {
 
 function openComposerWindow() {
   const win = ensureComposerWindow();
+  win.setBounds(getComposerWindowBounds());
+  win.setAlwaysOnTop(true, "floating");
   win.show();
+  win.moveTop();
   win.focus();
   win.webContents.send("agent:chat-state-updated", chatState);
   return true;
@@ -504,6 +752,17 @@ function openComposerWindow() {
 
 function openChatWindow() {
   const win = ensureChatWindow();
+  win.setBounds(getChatWindowBounds());
+  win.setAlwaysOnTop(true, "floating");
+  win.show();
+  win.moveTop();
+  win.focus();
+  win.webContents.send("agent:chat-state-updated", chatState);
+  return true;
+}
+
+function openCodeWindow() {
+  const win = ensureCodeWindow();
   win.show();
   win.focus();
   win.webContents.send("agent:chat-state-updated", chatState);
@@ -535,6 +794,36 @@ function broadcastChatState() {
   composerWindow?.webContents.send("agent:chat-state-updated", chatState);
   chatWindow?.webContents.send("agent:chat-state-updated", chatState);
   bubbleWindow?.webContents.send("agent:chat-state-updated", chatState);
+  codeWindow?.webContents.send("agent:chat-state-updated", chatState);
+}
+
+function broadcastConfigUpdated(config) {
+  for (const win of [petWindow, settingsWindow, scaleWindow, composerWindow, chatWindow, bubbleWindow, expressionWindow, codeWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:config-updated", config);
+  }
+}
+
+function broadcastLive2DModels() {
+  for (const win of [petWindow, settingsWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:live2d-models-updated", live2dModelOptions);
+  }
+}
+
+async function updateLive2DModel(modelId) {
+  if (!live2dModelOptions.some((model) => model.id === modelId)) return false;
+  currentAgentConfig = mergeAgentConfig({
+    ...currentAgentConfig,
+    appearance: { ...currentAgentConfig.appearance, live2dModel: modelId }
+  });
+  await saveConfig(app.getPath("userData"), currentAgentConfig);
+  broadcastConfigUpdated(currentAgentConfig);
+  return true;
+}
+
+function broadcastActiveExpressions() {
+  const expressions = [...activeManualExpressions];
+  petWindow?.webContents.send("agent:expressions-updated", expressions);
+  expressionWindow?.webContents.send("agent:expressions-updated", expressions);
 }
 
 function updateBubbleWindowLayout() {
@@ -543,7 +832,9 @@ function updateBubbleWindowLayout() {
   }
 
   const bounds = getBubbleWindowBounds();
-  bubbleWindow.setBounds(bounds);
+  const { placement, ...windowBounds } = bounds;
+  bubbleWindow.setBounds(windowBounds);
+  bubbleWindow.webContents.send("agent:bubble-placement-updated", placement);
 }
 
 function buildPetContextMenu() {
@@ -591,8 +882,26 @@ function buildPetContextMenu() {
           ]
         },
         {
+          label: "切换模型",
+          submenu: live2dModelOptions.map((model) => ({
+            label: model.label,
+            type: "radio",
+            checked: currentAgentConfig.appearance?.live2dModel === model.id,
+            click: () => { void updateLive2DModel(model.id); }
+          }))
+        },
+        {
           label: "调整模型大小",
           click: () => openScaleWindow()
+        }
+      ]
+    },
+    {
+      label: "开发",
+      submenu: [
+        {
+          label: "打开代码工作台",
+          click: () => openCodeWindow()
         }
       ]
     },
@@ -668,6 +977,31 @@ function buildPetContextMenu() {
 
 app.whenReady().then(async () => {
   await ensureDataFiles(app.getPath("userData"));
+  const startupConfig = await loadConfig(app.getPath("userData"));
+  currentAgentConfig = mergeAgentConfig(startupConfig);
+  currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
+  await refreshLive2DModels({ broadcast: false });
+  protocol.handle("vivi-model", async (request) => {
+    try {
+      const url = new URL(request.url);
+      const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      const modelId = parts.shift();
+      const modelRoot = customModelRoots.get(modelId);
+      if (!modelRoot || parts.length === 0) return new Response("Not found", { status: 404 });
+      const filePath = path.resolve(modelRoot, ...parts);
+      const relative = path.relative(modelRoot, filePath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) return new Response("Forbidden", { status: 403 });
+      const content = await fs.readFile(filePath);
+      return new Response(content, { headers: {
+        "content-type": getModelContentType(filePath),
+        "access-control-allow-origin": "*"
+      } });
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+  });
+  startLive2DModelWatcher();
+  await restoreCodeWorkspace();
   createPetWindow();
   createBubbleWindow();
   updateBubbleWindowLayout();
@@ -688,11 +1022,13 @@ app.on("window-all-closed", () => {
 });
 
 ipcMain.handle("agent:get-bootstrap", async () => {
-  const config = await loadConfig(app.getPath("userData"));
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  currentAgentConfig = config;
   const knowledgeFiles = await listKnowledgeFiles(app.getPath("userData"));
 
   return {
     config,
+    live2dModels: live2dModelOptions,
     knowledgeFiles,
     runtime: {
       mode: "desktop",
@@ -703,6 +1039,7 @@ ipcMain.handle("agent:get-bootstrap", async () => {
       { id: "memory", name: "本地记忆/RAG", status: "ready", detail: "从本地知识库检索相关片段参与回答。" },
       { id: "resource", name: "资源查看", status: "ready", detail: "可查看 CPU、内存、运行进程和当前前台应用数量。" },
       { id: "launcher", name: "应用启动", status: "ready", detail: "已接入本地执行层，可直接启动常见应用，也支持传入本地 exe 路径。" },
+      { id: "code-agent", name: "代码代理", status: "ready", detail: "可在当前工作区搜索和读取代码；文件修改与开发命令必须经用户明确确认后执行。" },
       { id: "browser", name: "浏览器搜索", status: "planned", detail: "预留插件位，后续接浏览器自动化或联网搜索。" },
       { id: "filesystem", name: "文件管理", status: "ready", detail: "当前支持打开文件/文件夹、列目录、读取文本、创建文件夹/文本文件、追加内容与显式删除。" },
       { id: "messenger", name: "QQ/微信消息发送", status: "planned", detail: "后续通过 UI 自动化/系统脚本接入，现阶段仅做能力规划。" }
@@ -711,26 +1048,49 @@ ipcMain.handle("agent:get-bootstrap", async () => {
 });
 
 ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
-  const merged = {
-    ...defaultConfig,
-    ...nextConfig,
-    deepseek: {
-      ...defaultConfig.deepseek,
-      ...(nextConfig.deepseek ?? {})
-    },
-    embedding: {
-      ...defaultConfig.embedding,
-      ...(nextConfig.embedding ?? {})
-    },
-    memory: {
-      ...defaultConfig.memory,
-      ...(nextConfig.memory ?? {})
-    }
-  };
+  const merged = mergeAgentConfig(nextConfig);
   await saveConfig(app.getPath("userData"), merged);
-  petWindow?.webContents.send("agent:config-updated", merged);
-  settingsWindow?.webContents.send("agent:config-updated", merged);
+  currentAgentConfig = merged;
+  currentAppearanceTheme = merged.appearance?.theme === "dark" ? "dark" : "light";
+  updateTitleBarOverlays();
+  broadcastConfigUpdated(merged);
   return merged;
+});
+
+ipcMain.handle("agent:get-live2d-models", async () => live2dModelOptions);
+
+ipcMain.handle("agent:refresh-live2d-models", async () => refreshLive2DModels());
+
+ipcMain.handle("agent:open-live2d-models-folder", async () => {
+  const modelsDirectory = getLive2DModelsDirectory();
+  await fs.mkdir(modelsDirectory, { recursive: true });
+  return shell.openPath(modelsDirectory);
+});
+
+ipcMain.handle("agent:select-asmr-text-file", async () => {
+  const result = await dialog.showOpenDialog(settingsWindow ?? undefined, {
+    title: "导入 ASMR 文本",
+    properties: ["openFile"],
+    filters: [{ name: "文本", extensions: ["txt", "md"] }]
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const content = await fs.readFile(result.filePaths[0], "utf8");
+  return { path: result.filePaths[0], content: content.slice(0, 200000) };
+});
+
+ipcMain.handle("agent:generate-asmr-script", async (_event, payload) => {
+  return generateAsmrScript(app.getPath("userData"), payload ?? {});
+});
+
+ipcMain.handle("agent:list-elevenlabs-voices", async (_event, voiceOverride) => {
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  return listElevenLabsVoices({ ...config.voice, ...(voiceOverride ?? {}) });
+});
+
+ipcMain.handle("agent:synthesize-speech", async (_event, payload) => {
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  const voiceConfig = { ...config.voice, ...(payload?.voiceConfig ?? {}) };
+  return synthesizeElevenLabsSpeech(voiceConfig, payload?.text, { asmr: Boolean(payload?.asmr) });
 });
 
 ipcMain.handle("agent:chat", async (_event, payload) => {
@@ -781,15 +1141,25 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   };
   broadcastChatState();
 
-  // Push detected mood to pet window model
-  if (result.meta?.detectedMood) {
-    petWindow?.webContents.send("agent:mood-updated", {
-      mood: result.meta.detectedMood,
-      faceParams: result.meta.faceParams || null
-    });
-  }
+  activeManualExpressions = new Set(
+    [...activeManualExpressions].filter((name) => persistentShapeExpressions.has(name))
+  );
+  broadcastActiveExpressions();
+
+  // Push reply performance cues to the pet window model. If the LLM skips
+  // set_mood, the renderer still derives lightweight mood beats from text.
+  petWindow?.webContents.send("agent:mood-updated", {
+    mood: result.meta?.detectedMood || "happy",
+    faceParams: result.meta?.faceParams || null,
+    reply: result.reply
+  });
 
   return chatState;
+});
+
+app.on("before-quit", () => {
+  modelDirectoryWatcher?.close();
+  modelDirectoryWatcher = null;
 });
 
 ipcMain.handle("agent:search-files", async (_event, query) => {
@@ -861,6 +1231,34 @@ ipcMain.handle("agent:open-chat-window", async () => {
   return openChatWindow();
 });
 
+ipcMain.handle("agent:open-code-window", async () => {
+  return openCodeWindow();
+});
+
+ipcMain.handle("agent:get-code-workspace", async () => {
+  return listWorkspaceCodeFiles({ workspaceDir: getActiveWorkspaceDir() });
+});
+
+ipcMain.handle("agent:read-code-file", async (_event, relativePath) => {
+  return readWorkspaceCode(relativePath, { workspaceDir: getActiveWorkspaceDir() });
+});
+
+ipcMain.handle("agent:select-code-workspace", async () => {
+  const owner = codeWindow && !codeWindow.isDestroyed() ? codeWindow : undefined;
+  const options = {
+    title: "选择代码工作区",
+    defaultPath: getActiveWorkspaceDir(),
+    properties: ["openDirectory"]
+  };
+  const result = owner
+    ? await dialog.showOpenDialog(owner, options)
+    : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths[0]) return null;
+  setActiveWorkspaceDir(result.filePaths[0]);
+  await persistCodeWorkspace();
+  return listWorkspaceCodeFiles({ workspaceDir: getActiveWorkspaceDir() });
+});
+
 ipcMain.handle("agent:open-scale-window", async () => {
   return openScaleWindow();
 });
@@ -870,12 +1268,23 @@ ipcMain.handle("agent:open-expression-window", async () => {
 });
 
 ipcMain.handle("agent:trigger-expression", async (_event, expressionName) => {
-  petWindow?.webContents.send("agent:trigger-expression", expressionName);
+  const name = String(expressionName || "");
+  if (!name) return false;
+
+  if (activeManualExpressions.has(name)) {
+    activeManualExpressions.delete(name);
+  } else {
+    if (name === "expression20") activeManualExpressions.delete("expression21");
+    if (name === "expression21") activeManualExpressions.delete("expression20");
+    activeManualExpressions.add(name);
+  }
+  broadcastActiveExpressions();
   return true;
 });
 
 ipcMain.handle("agent:clear-expressions", async () => {
-  petWindow?.webContents.send("agent:clear-expressions");
+  activeManualExpressions.clear();
+  broadcastActiveExpressions();
   return true;
 });
 
@@ -916,16 +1325,25 @@ ipcMain.handle("agent:set-pet-window-position", async (_event, { x, y }) => {
   return true;
 });
 
+ipcMain.on("agent:set-pet-mouse-passthrough", (event, ignore) => {
+  if (!petWindow || petWindow.isDestroyed() || event.sender !== petWindow.webContents) return;
+  if (ignore) petWindow.setIgnoreMouseEvents(true, { forward: true });
+  else petWindow.setIgnoreMouseEvents(false);
+});
+
 ipcMain.handle("agent:update-pet-window-layout", async (_event, { scale }) => {
   if (!petWindow || petWindow.isDestroyed()) {
     return null;
   }
 
-  petWindowScale = Math.max(0.8, Math.min(1.16, Number(scale) || 1));
+  petWindowScale = Math.max(0.8, Math.min(1.5, Number(scale) || 1));
   const nextSize = getPetWindowSize(petWindowScale);
   const currentBounds = petWindow.getBounds();
-  const nextX = Math.round(currentBounds.x - (nextSize.width - currentBounds.width) / 2);
-  const nextY = Math.round(currentBounds.y - (nextSize.height - currentBounds.height));
+  const workArea = screen.getDisplayMatching(currentBounds).workArea;
+  const centeredX = Math.round(currentBounds.x - (nextSize.width - currentBounds.width) / 2);
+  const bottomAnchoredY = Math.round(currentBounds.y - (nextSize.height - currentBounds.height));
+  const nextX = Math.max(workArea.x, Math.min(centeredX, workArea.x + workArea.width - nextSize.width));
+  const nextY = Math.max(workArea.y, bottomAnchoredY);
 
   petWindow.setBounds({
     x: nextX,
@@ -938,6 +1356,19 @@ ipcMain.handle("agent:update-pet-window-layout", async (_event, { scale }) => {
   updateBubbleWindowLayout();
 
   return nextSize;
+});
+
+ipcMain.handle("agent:update-bubble-window-size", async (event, size) => {
+  if (!bubbleWindow || bubbleWindow.isDestroyed() || event.sender !== bubbleWindow.webContents) {
+    return null;
+  }
+
+  bubbleContentSize = {
+    width: Math.max(280, Math.min(680, Math.ceil(Number(size?.width) || 330))),
+    height: Math.max(100, Math.ceil(Number(size?.height) || 180))
+  };
+  updateBubbleWindowLayout();
+  return getBubbleWindowBounds();
 });
 
 ipcMain.on("agent:show-pet-context-menu", (event) => {

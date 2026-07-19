@@ -7,11 +7,12 @@
 ### 对话与记忆
 - 可自定义角色人设和系统提示词
 - 流式对话（边生成边显示）
+- 长回复按 1-2 句拆分为连续气泡，按顺序完整展示
 - 多轮对话记忆（最大消息数可配置，默认 40 条）
 - 记忆自动压缩：超阈值时提取偏好、事实、承诺、决策 → 写入知识库
 
 ### 本地工具（Function Calling）
-通过 OpenAI 兼容的 function calling，LLM 可主动调用 21 个工具：
+通过 OpenAI 兼容的 function calling，LLM 可主动调用 26 个工具：
 
 | 类别 | 工具 | 说明 |
 |---|---|---|
@@ -36,6 +37,11 @@
 | | `rebuild_rag_index` | 重建索引 |
 | **工作区** | `list_workspace` | 列工作目录 |
 | | `switch_workspace` | 切换工作目录 |
+| **代码代理** | `search_workspace_code` | 搜索工作区代码，返回文件、行号与上下文 |
+| | `read_workspace_code` | 读取工作区内的代码或配置文件 |
+| | `apply_workspace_patch` | 精确替换已有文件中的文本片段（需确认） |
+| | `create_workspace_file` | 创建工作区内的新文件（需确认） |
+| | `run_workspace_command` | 运行受限开发命令（需确认） |
 
 常用操作（"启动QQ"、"打开桌面"）走 keyword 快速路径，**41ms 内返回**，不经过 LLM。
 
@@ -50,6 +56,7 @@
 - 透明无边框窗口，可拖拽，常驻置顶
 - 气泡式对话浮窗（10 秒自动淡出）
 - 独立设置窗口、对话窗口、模型缩放窗口
+- 独立代码工作台：文件树、代码预览、终端式对话，共享日常聊天记忆
 
 ## 技术架构
 
@@ -63,7 +70,7 @@ React + Vite（界面层）
 
 Agent Core（Node.js）
   ├── core.js               主协调层：buildAgentReply + 配置/记忆/DeepSeek
-  ├── tools.js              21 个工具定义（OpenAI function calling 格式）
+  ├── tools.js              26 个工具定义（OpenAI function calling 格式）
   ├── tool-executor.js      工具调度器
   ├── memory-compressor.js  记忆压缩（偏好/事实/承诺/决策 → 知识库）
   ├── router.js             意图路由 + executor 链调度
@@ -87,7 +94,7 @@ DeepSeek API
 用户输入
   → keyword executor 链（workspace → app → file → system）
     → 命中：直接返回（41ms）
-    → 未命中：RAG 检索 → DeepSeek（带 21 个工具）
+     → 未命中：RAG 检索 → DeepSeek（带 26 个工具）
       → LLM 决策：调哪些工具、调几次（最多 5 轮）
       → 工具结果入对话记忆（含 toolCalls + toolResults）
       → 流式生成最终回复
@@ -117,6 +124,7 @@ DeepSeek API
 │   ├── rag.js                 RAG
 │   ├── app-registry.js        应用注册表
 │   ├── workspace-executor.js  工作区
+│   ├── code-executor.js       代码检索、精确修改与受限命令执行
 │   ├── runtime-paths.js       路径
 │   ├── shared/utils.js        工具函数
 │   └── executors/             
@@ -158,6 +166,29 @@ npm run dev
 | 模型 | deepseek-chat | 支持 flash/pro/reasoner |
 | 最大消息数 | 40 | 上下文窗口大小（10-100） |
 | 检索条数 | 3 | RAG 每次召回知识片段数（1-10） |
+| ElevenLabs API Key | — | 用于账号音色读取和文字转语音 |
+| 语音模型 | eleven_v3 | 可切换 Multilingual v2 / Flash v2.5 |
+| 默认音色 | Lily | 内置 21 个官方预置音色，也可读取账号音色或填写 Voice ID |
+| V3 稳定度 | Natural | 可切换 Creative / Natural / Robust |
+
+“语音与 ASMR”设置页已提供哄睡、闲聊、本地文本导入和 AI 脚本生成。ElevenLabs V3 会使用 `[whispers]` 音频标签生成耳语；长文本按句切片并顺序播放。
+
+## Live2D 模型导入
+
+用户模型目录：`%APPDATA%\v-manager\agent-data\models`
+
+每个模型应保留完整文件夹结构，至少包含 `.model3.json`、其引用的 `.moc3` 和纹理文件：
+
+```text
+models/
+└── MyModel/
+    ├── MyModel.model3.json
+    ├── MyModel.moc3
+    └── textures/
+        └── texture_00.png
+```
+
+应用会在启动和目录变化时自动扫描，也可在“设置 → 个性化 → Live2D 模型”中打开目录或手动重新扫描。
 
 ## 项目定位
 
@@ -168,10 +199,10 @@ npm run dev
 | 版本 | 目标 | 状态 |
 |---|---|---|
 | **0.1.0** | 桌面 Agent 完整底座：对话记忆、21 个本地工具、RAG 向量检索、Live2D 桌宠壳 | ✅ 完成 |
-| **0.2.0** | Live2D 表情联动：LLM 驱动神态（思考/待机/抓取/情绪）、对话情绪感知 | ⬜ 下一版 |
-| 0.3.0 | 代码代理：工作区搜代码、改文件、跑命令 | ⬜ 规划中 |
-| 0.4.0 | Live2D 皮肤换壳：多模型加载、皮肤切换、模型配置化 | ⬜ 规划中 |
-| 0.5.0 | 语音全链路：STT 语音输入 + TTS 语音输出（含 ASMR 耳语）+ Live2D 口型同步 | ⬜ 规划中 |
+| **0.2.0-0.2.2** | Live2D 表情联动、LLM mood/face 工具调用、自动张嘴动画 | ✅ 完成 |
+| **0.3.0** | 代码代理：工作区搜代码、改文件、跑命令（写入与命令需确认） | ✅ 完成 |
+| 0.4.0 | Live2D 皮肤换壳：多模型加载、皮肤切换、模型配置化 | ✅ 完成 |
+| **0.5.0** | 语音全链路：STT 语音输入 + TTS 语音输出（含 ASMR 耳语）+ Live2D 口型同步 | 🚧 开发中 |
 | 0.6.0 | 人设引擎：情绪计算 + 好感度系统（核心方向） | ⬜ 规划中 |
 | 0.7.0 | UI 自动化：VS Code / 浏览器 / 聊天软件适配 | ⬜ 规划中 |
 | 0.8.0 | 多设备一键接入：profile 初始化脚本 | ⬜ 规划中 |

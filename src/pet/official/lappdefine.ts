@@ -32,8 +32,34 @@ export const ViewLogicalMaxRight = 2.0;
 export const ViewLogicalMaxBottom = -2.0;
 export const ViewLogicalMaxTop = 2.0;
 
-// 相対パス
-export const ResourcesPath = '/live2d/qianqian/';
+export type ModelResource = {
+  id: string;
+  directory: string;
+  fileName: string;
+};
+
+export const ModelResources: ModelResource[] = [
+  { id: 'qianqian', directory: '/live2d/qianqian/芊芊/', fileName: '芊芊.model3.json' },
+  { id: 'hiyori', directory: '/live2d/hiyori/', fileName: 'Hiyori.model3.json' },
+  { id: 'epsilon', directory: '/live2d/epsilon_free/', fileName: 'Epsilon_free.model3.json' }
+];
+
+let activeModelId = 'qianqian';
+let customModelResource: ModelResource | null = null;
+
+export function setActiveModelId(modelId: string): void {
+  activeModelId = ModelResources.some((model) => model.id === modelId) ? modelId : 'qianqian';
+  customModelResource = null;
+}
+
+export function setActiveModelResource(resource: ModelResource): void {
+  activeModelId = resource.id;
+  customModelResource = resource;
+}
+
+export function getActiveModelResource(): ModelResource {
+  return customModelResource ?? ModelResources.find((model) => model.id === activeModelId) ?? ModelResources[0];
+}
 
 // シェーダー相対パス
 export const ShaderPath = '/live2d-official/shaders/WebGL/';

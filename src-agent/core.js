@@ -38,11 +38,42 @@ export const defaultConfig = {
     baseUrl: "https://api.siliconflow.cn/v1",
     model: "BAAI/bge-m3"
   },
+  appearance: {
+    theme: "light",
+    live2dModel: "qianqian"
+  },
+  voice: {
+    enabled: false,
+    provider: "elevenlabs",
+    baseUrl: "https://api.elevenlabs.io/v1",
+    apiKey: "",
+    model: "eleven_v3",
+    voice: "pFZP5JQG7iQjIQuC4Bku",
+    outputFormat: "mp3_44100_128",
+    speed: 1,
+    stability: 0.5,
+    similarityBoost: 0.75,
+    asmrEnabled: false,
+    asmrMode: "sleep",
+    asmrPrompt: "",
+    asmrScript: ""
+  },
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
   }
 };
+
+let activeWorkspaceDir = process.cwd();
+
+export function getActiveWorkspaceDir() {
+  return activeWorkspaceDir;
+}
+
+export function setActiveWorkspaceDir(nextPath) {
+  activeWorkspaceDir = path.resolve(nextPath || process.cwd());
+  return activeWorkspaceDir;
+}
 
 function mergeConfig(rawConfig = {}) {
   return {
@@ -55,6 +86,17 @@ function mergeConfig(rawConfig = {}) {
     embedding: {
       ...defaultConfig.embedding,
       ...(rawConfig.embedding ?? {})
+    },
+    appearance: {
+      ...defaultConfig.appearance,
+      ...(rawConfig.appearance ?? {})
+    },
+    voice: {
+      ...defaultConfig.voice,
+      ...(rawConfig.voice ?? {}),
+      baseUrl: rawConfig.voice?.baseUrl || defaultConfig.voice.baseUrl,
+      model: rawConfig.voice?.model || defaultConfig.voice.model,
+      voice: rawConfig.voice?.voice || defaultConfig.voice.voice
     },
     memory: {
       ...defaultConfig.memory,
@@ -321,6 +363,25 @@ async function requestDeepSeek(config, messages) {
   return data.choices?.[0]?.message?.content ?? "模型没有返回有效内容。";
 }
 
+export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}) {
+  const config = await loadConfig(baseDir);
+  if (!config.deepseek.apiKey) throw new Error("请先配置 DeepSeek API Key。");
+  const scene = mode === "sleep" ? "温柔哄睡" : mode === "casual" ? "放松休闲谈话" : "用户指定主题";
+  const content = await requestDeepSeek(config, [
+    {
+      role: "system",
+      content: [
+        `你是 ${config.personaName}，正在创作可直接用于耳语语音合成的中文 ASMR 文本。`,
+        "只输出正文，不要标题、解释、Markdown、舞台说明或参数标签。",
+        "语句自然、缓慢、亲近，适当使用短句和停顿，但不要过度重复。",
+        `场景：${scene}。`
+      ].join("\n")
+    },
+    { role: "user", content: prompt.trim() || `生成一段约 3 分钟的${scene}文本。` }
+  ]);
+  return content.replace(/^\s*\[(?:mood|face):.*\]\s*$/gim, "").trim();
+}
+
 async function callDeepSeekWithTools(config, messages, tools) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const body = {
@@ -576,9 +637,16 @@ function buildSystemPromptV3(config, knowledge) {
     "7. 你拥有的工具包括：获取系统资源、查询磁盘空间、检查进程是否运行、终止进程（需确认）、启动应用、查找应用、文件操作（列出/读取/打开/创建/删除（需确认）/搜索）、知识库检索（向量相似度搜索）等。",
     "8. 你是 Live2D 桌宠。表情控制必须通过 set_mood 工具调用完成，绝不在对话文本中写参数名（如 Param70:1 之类）或 JSON。工具参数详情和可用参数清单见知识库 expressions.md。",
     "   即使用户只发一个词（如「眯眼」），也必须调用 set_mood 工具。不说「我试试」，直接做。",
+    "9. 处理代码工作区时，先用 search_workspace_code/read_workspace_code 了解真实代码。任何 create_workspace_file、apply_workspace_patch 或 run_workspace_command 都必须先展示具体路径、改动或命令，再等待用户最近一条消息明确回复“确认执行”。没有确认时只能说明计划，不能调用这些工具。",
     "",
     knowledgeBlock,
   ].join("\n");
+}
+
+function hasExplicitCodeAgentConfirmation(message) {
+  const text = String(message || "").trim();
+  if (/(?:不要|取消|先别|不执行)/.test(text)) return false;
+  return /^(?:确认执行|确认修改|确认写入|确认运行|确认|可以执行|同意执行|继续执行)[！!。.]?$/.test(text);
 }
 
 // ---- Mood & Face tag parsing ----
@@ -761,7 +829,13 @@ export async function buildAgentReply(baseDir, payload) {
   const effectiveMessage = commandResolution.expandedMessage || payload.message;
 
   // --- Local executor dispatch (formerly tryHandleLocalDesktopQuery) ---
-  const executorContext = { baseDir, history: normalizedHistory, config };
+  const executorContext = {
+    baseDir,
+    history: normalizedHistory,
+    config,
+    workspaceDir: activeWorkspaceDir,
+    codeAgentConfirmed: hasExplicitCodeAgentConfirmation(payload.message)
+  };
 
   const clarificationReply = commandResolution.clarificationQuestion
     ? {

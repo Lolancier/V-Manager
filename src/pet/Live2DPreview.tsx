@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  activeModel, EXPRESSION_PARAMS, FaceParams,
+  activeModel, EXPRESSION_PARAMS, FaceParams, LIVE2D_MODEL_PRESETS,
   IDLE_PROP_ACTIONS, IDLE_ACTION_INTERVAL,
   MOOD_LABEL_MAP, MoodParamPreset, ParamOscillation, ParamTarget, PetMood,
   pickMoodCombo,
@@ -8,9 +8,14 @@ import {
 
 type Live2DPreviewProps = {
   mood: PetMood;
-  scale: number;
+  modelId: string;
+  modelName?: string;
+  modelDirectory?: string;
+  modelFileName?: string;
   activeExpressionSet: Set<string>;
   faceParams: FaceParams | null;
+  speaking: boolean;
+  onInteractionChange?: (interactive: boolean) => void;
 };
 
 // ---- ParameterAnimator ----
@@ -99,7 +104,7 @@ function ensureScript(src: string) {
 
 const moodLabelMap: Record<PetMood, string> = MOOD_LABEL_MAP;
 
-export default function Live2DPreview({ mood, scale, activeExpressionSet, faceParams }: Live2DPreviewProps) {
+export default function Live2DPreview({ mood, modelId, modelName, modelDirectory, modelFileName, activeExpressionSet, faceParams, speaking, onInteractionChange }: Live2DPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const runtimeRef = useRef<any>(null);
   const frameRef = useRef<number | null>(null);
@@ -113,6 +118,9 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
   const idlePropRef = useRef<string | null>(null);           // idle random prop
   const prevExprRef = useRef<Set<string>>(new Set());
   const faceRef = useRef<FaceParams | null>(null);           // LLM face tag
+  const speakingRef = useRef(false);
+  const interactionChangeRef = useRef(onInteractionChange);
+  const currentModelIdRef = useRef(modelId);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [msg, setMsg] = useState("正在启动...");
 
@@ -126,6 +134,14 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
     faceRef.current = faceParams;
   }, [faceParams]);
 
+  useEffect(() => {
+    speakingRef.current = speaking;
+  }, [speaking]);
+
+  useEffect(() => {
+    interactionChangeRef.current = onInteractionChange;
+  }, [onInteractionChange]);
+
   // ---- SDK bootstrap ----
   useEffect(() => {
     let disposed = false;
@@ -133,13 +149,16 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
       try {
         setLoadState("loading"); setMsg("正在加载 Cubism Core...");
         await ensureScript("/vendor/live2d/live2dcubismcore.min.js");
-        const [{ CubismFramework, LogLevel, Option }, { LAppPal }, { LAppSubdelegate }] = await Promise.all([
-          import("@framework/live2dcubismframework"), import("./official/lapppal"), import("./official/lappsubdelegate")
+        const [{ CubismFramework, LogLevel, Option }, { LAppPal }, { LAppSubdelegate }, LAppDefine] = await Promise.all([
+          import("@framework/live2dcubismframework"), import("./official/lapppal"), import("./official/lappsubdelegate"), import("./official/lappdefine")
         ]);
         if (!CubismFramework.isStarted()) { const o = new Option(); o.loggingLevel = LogLevel.LogLevel_Warning; o.logFunction = LAppPal.printMessage; CubismFramework.startUp(o); }
         if (!CubismFramework.isInitialized()) CubismFramework.initialize();
         if (disposed || !canvasRef.current) return;
 
+        if (modelDirectory && modelFileName) LAppDefine.setActiveModelResource({ id: modelId, directory: modelDirectory, fileName: modelFileName });
+        else LAppDefine.setActiveModelId(modelId);
+        currentModelIdRef.current = modelId;
         const rt = new LAppSubdelegate();
         if (!rt.initialize(canvasRef.current)) throw new Error("初始化失败");
         runtimeRef.current = { runtime: rt, pal: LAppPal, framework: CubismFramework, OptionCtor: Option, LogLevel };
@@ -150,9 +169,52 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
         const pm = (e: PointerEvent) => rt.onPointMoved(e.pageX, e.pageY);
         const pu = (e: PointerEvent) => rt.onPointEnded(e.pageX, e.pageY);
         const pc = (e: PointerEvent) => rt.onTouchCancel(e.pageX, e.pageY);
+        let lastProbeAt = 0;
+        let lastInteractive = true;
+        const probe = (e: MouseEvent) => {
+          const now = performance.now();
+          if (now - lastProbeAt < 34) return;
+          lastProbeAt = now;
+
+          const rect = cvs.getBoundingClientRect();
+          let interactive = false;
+          if (
+            rect.width > 0 && rect.height > 0 &&
+            e.clientX >= rect.left && e.clientX <= rect.right &&
+            e.clientY >= rect.top && e.clientY <= rect.bottom
+          ) {
+            const x = (e.clientX - rect.left) / rect.width;
+            const y = (e.clientY - rect.top) / rect.height;
+            const inEllipse = (cx: number, cy: number, rx: number, ry: number) => {
+              const dx = (x - cx) / rx;
+              const dy = (y - cy) / ry;
+              return dx * dx + dy * dy <= 1;
+            };
+
+            // A forgiving silhouette keeps the model draggable while letting its
+            // transparent corners and outer edges pass clicks to the desktop.
+            interactive =
+              inEllipse(0.5, 0.22, 0.31, 0.22) ||
+              inEllipse(0.5, 0.48, 0.29, 0.31) ||
+              inEllipse(0.5, 0.77, 0.23, 0.31);
+          }
+
+          if (interactive !== lastInteractive) {
+            lastInteractive = interactive;
+            interactionChangeRef.current?.(interactive);
+          }
+        };
         cvs.addEventListener("pointerdown", pd); window.addEventListener("pointermove", pm);
         window.addEventListener("pointerup", pu); window.addEventListener("pointercancel", pc);
-        cleanupRef.current = () => { cvs.removeEventListener("pointerdown", pd); window.removeEventListener("pointermove", pm); window.removeEventListener("pointerup", pu); window.removeEventListener("pointercancel", pc); };
+        window.addEventListener("mousemove", probe);
+        cleanupRef.current = () => {
+          cvs.removeEventListener("pointerdown", pd);
+          window.removeEventListener("pointermove", pm);
+          window.removeEventListener("pointerup", pu);
+          window.removeEventListener("pointercancel", pc);
+          window.removeEventListener("mousemove", probe);
+          interactionChangeRef.current?.(true);
+        };
 
         // Initial preset
         animatorRef.current.applyPreset(activeModel.moodParams.idle);
@@ -208,6 +270,17 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
               }
             }
 
+            if (speakingRef.current) {
+              const t = ts / 1000;
+              const syllableWave = Math.max(0, Math.sin(t * 18.5));
+              const accentWave = Math.max(0, Math.sin(t * 31 + 0.8));
+              const mouthOpen = Math.min(0.72, 0.06 + syllableWave * 0.36 + accentWave * 0.18);
+              const baseMouthOpen = overrides.get("ParamMouthOpenY") ?? 0;
+              const baseMouthForm = overrides.get("ParamMouthForm") ?? 0;
+              overrides.set("ParamMouthOpenY", Math.max(baseMouthOpen * 0.55, mouthOpen));
+              overrides.set("ParamMouthForm", Math.max(baseMouthForm, 0.08));
+            }
+
             m.setParamOverrides(overrides);
           }
           // ---- /Combinable expressions ----
@@ -222,7 +295,8 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
         };
         frameRef.current = window.requestAnimationFrame(loop);
 
-        setLoadState("ready"); setMsg("芊芊已载入");
+        const displayName = modelName ?? LIVE2D_MODEL_PRESETS.find((model) => model.id === modelId)?.name ?? activeModel.name;
+        setLoadState("ready"); setMsg(`${displayName}已载入`);
       } catch (e) {
         setLoadState("error"); setMsg(e instanceof Error ? e.message : "初始化失败");
       }
@@ -232,9 +306,20 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
       disposed = true; cleanupRef.current?.(); cleanupRef.current = null;
       if (frameRef.current !== null) { window.cancelAnimationFrame(frameRef.current); frameRef.current = null; }
       animatorRef.current.reset();
-      if (runtimeRef.current) { runtimeRef.current.runtime.release(); if (runtimeRef.current.framework.isInitialized()) { runtimeRef.current.framework.dispose(); runtimeRef.current.framework.cleanUp(); } runtimeRef.current = null; }
+      if (runtimeRef.current) { runtimeRef.current.runtime.release(); runtimeRef.current = null; }
     };
   }, []);
+
+  useEffect(() => {
+    if (loadState !== "ready" || !runtimeRef.current || currentModelIdRef.current === modelId) return;
+    currentModelIdRef.current = modelId;
+    activeExprRef.current = new Set(activeExpressionSet);
+    moodComboRef.current = pickMoodCombo(mood);
+    idlePropRef.current = null;
+    runtimeRef.current.runtime.getLive2DManager().loadModel(modelId, modelDirectory, modelFileName);
+    const displayName = modelName ?? LIVE2D_MODEL_PRESETS.find((model) => model.id === modelId)?.name ?? activeModel.name;
+    setMsg(`${displayName}已载入`);
+  }, [activeExpressionSet, loadState, modelDirectory, modelFileName, modelId, modelName, mood]);
 
   // ---- Mood → preset + combo ----
   useEffect(() => {
@@ -283,21 +368,13 @@ export default function Live2DPreview({ mood, scale, activeExpressionSet, facePa
     };
   }, [loadState, mood]);
 
-  // ---- Visual offsets ----
-  const extraScale = Math.max(0, scale - 1);
-  const padT = Math.round(18 + extraScale * 110);
-  const padL = Math.round(4 + extraScale * 40);
-  const padR = Math.round(4 + extraScale * 20);
-  const offX = Math.round(extraScale * 48);
-  const offY = Math.round(extraScale * 190);
-
   return (
-    <div className="live2d-card official-live2d-card" style={{ paddingTop: padT, paddingLeft: padL, paddingRight: padR }}>
-      <div className="live2d-model-scale" style={{ transform: `translate(${offX}px, ${offY}px) scale(${scale})` }}>
+    <div className="live2d-card official-live2d-card">
+      <div className="live2d-model-scale">
         <canvas className="live2d-stage official-live2d-stage" ref={canvasRef} />
       </div>
       <div className="live2d-footer">
-        <div><p className="eyebrow">{activeModel.name}</p><strong>{moodLabelMap[mood]}</strong></div>
+        <div><p className="eyebrow">{modelName ?? LIVE2D_MODEL_PRESETS.find((model) => model.id === modelId)?.name ?? activeModel.name}</p><strong>{moodLabelMap[mood]}</strong></div>
         <span className={`pet-mood mood-${mood}`}>{moodLabelMap[mood]}</span>
       </div>
       <p className={`live2d-message ${loadState}`}>{msg}</p>

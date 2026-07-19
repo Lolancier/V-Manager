@@ -138,18 +138,12 @@ export class LAppLive2DManager {
       LAppPal.printMessage(`[APP]model index: ${this._sceneIndex}`);
     }
 
-    // ModelDir[]に保持したディレクトリ名から
-    // model3.jsonのパスを決定する。
-    // ディレクトリ名とmodel3.jsonの名前を一致させておくこと。
-    const model: string = LAppDefine.ModelDir[index];
-    const modelPath: string = LAppDefine.ResourcesPath + model + '/';
-    let modelJsonName: string = LAppDefine.ModelDir[index];
-    modelJsonName += '.model3.json';
+    const modelResource = LAppDefine.getActiveModelResource();
 
     this.releaseAllModel();
     const instance = new LAppModel();
     instance.setSubdelegate(this._subdelegate);
-    instance.loadAssets(modelPath, modelJsonName);
+    instance.loadAssets(modelResource.directory, modelResource.fileName);
     this._models.push(instance);
   }
 
@@ -165,6 +159,12 @@ export class LAppLive2DManager {
   public addModel(sceneIndex: number = 0): void {
     this._sceneIndex = sceneIndex;
     this.changeScene(this._sceneIndex);
+  }
+
+  public loadModel(modelId: string, directory?: string, fileName?: string): void {
+    if (directory && fileName) LAppDefine.setActiveModelResource({ id: modelId, directory, fileName });
+    else LAppDefine.setActiveModelId(modelId);
+    this.changeScene(0);
   }
 
   /**

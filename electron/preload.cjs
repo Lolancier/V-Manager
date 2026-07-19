@@ -3,6 +3,13 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("agentDesktop", {
   getBootstrap: () => ipcRenderer.invoke("agent:get-bootstrap"),
   saveConfig: (config) => ipcRenderer.invoke("agent:save-config", config),
+  getLive2DModels: () => ipcRenderer.invoke("agent:get-live2d-models"),
+  refreshLive2DModels: () => ipcRenderer.invoke("agent:refresh-live2d-models"),
+  openLive2DModelsFolder: () => ipcRenderer.invoke("agent:open-live2d-models-folder"),
+  selectAsmrTextFile: () => ipcRenderer.invoke("agent:select-asmr-text-file"),
+  generateAsmrScript: (mode, prompt) => ipcRenderer.invoke("agent:generate-asmr-script", { mode, prompt }),
+  listElevenLabsVoices: (voiceConfig) => ipcRenderer.invoke("agent:list-elevenlabs-voices", voiceConfig),
+  synthesizeSpeech: (text, asmr, voiceConfig) => ipcRenderer.invoke("agent:synthesize-speech", { text, asmr, voiceConfig }),
   chat: (payload) => ipcRenderer.invoke("agent:chat", payload),
   searchFiles: (query) => ipcRenderer.invoke("agent:search-files", query),
   getAppRegistry: () => ipcRenderer.invoke("agent:get-app-registry"),
@@ -19,17 +26,23 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openSettingsWindow: () => ipcRenderer.invoke("agent:open-settings-window"),
   openComposerWindow: () => ipcRenderer.invoke("agent:open-composer-window"),
   openChatWindow: () => ipcRenderer.invoke("agent:open-chat-window"),
+  openCodeWindow: () => ipcRenderer.invoke("agent:open-code-window"),
   openScaleWindow: () => ipcRenderer.invoke("agent:open-scale-window"),
   openExpressionWindow: () => ipcRenderer.invoke("agent:open-expression-window"),
   triggerExpression: (name) => ipcRenderer.invoke("agent:trigger-expression", name),
   clearExpressions: () => ipcRenderer.invoke("agent:clear-expressions"),
   getChatState: () => ipcRenderer.invoke("agent:get-chat-state"),
+  getCodeWorkspace: () => ipcRenderer.invoke("agent:get-code-workspace"),
+  selectCodeWorkspace: () => ipcRenderer.invoke("agent:select-code-workspace"),
+  readCodeFile: (path) => ipcRenderer.invoke("agent:read-code-file", path),
   getPetWindowBounds: () => ipcRenderer.invoke("agent:get-pet-window-bounds"),
   getPetScale: () => ipcRenderer.invoke("agent:get-pet-scale"),
   getPositionLock: () => ipcRenderer.invoke("agent:get-position-lock"),
   setPositionLock: (locked) => ipcRenderer.invoke("agent:set-position-lock", locked),
   setPetWindowPosition: (x, y) => ipcRenderer.invoke("agent:set-pet-window-position", { x, y }),
+  setPetMousePassthrough: (ignore) => ipcRenderer.send("agent:set-pet-mouse-passthrough", Boolean(ignore)),
   updatePetWindowLayout: (scale) => ipcRenderer.invoke("agent:update-pet-window-layout", { scale }),
+  updateBubbleWindowSize: (width, height) => ipcRenderer.invoke("agent:update-bubble-window-size", { width, height }),
   getDataPath: () => ipcRenderer.invoke("agent:get-data-path"),
   openDataFolder: () => ipcRenderer.invoke("agent:open-data-folder"),
   onMenuAction: (callback) => {
@@ -52,6 +65,16 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     ipcRenderer.on("agent:chat-state-updated", listener);
     return () => ipcRenderer.removeListener("agent:chat-state-updated", listener);
   },
+  onLive2DModelsUpdated: (callback) => {
+    const listener = (_event, models) => callback(models);
+    ipcRenderer.on("agent:live2d-models-updated", listener);
+    return () => ipcRenderer.removeListener("agent:live2d-models-updated", listener);
+  },
+  onBubblePlacementUpdated: (callback) => {
+    const listener = (_event, placement) => callback(placement);
+    ipcRenderer.on("agent:bubble-placement-updated", listener);
+    return () => ipcRenderer.removeListener("agent:bubble-placement-updated", listener);
+  },
   onPositionLockUpdated: (callback) => {
     const listener = (_event, locked) => callback(locked);
     ipcRenderer.on("agent:position-lock-updated", listener);
@@ -66,6 +89,11 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = () => callback();
     ipcRenderer.on("agent:clear-expressions", listener);
     return () => ipcRenderer.removeListener("agent:clear-expressions", listener);
+  },
+  onExpressionsUpdated: (callback) => {
+    const listener = (_event, expressions) => callback(expressions);
+    ipcRenderer.on("agent:expressions-updated", listener);
+    return () => ipcRenderer.removeListener("agent:expressions-updated", listener);
   },
   onMoodUpdated: (callback) => {
     const listener = (_event, payload) => callback(payload);

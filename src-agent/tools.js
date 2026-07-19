@@ -365,6 +365,83 @@ const switch_workspace = {
   }
 };
 
+// ---- Code agent tools ----
+
+const search_workspace_code = {
+  type: "function",
+  function: {
+    name: "search_workspace_code",
+    description: "在当前工作区的代码文件中搜索文本。会跳过 node_modules、.git、dist 等生成目录，返回文件相对路径、行号和匹配行。",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "要搜索的文本" },
+        extension: { type: "string", description: "可选扩展名过滤，例如 .ts 或 .tsx" }
+      },
+      required: ["query"]
+    }
+  }
+};
+
+const read_workspace_code = {
+  type: "function",
+  function: {
+    name: "read_workspace_code",
+    description: "读取当前工作区内一个代码或配置文件。path 必须是相对于工作区的路径。",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "工作区内的相对文件路径" } },
+      required: ["path"]
+    }
+  }
+};
+
+const apply_workspace_patch = {
+  type: "function",
+  function: {
+    name: "apply_workspace_patch",
+    description: "精确替换工作区内已有文件的一段文本。必须先读取文件并向用户说明改动；只有用户在最近一条消息中明确回复“确认执行”后才能调用。old_text 必须完整且唯一。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的相对文件路径" },
+        old_text: { type: "string", description: "从当前文件读取到、且在文件中唯一的原始文本" },
+        new_text: { type: "string", description: "要替换成的新文本" }
+      },
+      required: ["path", "old_text", "new_text"]
+    }
+  }
+};
+
+const create_workspace_file = {
+  type: "function",
+  function: {
+    name: "create_workspace_file",
+    description: "在当前工作区创建新文件。必须先向用户展示路径和内容摘要；只有用户在最近一条消息中明确回复“确认执行”后才能调用。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的新文件相对路径" },
+        content: { type: "string", description: "完整文件内容" }
+      },
+      required: ["path", "content"]
+    }
+  }
+};
+
+const run_workspace_command = {
+  type: "function",
+  function: {
+    name: "run_workspace_command",
+    description: "在当前工作区运行受限的开发命令。必须先向用户展示完整命令并等待其最近一条消息明确回复“确认执行”。允许 npm run/npm test、npx tsc --noEmit 和只读 git 命令。",
+    parameters: {
+      type: "object",
+      properties: { command: { type: "string", description: "完整命令，例如 npm run build" } },
+      required: ["command"]
+    }
+  }
+};
+
 // ---- Mood tool (LLM must call this each turn) ----
 
 const set_mood = {
@@ -419,6 +496,12 @@ export const ALL_TOOLS = [
   // Workspace
   list_workspace,
   switch_workspace,
+  // Code agent
+  search_workspace_code,
+  read_workspace_code,
+  apply_workspace_patch,
+  create_workspace_file,
+  run_workspace_command,
   // Mood
   set_mood
 ];

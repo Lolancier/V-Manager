@@ -223,6 +223,12 @@ export const activeModel = {
   moodParams: QIANQIAN_MOOD_PARAMS,
 };
 
+export const LIVE2D_MODEL_PRESETS = [
+  { id: "qianqian", name: "芊芊", detail: "完整表情、形态与动作适配" },
+  { id: "hiyori", name: "Hiyori", detail: "Cubism 官方示例模型" },
+  { id: "epsilon", name: "Epsilon", detail: "轻量免费示例模型" }
+] as const;
+
 // ---- Expression parameter map (extracted from .exp3.json files) ----
 // Each expression controls a unique parameter → naturally combinable
 
@@ -247,8 +253,8 @@ export const EXPRESSION_PARAMS: Record<string, { id: string; value: number }[]> 
   expression17: [{ id: "Param83", value: 1 }],   // 鼓嘴
   expression18: [{ id: "Param89", value: 1 }],   // 星星
   expression19: [{ id: "Param90", value: 1 }],   // 生气
-  expression20: [{ id: "Param84", value: 1 }],   // 长发
-  expression21: [{ id: "Param85", value: 1 }],   // 双马尾
+  expression20: [{ id: "Param84", value: 1 }, { id: "Param85", value: 0 }], // 长发
+  expression21: [{ id: "Param85", value: 1 }, { id: "Param84", value: 0 }], // 双马尾
   expression22: [{ id: "Param86", value: 1 }],   // 垂耳
   expression23: [{ id: "Param95", value: 1 }],   // 照镜子
   expression24: [{ id: "Param96", value: 1 }],   // 狐狸

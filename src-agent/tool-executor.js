@@ -15,6 +15,13 @@ import { getRagSnapshot, rebuildRagIndex, loadRagConfig, retrieveRagContext } fr
 import { getAgentPaths } from "./runtime-paths.js";
 import { tokenize } from "./shared/utils.js";
 import { executeWorkspaceIntent } from "./workspace-executor.js";
+import {
+  searchWorkspaceCode,
+  readWorkspaceCode,
+  applyWorkspacePatch,
+  createWorkspaceFile,
+  runWorkspaceCommand
+} from "./code-executor.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -139,6 +146,18 @@ export async function executeTool(name, args = {}, context = {}) {
         const result = await executeWorkspaceIntent({ type: "workspace_switch", targetPath: args.path || "" }, { cwd: process.cwd() });
         return { ok: true, reply: result?.reply || "" };
       }
+
+      // ---- Code agent ----
+      case "search_workspace_code":
+        return await searchWorkspaceCode(args.query, { extension: args.extension }, context);
+      case "read_workspace_code":
+        return await readWorkspaceCode(args.path, context);
+      case "apply_workspace_patch":
+        return await applyWorkspacePatch(args, context);
+      case "create_workspace_file":
+        return await createWorkspaceFile(args, context);
+      case "run_workspace_command":
+        return await runWorkspaceCommand(args.command, context);
 
       // ---- Mood (handled by core.js interceptor, fallback no-op) ----
       case "set_mood":
