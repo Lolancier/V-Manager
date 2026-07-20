@@ -289,21 +289,19 @@ try {
             Sort-Object StartTime
     )
     if ($processes.Count -eq 0 -and $allWeChatProcesses.Count -gt 0) {
-        $executable = @($allWeChatProcesses | ForEach-Object {
-            try { $_.Path } catch { $null }
-        } | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 1)
-        if ($executable.Count -gt 0) {
-            Start-Process -FilePath $executable[0] | Out-Null
-            Start-Sleep -Milliseconds 1200
-            $processes = @(
-                Get-Process -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ProcessName -match "^(WeChat|Weixin|WeChatAppEx)$" -and $_.MainWindowHandle -ne 0 } |
-                    Sort-Object StartTime
-            )
-        }
+        [System.Windows.Forms.SendKeys]::SendWait("^%w")
+        Start-Sleep -Milliseconds 900
+        $processes = @(
+            Get-Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.ProcessName -match "^(WeChat|Weixin|WeChatAppEx)$" -and $_.MainWindowHandle -ne 0 } |
+                Sort-Object StartTime
+        )
     }
     if ($processes.Count -eq 0) {
-        throw "当前没有可操作的微信主窗口；请先登录微信并打开主窗口。"
+        if ($allWeChatProcesses.Count -eq 0) {
+            throw "微信未运行；请先登录微信。"
+        }
+        throw "微信正在运行，但默认显示快捷键 Ctrl+Alt+W 没有打开主窗口；请检查微信快捷键设置。"
     }
     if ($processes.Count -gt 1) {
         throw "检测到多个微信主窗口，暂时无法安全判断要操作哪一个。"

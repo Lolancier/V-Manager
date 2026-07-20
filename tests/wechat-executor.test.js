@@ -3,6 +3,7 @@ import test from "node:test";
 import { parseWeChatSendIntent, validateWeChatMessageRequest } from "../src-agent/executors/wechat-executor.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { ALL_TOOLS } from "../src-agent/tools.js";
+import fs from "node:fs/promises";
 
 test("validateWeChatMessageRequest normalizes a valid request", () => {
   assert.deepEqual(
@@ -50,4 +51,10 @@ test("explicit WeChat send commands use the messenger route", () => {
 
 test("send_wechat_message is registered as an Agent tool", () => {
   assert.ok(ALL_TOOLS.some((tool) => tool.function?.name === "send_wechat_message"));
+});
+
+test("WeChat automation restores the existing client without launching another process", async () => {
+  const script = await fs.readFile(new URL("../src-agent/scripts/wechat-send.ps1", import.meta.url), "utf8");
+  assert.match(script, /SendWait\("\^%w"\)/);
+  assert.doesNotMatch(script, /Start-Process/);
 });
