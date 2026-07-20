@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, screen, session, shell } from "electron";
 import { createHash } from "node:crypto";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
@@ -1140,7 +1140,12 @@ ipcMain.handle("agent:get-local-stt-status", async (_event, modelId) => {
 });
 
 ipcMain.handle("agent:install-local-stt", async (_event, modelId) => {
-  return installLocalStt(app.getPath("userData"), modelId, broadcastSttProgress);
+  return installLocalStt(
+    app.getPath("userData"),
+    modelId,
+    broadcastSttProgress,
+    (url, options) => net.fetch(url, options)
+  );
 });
 
 ipcMain.handle("agent:transcribe-local-speech", async (_event, audioBytes) => {

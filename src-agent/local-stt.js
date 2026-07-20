@@ -9,6 +9,10 @@ const MODEL_FILES = {
   "base-q5_1": "ggml-base-q5_1.bin",
   "small-q5_1": "ggml-small-q5_1.bin"
 };
+const MODEL_MIN_BYTES = {
+  "base-q5_1": 40 * 1024 * 1024,
+  "small-q5_1": 120 * 1024 * 1024
+};
 
 function getSttPaths(baseDir, modelId = "small-q5_1") {
   const root = path.join(baseDir, "agent-data", "stt-models");
@@ -34,40 +38,67 @@ async function findFile(directory, fileName, depth = 0) {
   return "";
 }
 
-async function downloadFile(url, destination, onProgress, phase) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(30 * 60 * 1000) });
-  if (!response.ok || !response.body) throw new Error(`下载失败：HTTP ${response.status}`);
-  const total = Number(response.headers.get("content-length")) || 0;
-  const reader = response.body.getReader();
-  const partialPath = `${destination}.part`;
-  await fs.unlink(partialPath).catch(() => {});
-  const handle = await fs.open(partialPath, "w");
-  let received = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      await handle.write(value);
-      received += value.byteLength;
-      onProgress?.({ phase, received, total, percent: total ? Math.round((received / total) * 100) : 0 });
-    }
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  if (total && received !== total) {
-    await fs.unlink(partialPath).catch(() => {});
-    throw new Error(`下载不完整：应为 ${total} 字节，实际收到 ${received} 字节。`);
-  }
-  await fs.rename(partialPath, destination);
+function describeDownloadError(error) {
+  if (error?.cause?.code === "UND_ERR_CONNECT_TIMEOUT") return "连接服务器超时";
+  if (error?.name === "TimeoutError" || error?.name === "AbortError") return "下载超时";
+  return error instanceof Error ? error.message : String(error);
 }
 
-async function downloadWhisperRuntime(paths, onProgress) {
+async function downloadFile(url, destination, onProgress, phase, fetchImpl = fetch) {
+  const partialPath = `${destination}.part`;
+  await fs.unlink(partialPath).catch(() => {});
+  try {
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(30 * 60 * 1000) });
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+    const total = Number(response.headers.get("content-length")) || 0;
+    const reader = response.body.getReader();
+    const handle = await fs.open(partialPath, "w");
+    let received = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await handle.write(value);
+        received += value.byteLength;
+        onProgress?.({ phase, received, total, percent: total ? Math.round((received / total) * 100) : 0 });
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    if (total && received !== total) {
+      throw new Error(`下载不完整：应为 ${total} 字节，实际收到 ${received} 字节`);
+    }
+    await fs.rename(partialPath, destination);
+  } catch (error) {
+    await fs.unlink(partialPath).catch(() => {});
+    throw error;
+  }
+}
+
+async function downloadFromSources(urls, destination, onProgress, phase, fetchImpl) {
+  const failures = [];
+  for (const url of urls) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await downloadFile(url, destination, onProgress, phase, fetchImpl);
+        return;
+      } catch (error) {
+        failures.push(describeDownloadError(error));
+        console.warn(`[local-stt] download attempt ${attempt} failed for ${new URL(url).host}:`, error);
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+    }
+  }
+  throw new Error(`所有下载源均连接失败：${failures.at(-1) || "未知网络错误"}`);
+}
+
+async function downloadWhisperRuntime(paths, onProgress, fetchImpl) {
   await fs.mkdir(paths.root, { recursive: true });
   const archivePath = path.join(paths.root, "whisper-bin-x64.zip");
   const archiveExists = await fs.access(archivePath).then(() => true).catch(() => false);
   if (!archiveExists) {
-    const release = await fetch(RELEASE_API, {
+    const release = await fetchImpl(RELEASE_API, {
       headers: { accept: "application/vnd.github+json", "user-agent": "V-Manager" },
       signal: AbortSignal.timeout(30000)
     });
@@ -75,7 +106,7 @@ async function downloadWhisperRuntime(paths, onProgress) {
     const data = await release.json();
     const asset = data.assets?.find((item) => item.name === "whisper-bin-x64.zip");
     if (!asset?.browser_download_url) throw new Error("whisper.cpp 未提供 Windows x64 运行包。");
-    await downloadFile(asset.browser_download_url, archivePath, onProgress, "runtime");
+    await downloadFromSources([asset.browser_download_url], archivePath, onProgress, "runtime", fetchImpl);
   }
   await fs.mkdir(paths.runtimeDir, { recursive: true });
   const quotePowerShellLiteral = (value) => `'${String(value).replaceAll("'", "''")}'`;
@@ -103,11 +134,13 @@ async function downloadWhisperRuntime(paths, onProgress) {
 export async function getLocalSttStatus(baseDir, modelId = "small-q5_1") {
   const paths = getSttPaths(baseDir, modelId);
   const executablePath = await findFile(paths.runtimeDir, "whisper-cli.exe");
-  const modelInstalled = await fs.access(paths.modelPath).then(() => true).catch(() => false);
+  const modelSize = await fs.stat(paths.modelPath).then((stat) => stat.size).catch(() => 0);
+  const modelInstalled = modelSize >= (MODEL_MIN_BYTES[modelId] || MODEL_MIN_BYTES["small-q5_1"]);
   return {
     installed: Boolean(executablePath && modelInstalled),
     runtimeInstalled: Boolean(executablePath),
     modelInstalled,
+    modelSize,
     executablePath,
     modelPath: paths.modelPath,
     root: paths.root,
@@ -115,19 +148,28 @@ export async function getLocalSttStatus(baseDir, modelId = "small-q5_1") {
   };
 }
 
-export async function installLocalStt(baseDir, modelId = "small-q5_1", onProgress) {
+export async function installLocalStt(baseDir, modelId = "small-q5_1", onProgress, fetchImpl = fetch) {
   const paths = getSttPaths(baseDir, modelId);
   await fs.mkdir(paths.root, { recursive: true });
   let status = await getLocalSttStatus(baseDir, modelId);
   if (!status.runtimeInstalled) {
     onProgress?.({ phase: "runtime", received: 0, total: 0, percent: 0 });
-    await downloadWhisperRuntime(paths, onProgress);
+    await downloadWhisperRuntime(paths, onProgress, fetchImpl);
   }
   if (!status.modelInstalled) {
     const modelFile = MODEL_FILES[modelId] || MODEL_FILES["small-q5_1"];
-    const modelUrl = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${modelFile}?download=true`;
+    const modelUrls = [
+      `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${modelFile}?download=true`,
+      `https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/${modelFile}?download=true`
+    ];
     onProgress?.({ phase: "model", received: 0, total: 0, percent: 0 });
-    await downloadFile(modelUrl, paths.modelPath, onProgress, "model");
+    try {
+      await downloadFromSources(modelUrls, paths.modelPath, onProgress, "model", fetchImpl);
+    } catch (error) {
+      throw new Error(
+        `模型下载失败：${describeDownloadError(error)}。也可以手动下载 ${modelFile}，放入 ${paths.root} 后再次点击安装。`
+      );
+    }
   }
   status = await getLocalSttStatus(baseDir, modelId);
   if (!status.installed) throw new Error("本地语音模型安装后未通过完整性检查。");

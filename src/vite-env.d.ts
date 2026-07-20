@@ -82,6 +82,7 @@ interface LocalSttStatus {
   installed: boolean;
   runtimeInstalled: boolean;
   modelInstalled: boolean;
+  modelSize: number;
   executablePath: string;
   modelPath: string;
   root: string;
