@@ -618,7 +618,7 @@ function buildSystemPrompt(config, knowledge) {
     `当前本地时间为：${currentTimeText}。`,
     "你需要基于本地知识库和近期上下文回答，避免凭空编造权限和操作结果。",
     "如果用户询问当前时间、日期、星期，优先使用上面的当前本地时间直接回答，不要自行编造。",
-    "如果遇到浏览器接管、QQ/微信自动发消息等尚未接通的能力，请明确说明当前是规划能力。",
+    "浏览器网址打开、网页搜索和 VS Code 文件/工作区打开已经接通；QQ/微信自动发消息仍未接通，不得声称已发送。",
     "",
     knowledgeBlock
   ].join("\n");
@@ -868,6 +868,7 @@ function sanitizeFaceParamsForMood(faceParams, mood) {
 
 function getToolsForRoute(routeType) {
   const groups = {
+    ui_automation: ["open_browser_url", "search_web", "open_in_vscode", "set_mood"],
     app_control: ["check_process_running", "kill_process", "list_running_apps", "launch_application", "find_application", "set_mood"],
     app_status: ["check_process_running", "list_running_apps", "find_application", "set_mood"],
     app_lookup: ["find_application", "refresh_app_registry", "set_mood"],

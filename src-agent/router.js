@@ -3,6 +3,7 @@ import { detectWorkspaceIntent, executeWorkspaceIntent } from "./workspace-execu
 import { handle as appHandle } from "./executors/app-executor.js";
 import { handle as fileHandle } from "./executors/file-executor.js";
 import { handle as systemHandle } from "./executors/system-executor.js";
+import { handle as uiAutomationHandle } from "./executors/ui-automation-executor.js";
 
 function detectAppIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
@@ -19,6 +20,17 @@ function detectAppIntent(message) {
   }
   if (/(?:路径|安装位置|启动入口|appid).*(?:qq|微信|网易云|浏览器|chrome|edge|vscode)/.test(normalized)) {
     return { type: "app_lookup" };
+  }
+  return null;
+}
+
+function detectUiAutomationIntent(message) {
+  const normalized = normalizeText(message).toLowerCase();
+  if (/(?:浏览器|百度|谷歌|bing|google).*(?:搜索|搜一下|查一下|打开|访问)/.test(normalized)) {
+    return { type: "ui_automation" };
+  }
+  if (/(?:vscode|vs code).*(?:打开|载入)/.test(normalized)) {
+    return { type: "ui_automation" };
   }
   return null;
 }
@@ -50,6 +62,7 @@ function detectSystemIntent(message) {
 export function resolveAgentRoute(message) {
   return (
     detectWorkspaceIntent(message)
+    || detectUiAutomationIntent(message)
     || detectAppIntent(message)
     || detectFileIntent(message)
     || detectRagIntent(message)
@@ -64,6 +77,7 @@ export function resolveAgentRoute(message) {
  */
 export async function runRoutedLocalExecutor(message, context = {}) {
   const executors = [
+    { name: "ui-automation", fn: uiAutomationHandle },
     { name: "workspace", fn: workspaceHandle },
     { name: "app", fn: appHandle },
     { name: "file", fn: fileHandle },

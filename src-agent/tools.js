@@ -131,6 +131,51 @@ const refresh_app_registry = {
   }
 };
 
+const open_browser_url = {
+  type: "function",
+  function: {
+    name: "open_browser_url",
+    description: "在系统默认浏览器中打开 http 或 https 网页。适用于用户明确要求访问某个网址。",
+    parameters: {
+      type: "object",
+      properties: { url: { type: "string", description: "要打开的网址，如 https://github.com。" } },
+      required: ["url"]
+    }
+  }
+};
+
+const search_web = {
+  type: "function",
+  function: {
+    name: "search_web",
+    description: "在系统默认浏览器中打开搜索结果页。适用于用户明确要求在网页上搜索内容。",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "搜索关键词。" },
+        engine: { type: "string", enum: ["bing", "google", "baidu"], description: "搜索引擎，默认 bing。" }
+      },
+      required: ["query"]
+    }
+  }
+};
+
+const open_in_vscode = {
+  type: "function",
+  function: {
+    name: "open_in_vscode",
+    description: "用 VS Code 打开本地文件或文件夹；打开文件时可定位到指定行。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "本地文件或文件夹的完整路径。" },
+        line: { type: "integer", minimum: 1, description: "可选，文件行号。" }
+      },
+      required: ["path"]
+    }
+  }
+};
+
 // ---- File tools ----
 
 const list_directory = {
@@ -480,6 +525,9 @@ export const ALL_TOOLS = [
   launch_application,
   find_application,
   refresh_app_registry,
+  open_browser_url,
+  search_web,
+  open_in_vscode,
   // File
   list_directory,
   read_text_file,

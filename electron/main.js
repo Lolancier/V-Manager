@@ -1098,9 +1098,10 @@ ipcMain.handle("agent:get-bootstrap", async () => {
       { id: "resource", name: "资源查看", status: "ready", detail: "可查看 CPU、内存、运行进程和当前前台应用数量。" },
       { id: "launcher", name: "应用启动", status: "ready", detail: "已接入本地执行层，可直接启动常见应用，也支持传入本地 exe 路径。" },
       { id: "code-agent", name: "代码代理", status: "ready", detail: "可在当前工作区搜索和读取代码；文件修改与开发命令必须经用户明确确认后执行。" },
-      { id: "browser", name: "浏览器搜索", status: "planned", detail: "预留插件位，后续接浏览器自动化或联网搜索。" },
+      { id: "browser", name: "浏览器搜索", status: "ready", detail: "可在系统默认浏览器中打开网址，并使用 Bing、Google 或百度搜索。" },
+      { id: "vscode", name: "VS Code 适配", status: "ready", detail: "可用 VS Code 打开本地文件或工作区，并定位到指定文件行。" },
       { id: "filesystem", name: "文件管理", status: "ready", detail: "当前支持打开文件/文件夹、列目录、读取文本、创建文件夹/文本文件、追加内容与显式删除。" },
-      { id: "messenger", name: "QQ/微信消息发送", status: "planned", detail: "后续通过 UI 自动化/系统脚本接入，现阶段仅做能力规划。" }
+      { id: "messenger", name: "QQ/微信消息发送", status: "planned", detail: "尚未接通自动发送；当前不会代替用户发送消息。" }
     ]
   };
 });

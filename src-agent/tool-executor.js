@@ -24,6 +24,7 @@ import {
 } from "./code-executor.js";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { openBrowserUrl, openInVscode, searchWeb } from "./executors/ui-automation-executor.js";
 
 /**
  * Execute a tool by name and return a structured result.
@@ -80,6 +81,12 @@ export async function executeTool(name, args = {}, context = {}) {
         const registry = await refreshAppRegistry(baseDir);
         return { ok: true, appCount: registry.apps.length };
       }
+      case "open_browser_url":
+        return await openBrowserUrl(args.url);
+      case "search_web":
+        return await searchWeb(args.query, args.engine);
+      case "open_in_vscode":
+        return await openInVscode(args.path, args.line);
 
       // ---- File ----
       case "list_directory":
