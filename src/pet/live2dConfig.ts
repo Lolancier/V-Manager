@@ -27,7 +27,6 @@ export const MOOD_COMBO_EXPRESSIONS: Record<PetMood, string[][]> = {
     ["expression7", "expression6"],            // 问号 + 眼珠转动
     ["expression8", "expression20"],           // 问号2 + 长发
     ["expression6", "expression25"],           // 眼珠 + 笔记本R
-    ["expression0", "expression7"],            // 豆豆眼 + 问号
   ],
   talking: [
     ["expression1", "expression30"],           // 星星眼 + 话筒
@@ -46,7 +45,8 @@ export const MOOD_COMBO_EXPRESSIONS: Record<PetMood, string[][]> = {
   surprised: [
     ["expression14", "expression7", "expression9"],   // 空白眼 + 问号 + 流汗
     ["expression13", "expression8", "expression17"],  // 轮回眼 + 问号2 + 鼓嘴
-    ["expression0", "expression9", "expression17"],   // 豆豆眼 + 流汗 + 鼓嘴
+    ["expression0", "expression9", "expression17"],   // 豆豆眼 + 流汗 + 鼓嘴（吃惊）
+    ["expression0", "expression7", "expression6"],          // 豆豆眼 + 问号 + 眼珠（困惑）
   ],
   angry: [
     ["expression19", "expression4", "expression17"],  // 生气 + 黑脸 + 鼓嘴
@@ -85,7 +85,7 @@ export const FACE_PARAM_WHITELIST: Record<string, { min: number; max: number; de
   "ParamAngleZ":     { min: -30, max: 30, desc: "左右歪头 -30左歪→30右歪" },
 
   // -- Expression toggle params (0=关, 1=开) --
-  "Param52":  { min: 0, max: 1, desc: "豆豆眼" },
+  "Param52":  { min: 0, max: 1, desc: "豆豆眼，仅用于惊讶、吃惊或困惑" },
   "Param53":  { min: 0, max: 1, desc: "星星眼" },
   "Param54":  { min: 0, max: 1, desc: "脸红" },
   "Param69":  { min: 0, max: 1, desc: "脸红2" },

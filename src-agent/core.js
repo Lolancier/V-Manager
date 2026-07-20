@@ -181,7 +181,7 @@ export async function ensureDataFiles(baseDir) {
         "## 眼睛特效（0=关, 1=开）",
         "| 参数 | 说明 |",
         "|------|------|",
-        "| Param52 | 豆豆眼 |",
+        "| Param52 | 豆豆眼（仅用于惊讶、吃惊、困惑；mood 必须为 surprised） |",
         "| Param53 | 星星眼 |",
         "| Param54 | 脸红 |",
         "| Param69 | 脸红2 |",
@@ -266,6 +266,15 @@ export async function ensureDataFiles(baseDir) {
       ].join("\n"),
       "utf-8"
     );
+  }
+
+  const currentExpressionKnowledge = await fs.readFile(exprKnowledge, "utf-8");
+  const updatedExpressionKnowledge = currentExpressionKnowledge.replace(
+    "| Param52 | 豆豆眼 |",
+    "| Param52 | 豆豆眼（仅用于惊讶、吃惊、困惑；mood 必须为 surprised） |"
+  );
+  if (updatedExpressionKnowledge !== currentExpressionKnowledge) {
+    await fs.writeFile(exprKnowledge, updatedExpressionKnowledge, "utf-8");
   }
 
   await ensureAppRegistry(baseDir);
@@ -652,7 +661,7 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnable
       "1. 系统状态和电脑操作必须调用对应工具，不要编造数据或执行结果。",
       "2. kill_process 和 delete_file_or_folder 属于破坏性操作，执行前必须说明目标并等待用户明确确认。",
       "3. 没有对应工具时，诚实说明目前没有这个能力。根据工具返回的 JSON 如实回复成功或失败。",
-      "4. 表情控制必须通过 set_mood 工具完成，绝不在对话文本中写参数名或 JSON。即使用户只发一个表情词，也直接调用工具。",
+      "4. 表情控制必须通过 set_mood 工具完成，绝不在对话文本中写参数名或 JSON。豆豆眼 Param52 仅用于惊讶、吃惊或困惑，并且 mood 必须设为 surprised；普通思考、提问、开心、害羞等情绪禁止使用。",
       "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行命令前，必须展示具体内容并等待用户明确回复确认执行。"
     ]
     : [
@@ -846,6 +855,15 @@ function buildFallbackReplyV2(config, message, knowledge, options = {}) {
     "",
     closing
   ].join("\n");
+}
+
+function sanitizeFaceParamsForMood(faceParams, mood) {
+  if (!faceParams) return null;
+  const safeParams = { ...faceParams };
+  if (mood !== "surprised") {
+    delete safeParams.Param52;
+  }
+  return Object.keys(safeParams).length ? safeParams : null;
 }
 
 function getToolsForRoute(routeType) {
@@ -1050,13 +1068,14 @@ export async function buildAgentReply(baseDir, payload) {
       const moodResult = parseMoodTag(reply);
       const faceResult = parseFaceTag(moodResult.cleanReply);
       reply = faceResult.cleanReply;
+      const safeFaceParams = sanitizeFaceParamsForMood(faceResult.faceParams, moodResult.detectedMood);
       responseMode = "deepseek_chat";
       meta = {
         ...meta,
         responseMode,
         model: fastConfig.deepseek.model,
         detectedMood: moodResult.detectedMood || relationshipProfile.emotion.suggestedMood,
-        faceParams: faceResult.faceParams || undefined
+        faceParams: safeFaceParams || undefined
       };
     } catch (error) {
       fallbackReason = error.message;
@@ -1175,6 +1194,8 @@ export async function buildAgentReply(baseDir, payload) {
         const faceResult = parseFaceTag(reply);
         reply = faceResult.cleanReply;
       }
+
+      faceParams = sanitizeFaceParamsForMood(faceParams, detectedMood);
 
       console.log("[core] detectedMood:", detectedMood || "none");
       console.log("[core] faceParams:", faceParams ? JSON.stringify(faceParams) : "none");

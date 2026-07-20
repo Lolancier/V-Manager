@@ -455,7 +455,7 @@ const set_mood = {
         mood: {
           type: "string",
           enum: ["happy", "sad", "surprised", "angry", "blush", "thinking"],
-          description: "情绪：happy=开心,sad=难过,surprised=惊讶,angry=生气,blush=害羞,thinking=思考"
+          description: "情绪：happy=开心,sad=难过,surprised=惊讶/吃惊/困惑,angry=生气,blush=害羞,thinking=普通思考。豆豆眼 Param52 只能搭配 surprised"
         },
         face_params: {
           type: "object",

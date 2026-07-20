@@ -338,7 +338,8 @@ function encodeWavFromChunks(chunks: Float32Array[], sourceSampleRate: number) {
 }
 
 function moodForTextSegment(segment: string, fallbackMood: PetMood): PetMood {
-  if (/[？?]|怎么|什么|要不|还是说/.test(segment)) return "surprised";
+  if (/居然|竟然|真的吗|怎么会|为什么|什么情况|没想到|吓我|吃惊|惊讶|困惑|疑惑|搞不懂|不明白|[！!][？?]|[？?][！!]/.test(segment)) return "surprised";
+  if (/[？?]|怎么|什么|要不|还是说/.test(segment)) return "thinking";
   if (/宝宝|乖|嘿嘿|摸摸头|想我|陪你|待在|呀/.test(segment)) return "blush";
   if (/累|辛苦|熬夜|费神|休息|喝口水|伸个懒腰|别太/.test(segment)) return "sad";
   if (/生气|皱眉|不许|别又/.test(segment)) return "angry";
@@ -733,9 +734,13 @@ function App() {
             return streamingRef.current ? "thinking" : "idle";
           });
         }, expressionMs);
-        // Always update faceParams (null = clear previous stale params)
-        setFaceParams(payload.faceParams ?? null);
-        if (payload.faceParams) {
+        // Param52 (豆豆眼) is reserved for surprise/shock/confusion.
+        const safeFaceParams = payload.faceParams ? { ...payload.faceParams } : null;
+        if (safeFaceParams && llmMood !== "surprised") {
+          delete safeFaceParams.Param52;
+        }
+        setFaceParams(safeFaceParams && Object.keys(safeFaceParams).length ? safeFaceParams : null);
+        if (safeFaceParams && Object.keys(safeFaceParams).length) {
           faceTimerRef.current = window.setTimeout(() => {
             faceTimerRef.current = null;
             setFaceParams(null);
