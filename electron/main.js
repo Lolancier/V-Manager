@@ -29,6 +29,7 @@ import {
 import { listWorkspaceCodeFiles, readWorkspaceCode } from "../src-agent/code-executor.js";
 import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
+import { loadRelationshipProfile, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,6 +80,7 @@ function mergeAgentConfig(nextConfig = {}) {
       voice: nextConfig.voice?.voice || defaultConfig.voice.voice
     },
     speechInput: { ...defaultConfig.speechInput, ...(nextConfig.speechInput ?? {}) },
+    relationship: { ...defaultConfig.relationship, ...(nextConfig.relationship ?? {}) },
     memory: { ...defaultConfig.memory, ...(nextConfig.memory ?? {}) }
   };
 }
@@ -837,6 +839,12 @@ function broadcastConfigUpdated(config) {
   }
 }
 
+function broadcastRelationshipProfile(profile) {
+  for (const win of [petWindow, settingsWindow, composerWindow, chatWindow, bubbleWindow, codeWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:relationship-updated", profile);
+  }
+}
+
 function broadcastLive2DModels() {
   for (const win of [petWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:live2d-models-updated", live2dModelOptions);
@@ -1066,9 +1074,11 @@ ipcMain.handle("agent:get-bootstrap", async () => {
   const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
   currentAgentConfig = config;
   const knowledgeFiles = await listKnowledgeFiles(app.getPath("userData"));
+  const relationshipProfile = await loadRelationshipProfile(app.getPath("userData"));
 
   return {
     config,
+    relationshipProfile,
     live2dModels: live2dModelOptions,
     knowledgeFiles,
     runtime: {
@@ -1077,6 +1087,7 @@ ipcMain.handle("agent:get-bootstrap", async () => {
     },
     abilities: [
       { id: "chat", name: "自然对话", status: "ready", detail: "已接入人格设定和本地知识检索。" },
+      { id: "relationship", name: "情绪与好感", status: "ready", detail: "本地计算情绪变化和关系阶段，并持续影响回复语气与 Live2D 神态。" },
       { id: "memory", name: "本地记忆/RAG", status: "ready", detail: "从本地知识库检索相关片段参与回答。" },
       { id: "resource", name: "资源查看", status: "ready", detail: "可查看 CPU、内存、运行进程和当前前台应用数量。" },
       { id: "launcher", name: "应用启动", status: "ready", detail: "已接入本地执行层，可直接启动常见应用，也支持传入本地 exe 路径。" },
@@ -1096,6 +1107,16 @@ ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   updateTitleBarOverlays();
   broadcastConfigUpdated(merged);
   return merged;
+});
+
+ipcMain.handle("agent:get-relationship-profile", async () => {
+  return loadRelationshipProfile(app.getPath("userData"));
+});
+
+ipcMain.handle("agent:reset-relationship-profile", async () => {
+  const profile = await resetRelationshipProfile(app.getPath("userData"));
+  broadcastRelationshipProfile(profile);
+  return profile;
 });
 
 ipcMain.handle("agent:get-live2d-models", async () => live2dModelOptions);
@@ -1206,6 +1227,10 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
+
+  if (result.meta?.relationship) {
+    broadcastRelationshipProfile(result.meta.relationship);
+  }
 
   activeManualExpressions = new Set(
     [...activeManualExpressions].filter((name) => persistentShapeExpressions.has(name))

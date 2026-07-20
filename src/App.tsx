@@ -88,6 +88,10 @@ const previewConfig: AgentConfig = {
     language: "zh",
     silenceMs: 1100
   },
+  relationship: {
+    enabled: true,
+    showProgress: true
+  },
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
@@ -96,6 +100,15 @@ const previewConfig: AgentConfig = {
 
 const previewBootstrap: AgentBootstrap = {
   config: previewConfig,
+  relationshipProfile: {
+    version: 1,
+    affection: { score: 12, stage: "new", stageLabel: "初识", interactions: 0, positiveInteractions: 0, negativeInteractions: 0 },
+    emotion: { valence: 0.1, arousal: 0.25, label: "平静", suggestedMood: "idle" },
+    daily: { date: "", positiveGrowth: 0 },
+    createdAt: new Date().toISOString(),
+    lastInteractionAt: null,
+    updatedAt: new Date().toISOString()
+  },
   knowledgeFiles: ["persona.md"],
   runtime: {
     mode: "preview"
@@ -174,6 +187,16 @@ function clearBubbleTimers(timers: { current: number[] }) {
 
 function clampPetScale(scale: number) {
   return Math.max(0.8, Math.min(1.5, Number(scale) || 1));
+}
+
+function relationshipNextStage(profile: RelationshipProfile) {
+  const next = [
+    { max: 19, label: "熟悉", target: 20 },
+    { max: 44, label: "朋友", target: 45 },
+    { max: 69, label: "挚友", target: 70 },
+    { max: 89, label: "心意相通", target: 90 }
+  ].find((stage) => profile.affection.score <= stage.max);
+  return next ? `距「${next.label}」还需 ${(next.target - profile.affection.score).toFixed(1)}` : "已达到最高关系阶段";
 }
 
 const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
@@ -360,6 +383,8 @@ function App() {
   const viewMode = useMemo(() => getViewMode(), []);
   const [bootstrap, setBootstrap] = useState<AgentBootstrap | null>(null);
   const [configDraft, setConfigDraft] = useState<AgentConfig | null>(null);
+  const [relationshipProfile, setRelationshipProfile] = useState<RelationshipProfile>(previewBootstrap.relationshipProfile);
+  const [resettingRelationship, setResettingRelationship] = useState(false);
   const [live2dModels, setLive2dModels] = useState<Live2DModelOption[]>(
     LIVE2D_MODEL_PRESETS.map((model) => ({ id: model.id, label: model.name, detail: model.detail, builtIn: true }))
   );
@@ -569,6 +594,7 @@ function App() {
         const result = await bridge.getBootstrap();
         setBootstrap(result);
         setConfigDraft(result.config);
+        setRelationshipProfile(result.relationshipProfile ?? previewBootstrap.relationshipProfile);
         setAsmrMode(result.config.voice.asmrMode ?? "sleep");
         setAsmrPrompt(result.config.voice.asmrPrompt ?? "");
         setAsmrScript(result.config.voice.asmrScript ?? "");
@@ -649,6 +675,8 @@ function App() {
       setKnowledge(nextState.knowledge);
       setLastReplyMeta(nextState.lastReplyMeta);
     });
+
+    const offRelationship = bridge.onRelationshipUpdated(setRelationshipProfile);
 
     const offPosLock = bridge.onPositionLockUpdated((locked: boolean) => {
       setPosLocked(locked);
@@ -757,6 +785,7 @@ function App() {
       offLive2DModels();
       offScale();
       offChatState();
+      offRelationship();
       offMenu();
       offPosLock?.();
       offTriggerExpr?.();
@@ -1013,6 +1042,17 @@ function App() {
       setSaveMessage("设置已保存到桌面端配置文件。");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleResetRelationship() {
+    if (!bridge || resettingRelationship) return;
+    if (!window.confirm("确认重置情绪与好感度？互动次数和关系阶段都会回到初始状态。")) return;
+    setResettingRelationship(true);
+    try {
+      setRelationshipProfile(await bridge.resetRelationshipProfile());
+    } finally {
+      setResettingRelationship(false);
     }
   }
 
@@ -1778,6 +1818,71 @@ function App() {
                 onChange={(event) => setConfigDraft({ ...configDraft, personaPrompt: event.target.value })}
               />
             </label>
+            <div className="relationship-settings">
+              <div className="relationship-heading">
+                <div>
+                  <strong>情绪与好感</strong>
+                  <span>{relationshipProfile.emotion.label} · {relationshipProfile.affection.stageLabel}</span>
+                </div>
+                <span className="relationship-stage">{relationshipProfile.affection.stageLabel}</span>
+              </div>
+
+              <div className="relationship-switches">
+                <label className="voice-switch">
+                  <input
+                    type="checkbox"
+                    checked={configDraft.relationship.enabled}
+                    onChange={(event) => setConfigDraft({
+                      ...configDraft,
+                      relationship: { ...configDraft.relationship, enabled: event.target.checked }
+                    })}
+                  />
+                  启用关系成长
+                </label>
+                <label className="voice-switch">
+                  <input
+                    type="checkbox"
+                    checked={configDraft.relationship.showProgress}
+                    onChange={(event) => setConfigDraft({
+                      ...configDraft,
+                      relationship: { ...configDraft.relationship, showProgress: event.target.checked }
+                    })}
+                  />
+                  显示成长进度
+                </label>
+              </div>
+
+              {configDraft.relationship.showProgress ? (
+                <>
+                  <div className="relationship-progress-copy">
+                    <span>好感度 {relationshipProfile.affection.score.toFixed(1)}</span>
+                    <span>{relationshipNextStage(relationshipProfile)}</span>
+                  </div>
+                  <div
+                    className="relationship-progress"
+                    role="progressbar"
+                    aria-label="好感度"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={relationshipProfile.affection.score}
+                  >
+                    <span style={{ width: `${relationshipProfile.affection.score}%` }} />
+                  </div>
+                  <div className="relationship-metrics">
+                    <div><span>互动</span><strong>{relationshipProfile.affection.interactions}</strong></div>
+                    <div><span>愉悦</span><strong>{Math.round((relationshipProfile.emotion.valence + 1) * 50)}%</strong></div>
+                    <div><span>活跃</span><strong>{Math.round(relationshipProfile.emotion.arousal * 100)}%</strong></div>
+                  </div>
+                </>
+              ) : null}
+
+              <div className="relationship-actions">
+                <span>数据保存在本地 profile.json</span>
+                <button className="ghost-button compact" type="button" disabled={resettingRelationship} onClick={() => void handleResetRelationship()}>
+                  {resettingRelationship ? "重置中..." : "重置关系状态"}
+                </button>
+              </div>
+            </div>
           </section>
 
           <section className="panel-block">

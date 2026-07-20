@@ -56,6 +56,10 @@ interface AgentConfig {
     language: string;
     silenceMs: number;
   };
+  relationship: {
+    enabled: boolean;
+    showProgress: boolean;
+  };
   memory: {
     maxMessages: number;
     knowledgeTopK: number;
@@ -89,8 +93,34 @@ interface LocalSttStatus {
   modelId: string;
 }
 
+interface RelationshipProfile {
+  version: number;
+  affection: {
+    score: number;
+    stage: "new" | "familiar" | "friend" | "close_friend" | "kindred";
+    stageLabel: string;
+    interactions: number;
+    positiveInteractions: number;
+    negativeInteractions: number;
+  };
+  emotion: {
+    valence: number;
+    arousal: number;
+    label: string;
+    suggestedMood: string;
+  };
+  daily: {
+    date: string;
+    positiveGrowth: number;
+  };
+  createdAt: string;
+  lastInteractionAt: string | null;
+  updatedAt: string;
+}
+
 interface AgentBootstrap {
   config: AgentConfig;
+  relationshipProfile: RelationshipProfile;
   live2dModels?: Live2DModelOption[];
   knowledgeFiles: string[];
   abilities: AgentAbility[];
@@ -104,7 +134,7 @@ interface ChatResult {
   reply: string;
   knowledge: AgentKnowledge[];
   meta: {
-    responseMode: "deepseek" | "fallback_local" | "local_tool";
+    responseMode: "deepseek" | "deepseek_tool" | "fallback_local" | "local_tool";
     usedKnowledge: boolean;
     knowledgeCount: number;
     knowledgeFiles: string[];
@@ -113,6 +143,7 @@ interface ChatResult {
     model?: string;
     detectedMood?: string;
     faceParams?: Record<string, number>;
+    relationship?: RelationshipProfile;
   };
 }
 
@@ -230,6 +261,8 @@ interface Window {
     installLocalStt: (modelId: string) => Promise<LocalSttStatus>;
     transcribeLocalSpeech: (audioBytes: Uint8Array) => Promise<{ text: string; modelId: string; language: string }>;
     openLocalSttFolder: () => Promise<string>;
+    getRelationshipProfile: () => Promise<RelationshipProfile>;
+    resetRelationshipProfile: () => Promise<RelationshipProfile>;
     chat: (payload: { message: string }) => Promise<ChatWindowState>;
     searchFiles: (query: string) => Promise<FileSearchResult[]>;
     getAppRegistry: () => Promise<AppRegistrySnapshot>;
@@ -277,5 +310,6 @@ interface Window {
     onClearExpressions: (callback: () => void) => () => void;
     onExpressionsUpdated: (callback: (expressions: string[]) => void) => () => void;
     onMoodUpdated?: (callback: (payload: { mood: string; faceParams: Record<string, number> | null; reply?: string }) => void) => () => void;
+    onRelationshipUpdated: (callback: (profile: RelationshipProfile) => void) => () => void;
   };
 }

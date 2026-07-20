@@ -20,6 +20,11 @@ import { getSystemResourceSnapshot } from "./executors/system-executor.js";
 import { ALL_TOOLS } from "./tools.js";
 import { executeTool } from "./tool-executor.js";
 import { maybeCompressAndTrim } from "./memory-compressor.js";
+import {
+  buildRelationshipPrompt,
+  loadRelationshipProfile,
+  recordRelationshipInteraction
+} from "./relationship-engine.js";
 
 // ---- Default config ----
 
@@ -64,6 +69,10 @@ export const defaultConfig = {
     language: "zh",
     silenceMs: 1100
   },
+  relationship: {
+    enabled: true,
+    showProgress: true
+  },
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
@@ -107,6 +116,10 @@ function mergeConfig(rawConfig = {}) {
     speechInput: {
       ...defaultConfig.speechInput,
       ...(rawConfig.speechInput ?? {})
+    },
+    relationship: {
+      ...defaultConfig.relationship,
+      ...(rawConfig.relationship ?? {})
     },
     memory: {
       ...defaultConfig.memory,
@@ -256,6 +269,7 @@ export async function ensureDataFiles(baseDir) {
 
   await ensureAppRegistry(baseDir);
   await ensureRagFiles(baseDir);
+  await loadRelationshipProfile(baseDir);
 }
 
 export async function loadConfig(baseDir) {
@@ -624,7 +638,7 @@ function buildSystemPromptV2(config, knowledge) {
   ].join("\n");
 }
 
-function buildSystemPromptV3(config, knowledge) {
+function buildSystemPromptV3(config, knowledge, relationshipProfile) {
   const now = new Date();
   const currentTimeText = now.toLocaleString("zh-CN", { hour12: false });
   const knowledgeBlock = knowledge.length
@@ -636,6 +650,8 @@ function buildSystemPromptV3(config, knowledge) {
     config.personaPrompt,
     "",
     `当前本地时间为：${currentTimeText}。`,
+    config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
+    "",
     "你是一个桌面 Agent，你可以通过调用工具来获取真实的系统信息、操作文件和启动应用。",
     "重要规则：",
     "1. 当用户问到系统状态（CPU、内存、磁盘空间、运行的应用等），你必须调用对应工具获取真实数据，不要编造任何数字。",
@@ -831,6 +847,9 @@ function buildFallbackReplyV2(config, message, knowledge, options = {}) {
 
 export async function buildAgentReply(baseDir, payload) {
   const config = await loadConfig(baseDir);
+  const relationshipProfile = config.relationship?.enabled
+    ? await recordRelationshipInteraction(baseDir, payload.message)
+    : await loadRelationshipProfile(baseDir);
   const history = await loadHistory(baseDir);
   const normalizedHistory = config.deepseek.apiKey
     ? history.filter((item) => !isStaleLocalModeReply(item.assistant))
@@ -875,6 +894,8 @@ export async function buildAgentReply(baseDir, payload) {
       route: route.type,
       ragMode: "skipped_for_local_tool",
       embeddingProvider: "skipped",
+      detectedMood: relationshipProfile.emotion.suggestedMood,
+      relationship: relationshipProfile,
       ...localToolReply.meta
     };
 
@@ -954,7 +975,7 @@ export async function buildAgentReply(baseDir, payload) {
   const messages = [
     {
       role: "system",
-      content: buildSystemPromptV3(config, knowledge)
+      content: buildSystemPromptV3(config, knowledge, relationshipProfile)
     },
     ...recentHistory,
     {
@@ -979,7 +1000,9 @@ export async function buildAgentReply(baseDir, payload) {
     model: config.deepseek.model,
     route: resolveAgentRoute(effectiveMessage).type,
     ragMode: ragResult.meta.ragMode,
-    embeddingProvider: ragResult.meta.embeddingProvider
+    embeddingProvider: ragResult.meta.embeddingProvider,
+    detectedMood: relationshipProfile.emotion.suggestedMood,
+    relationship: relationshipProfile
   };
 
   // Track where history-derived messages end — only tool calls added
@@ -1102,7 +1125,7 @@ export async function buildAgentReply(baseDir, payload) {
         ...meta,
         responseMode,
         toolUseCount,
-        detectedMood: detectedMood || undefined,
+        detectedMood: detectedMood || relationshipProfile.emotion.suggestedMood,
         faceParams: faceParams || undefined,
       };
     } catch (error) {

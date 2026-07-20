@@ -1690,6 +1690,99 @@ textarea:focus {
   background: #edf8f6;
 }
 
+.relationship-settings {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid #e5e8e9;
+}
+
+.relationship-heading,
+.relationship-actions,
+.relationship-progress-copy,
+.relationship-switches {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.relationship-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.relationship-heading strong {
+  color: #30383c;
+  font-size: 14px;
+}
+
+.relationship-heading span,
+.relationship-actions > span,
+.relationship-progress-copy {
+  color: #778186;
+  font-size: 11px;
+}
+
+.relationship-stage {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #e4c7c3;
+  border-radius: 5px;
+  color: #a43f39 !important;
+  background: #fff1ef;
+  font-weight: 700;
+}
+
+.relationship-switches {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.relationship-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #e9edef;
+}
+
+.relationship-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #df5b56;
+  transition: width 0.35s ease;
+}
+
+.relationship-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid #edf0f1;
+  border-bottom: 1px solid #edf0f1;
+}
+
+.relationship-metrics > div {
+  display: grid;
+  gap: 3px;
+  padding: 11px 8px;
+  text-align: center;
+}
+
+.relationship-metrics > div + div {
+  border-left: 1px solid #edf0f1;
+}
+
+.relationship-metrics span {
+  color: #7c878c;
+  font-size: 10px;
+}
+
+.relationship-metrics strong {
+  color: #30383c;
+  font-size: 14px;
+}
+
 .asmr-workspace-heading {
   display: flex;
   align-items: flex-start;
@@ -1777,6 +1870,37 @@ textarea:focus {
   border-color: #2ba79a;
   color: #dff8f4;
   background: #176d65;
+}
+
+:root[data-theme="dark"] .relationship-settings,
+:root[data-theme="dark"] .relationship-metrics {
+  border-color: #30383b;
+}
+
+:root[data-theme="dark"] .relationship-heading strong,
+:root[data-theme="dark"] .relationship-metrics strong {
+  color: #e2e7e9;
+}
+
+:root[data-theme="dark"] .relationship-heading span,
+:root[data-theme="dark"] .relationship-actions > span,
+:root[data-theme="dark"] .relationship-progress-copy,
+:root[data-theme="dark"] .relationship-metrics span {
+  color: #929ea2;
+}
+
+:root[data-theme="dark"] .relationship-stage {
+  border-color: #79413d;
+  color: #ffd7d2 !important;
+  background: #3d211f;
+}
+
+:root[data-theme="dark"] .relationship-progress {
+  background: #2a3235;
+}
+
+:root[data-theme="dark"] .relationship-metrics > div + div {
+  border-color: #30383b;
 }
 
 :root[data-theme="dark"] .voice-connection-feedback {

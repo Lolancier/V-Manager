@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   installLocalStt: (modelId) => ipcRenderer.invoke("agent:install-local-stt", modelId),
   transcribeLocalSpeech: (audioBytes) => ipcRenderer.invoke("agent:transcribe-local-speech", audioBytes),
   openLocalSttFolder: () => ipcRenderer.invoke("agent:open-local-stt-folder"),
+  getRelationshipProfile: () => ipcRenderer.invoke("agent:get-relationship-profile"),
+  resetRelationshipProfile: () => ipcRenderer.invoke("agent:reset-relationship-profile"),
   chat: (payload) => ipcRenderer.invoke("agent:chat", payload),
   searchFiles: (query) => ipcRenderer.invoke("agent:search-files", query),
   getAppRegistry: () => ipcRenderer.invoke("agent:get-app-registry"),
@@ -108,5 +110,10 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("agent:mood-updated", listener);
     return () => ipcRenderer.removeListener("agent:mood-updated", listener);
+  },
+  onRelationshipUpdated: (callback) => {
+    const listener = (_event, profile) => callback(profile);
+    ipcRenderer.on("agent:relationship-updated", listener);
+    return () => ipcRenderer.removeListener("agent:relationship-updated", listener);
   }
 });

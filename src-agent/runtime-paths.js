@@ -9,6 +9,7 @@ export function getAgentPaths(baseDir) {
   return {
     dataDir,
     configPath: path.join(dataDir, "config.json"),
+    profilePath: path.join(dataDir, "profile.json"),
     memoryDir,
     memoryPath: path.join(memoryDir, "conversation.jsonl"),
     knowledgeDir: path.join(dataDir, "knowledge"),
