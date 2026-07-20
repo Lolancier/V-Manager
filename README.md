@@ -6,6 +6,7 @@
 
 ### 对话与记忆
 - 可自定义角色人设和系统提示词
+- 双模型意图路由：日常聊天走独立快速模型，电脑操作和代码任务走复杂任务模型
 - 流式对话（边生成边显示）
 - 长回复按 1-2 句拆分为连续气泡，按顺序完整展示
 - 聊天栏每条助手回复支持按需语音播放，重复内容优先读取本地音频缓存
@@ -16,7 +17,7 @@
 - 轻触 Live2D 模型可触发本地动作和分阶段互动台词，点击与窗口拖拽互不干扰
 
 ### 本地工具（Function Calling）
-通过 OpenAI 兼容的 function calling，LLM 可主动调用 26 个工具：
+通过 OpenAI 兼容的 function calling，复杂任务模型可主动调用 26 个工具，并按当前意图只注入相关工具集合：
 
 | 类别 | 工具 | 说明 |
 |---|---|---|
@@ -47,7 +48,7 @@
 | | `create_workspace_file` | 创建工作区内的新文件（需确认） |
 | | `run_workspace_command` | 运行受限开发命令（需确认） |
 
-常用操作（"启动QQ"、"打开桌面"）走 keyword 快速路径，**41ms 内返回**，不经过 LLM。
+常用操作（"启动QQ"、"关闭网易云"、"网易云还在吗"、"打开桌面"）走本地快速路径，不经过 LLM。应用别名会映射到真实进程名，关闭时先请求正常退出，再按 PID 清理残留并复查。
 
 ### RAG 向量检索
 - 文件扫描 + 文本切片（chunkSize 800, overlap 120）
@@ -84,7 +85,7 @@ Agent Core（Node.js）
   ├── shared/
   │   └── utils.js          统一工具函数（路径、文本、CSV 解析等）
   └── executors/
-      ├── app-executor.js   应用启动/定位
+      ├── app-executor.js   应用启动/定位/状态检测/关闭
       ├── file-executor.js  文件操作/搜索
       └── system-executor.js 系统资源/进程/磁盘
 
@@ -96,10 +97,12 @@ DeepSeek API
 
 ```
 用户输入
-  → keyword executor 链（workspace → app → file → system）
-    → 命中：直接返回（41ms）
-     → 未命中：RAG 检索 → DeepSeek（带 26 个工具）
-      → LLM 决策：调哪些工具、调几次（最多 5 轮）
+  → 意图路由
+    → 日常聊天：deepseek-chat 单次流式响应，不注入工具
+    → keyword executor 链（workspace → app → file → system）
+      → 命中：显示执行状态并直接返回本地结果
+      → 未命中：复杂任务模型 + 当前意图相关工具
+       → LLM 决策：调哪些工具、调几次（最多 5 轮）
       → 工具结果入对话记忆（含 toolCalls + toolResults）
       → 流式生成最终回复
   → 记忆压缩检查（超过 maxMessages × 1.5 触发）
@@ -168,7 +171,8 @@ npm run dev
 | 系统提示词 | — | 自定义人设指令 |
 | DeepSeek API Key | — | 必填 |
 | Base URL | api.deepseek.com/v1 | 可切换代理 |
-| 模型 | deepseek-chat | 支持 flash/pro/reasoner |
+| 日常对话模型 | deepseek-chat | 单次流式回复，不携带工具定义 |
+| 复杂任务模型 | deepseek-chat | 电脑操作、代码与工具调用，可切换 V4/reasoner 等模型 |
 | 最大消息数 | 40 | 上下文窗口大小（10-100） |
 | 检索条数 | 3 | RAG 每次召回知识片段数（1-10） |
 | ElevenLabs API Key | — | 用于账号音色读取和文字转语音 |

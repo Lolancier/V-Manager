@@ -30,6 +30,7 @@ import { listWorkspaceCodeFiles, readWorkspaceCode } from "../src-agent/code-exe
 import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
+import { resolveAgentRoute } from "../src-agent/router.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -264,7 +265,11 @@ function getReplySourceLabel(meta) {
     return "尚未发送对话";
   }
 
-  if (meta.responseMode === "deepseek") {
+  if (meta.responseMode === "deepseek_chat") {
+    return meta.model ? `快速对话 · ${meta.model}` : "快速对话";
+  }
+
+  if (meta.responseMode === "deepseek" || meta.responseMode === "deepseek_tool") {
     return meta.model ? `DeepSeek · ${meta.model}` : "DeepSeek";
   }
 
@@ -1183,18 +1188,22 @@ ipcMain.handle("agent:open-local-stt-folder", async () => {
 
 ipcMain.handle("agent:chat", async (_event, payload) => {
   const userMessage = { role: "user", content: payload.message };
-  const assistantPlaceholder = { role: "assistant", content: "" };
+  const route = resolveAgentRoute(payload.message);
+  const isAction = route.type !== "chat";
+  const isQuery = /查询|查看|看看|检查|状态|多少|有没有|在运行吗|还在吗/.test(payload.message);
+  const pendingText = isAction ? (isQuery ? "正在查询本机状态..." : "正在执行...") : "";
+  const assistantPlaceholder = { role: "assistant", content: pendingText };
   chatState = {
     ...chatState,
     messages: [...chatState.messages, userMessage, assistantPlaceholder],
     lastReplyMeta: {
-      responseMode: "deepseek",
+      responseMode: isAction ? "local_tool" : "deepseek_chat",
       usedKnowledge: false,
       knowledgeCount: 0,
       knowledgeFiles: [],
       fallbackReason: "",
       model: "",
-      sourceLabel: "生成中..."
+      sourceLabel: isAction ? pendingText : "生成中..."
     }
   };
   broadcastChatState();
@@ -1250,7 +1259,7 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
 });
 
 ipcMain.handle("agent:pet-touch", async () => {
-  if (chatState.lastReplyMeta?.sourceLabel === "生成中...") {
+  if (/^(生成中|正在执行|正在查询)/.test(chatState.lastReplyMeta?.sourceLabel || "")) {
     return { ok: false, busy: true };
   }
   const now = Date.now();

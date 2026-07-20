@@ -36,7 +36,8 @@ export const defaultConfig = {
   deepseek: {
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
-    model: "deepseek-chat"
+    model: "deepseek-chat",
+    chatModel: "deepseek-chat"
   },
   embedding: {
     apiKey: "",
@@ -638,12 +639,27 @@ function buildSystemPromptV2(config, knowledge) {
   ].join("\n");
 }
 
-function buildSystemPromptV3(config, knowledge, relationshipProfile) {
+function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnabled = true) {
   const now = new Date();
   const currentTimeText = now.toLocaleString("zh-CN", { hour12: false });
   const knowledgeBlock = knowledge.length
     ? knowledge.map((item, index) => `【知识片段 ${index + 1} | ${item.file}】\n${item.content}`).join("\n\n")
     : "暂无命中知识片段。";
+  const behaviorRules = toolsEnabled
+    ? [
+      "你是一个桌面 Agent，你可以通过调用工具获取真实系统信息、操作文件和启动应用。",
+      "重要规则：",
+      "1. 系统状态和电脑操作必须调用对应工具，不要编造数据或执行结果。",
+      "2. kill_process 和 delete_file_or_folder 属于破坏性操作，执行前必须说明目标并等待用户明确确认。",
+      "3. 没有对应工具时，诚实说明目前没有这个能力。根据工具返回的 JSON 如实回复成功或失败。",
+      "4. 表情控制必须通过 set_mood 工具完成，绝不在对话文本中写参数名或 JSON。即使用户只发一个表情词，也直接调用工具。",
+      "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行命令前，必须展示具体内容并等待用户明确回复确认执行。"
+    ]
+    : [
+      "当前是快速日常对话。直接自然地回应用户，不要声称执行了任何电脑操作。",
+      "只输出对话正文，不输出表情标签、参数名或 JSON；表情由本地情绪引擎处理。",
+      "回复保持贴近日常交谈的长度，除非用户明确要求详细说明。"
+    ];
 
   return [
     `你的人设名为 ${config.personaName}。`,
@@ -652,18 +668,7 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile) {
     `当前本地时间为：${currentTimeText}。`,
     config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
     "",
-    "你是一个桌面 Agent，你可以通过调用工具来获取真实的系统信息、操作文件和启动应用。",
-    "重要规则：",
-    "1. 当用户问到系统状态（CPU、内存、磁盘空间、运行的应用等），你必须调用对应工具获取真实数据，不要编造任何数字。",
-    "2. 当用户要求启动应用、打开文件、关闭应用等操作，你必须调用对应工具执行，然后报告实际结果（成功或失败）。",
-    "3. kill_process（终止进程）和 delete_file_or_folder（删除文件/文件夹）是破坏性操作，执行前必须先向用户确认：说明你要终止/删除的是什么，等用户明确同意后再调用工具。",
-    "4. 如果某个操作你没有对应的工具（例如没有工具能执行某操作），必须诚实告诉用户'我目前没有这个能力'，绝对不能编造执行结果。",
-    "5. 工具调用结果会以 JSON 格式返回给你，请基于真实数据用自然语言回复用户。如果工具返回 ok: false，如实告诉用户失败原因。",
-    "6. 如果用户只是普通聊天，不需要调用工具，直接回复即可。",
-    "7. 你拥有的工具包括：获取系统资源、查询磁盘空间、检查进程是否运行、终止进程（需确认）、启动应用、查找应用、文件操作（列出/读取/打开/创建/删除（需确认）/搜索）、知识库检索（向量相似度搜索）等。",
-    "8. 你是 Live2D 桌宠。表情控制必须通过 set_mood 工具调用完成，绝不在对话文本中写参数名（如 Param70:1 之类）或 JSON。工具参数详情和可用参数清单见知识库 expressions.md。",
-    "   即使用户只发一个词（如「眯眼」），也必须调用 set_mood 工具。不说「我试试」，直接做。",
-    "9. 处理代码工作区时，先用 search_workspace_code/read_workspace_code 了解真实代码。任何 create_workspace_file、apply_workspace_patch 或 run_workspace_command 都必须先展示具体路径、改动或命令，再等待用户最近一条消息明确回复“确认执行”。没有确认时只能说明计划，不能调用这些工具。",
+    ...behaviorRules,
     "",
     knowledgeBlock,
   ].join("\n");
@@ -843,6 +848,20 @@ function buildFallbackReplyV2(config, message, knowledge, options = {}) {
   ].join("\n");
 }
 
+function getToolsForRoute(routeType) {
+  const groups = {
+    app_control: ["check_process_running", "kill_process", "list_running_apps", "launch_application", "find_application", "set_mood"],
+    app_status: ["check_process_running", "list_running_apps", "find_application", "set_mood"],
+    app_lookup: ["find_application", "refresh_app_registry", "set_mood"],
+    system_status: ["get_system_resources", "get_disk_space", "check_process_running", "list_running_apps", "set_mood"],
+    file_system: ["list_directory", "read_text_file", "open_file_or_folder", "create_folder", "create_text_file", "append_to_file", "delete_file_or_folder", "search_files", "set_mood"],
+    rag_control: ["search_knowledge_base", "get_rag_status", "rebuild_rag_index", "set_mood"]
+  };
+  const workspaceTools = ["list_workspace", "switch_workspace", "search_workspace_code", "read_workspace_code", "apply_workspace_patch", "create_workspace_file", "run_workspace_command", "set_mood"];
+  const allowed = routeType.startsWith("workspace_") ? workspaceTools : groups[routeType];
+  return allowed ? ALL_TOOLS.filter((tool) => allowed.includes(tool.function?.name)) : ALL_TOOLS;
+}
+
 // ---- Main agent pipeline ----
 
 export async function buildAgentReply(baseDir, payload) {
@@ -856,6 +875,7 @@ export async function buildAgentReply(baseDir, payload) {
     : history;
   const commandResolution = resolveCommandWithContext(payload.message, normalizedHistory);
   const effectiveMessage = commandResolution.expandedMessage || payload.message;
+  const route = resolveAgentRoute(effectiveMessage);
 
   // --- Local executor dispatch (formerly tryHandleLocalDesktopQuery) ---
   const executorContext = {
@@ -883,7 +903,6 @@ export async function buildAgentReply(baseDir, payload) {
   const localToolReply = clarificationReply ?? await runRoutedLocalExecutor(effectiveMessage, executorContext);
 
   if (localToolReply) {
-    const route = resolveAgentRoute(effectiveMessage);
     const meta = {
       responseMode: "local_tool",
       usedKnowledge: false,
@@ -914,12 +933,18 @@ export async function buildAgentReply(baseDir, payload) {
 
   // --- RAG + DeepSeek path ---
   const ragConfig = await loadRagConfig(baseDir);
-  const ragResult = await retrieveRagContext(
-    baseDir,
-    effectiveMessage,
-    ragConfig.topK ?? config.memory.knowledgeTopK,
-    (query, topK) => retrieveKnowledge(baseDir, query, topK)
-  );
+  const knowledgeTopK = ragConfig.topK ?? config.memory.knowledgeTopK;
+  const ragResult = route.type === "chat"
+    ? {
+      items: await retrieveKnowledge(baseDir, effectiveMessage, knowledgeTopK),
+      meta: { ragMode: "fast_keyword", embeddingProvider: "skipped_for_chat" }
+    }
+    : await retrieveRagContext(
+      baseDir,
+      effectiveMessage,
+      knowledgeTopK,
+      (query, topK) => retrieveKnowledge(baseDir, query, topK)
+    );
   const knowledge = ragResult.items;
   // Build recent messages from history, limited by maxMessages count.
   // Track seen tool_call_ids to deduplicate — corrupted history may contain
@@ -927,11 +952,12 @@ export async function buildAgentReply(baseDir, payload) {
   const seenToolCallIds = new Set();
   const maxMsgs = config.memory.maxMessages || 40;
   const recentHistory = [];
+  const includeToolHistory = route.type !== "chat";
   const reversed = [...normalizedHistory].reverse();
   for (const item of reversed) {
     const entries = [];
     entries.push({ role: "user", content: item.user });
-    if (item.toolCalls && Array.isArray(item.toolCalls)) {
+    if (includeToolHistory && item.toolCalls && Array.isArray(item.toolCalls)) {
       // Deduplicate tool_calls: only include calls with a fresh id
       const freshCalls = item.toolCalls.filter((tc) => !seenToolCallIds.has(tc.id));
       if (freshCalls.length > 0) {
@@ -975,7 +1001,7 @@ export async function buildAgentReply(baseDir, payload) {
   const messages = [
     {
       role: "system",
-      content: buildSystemPromptV3(config, knowledge, relationshipProfile)
+      content: buildSystemPromptV3(config, knowledge, relationshipProfile, route.type !== "chat")
     },
     ...recentHistory,
     {
@@ -998,7 +1024,7 @@ export async function buildAgentReply(baseDir, payload) {
     knowledgeFiles: knowledge.map((item) => item.file),
     fallbackReason,
     model: config.deepseek.model,
-    route: resolveAgentRoute(effectiveMessage).type,
+    route: route.type,
     ragMode: ragResult.meta.ragMode,
     embeddingProvider: ragResult.meta.embeddingProvider,
     detectedMood: relationshipProfile.emotion.suggestedMood,
@@ -1009,10 +1035,39 @@ export async function buildAgentReply(baseDir, payload) {
   // AFTER this point belong to the current conversation round.
   const historySplitIndex = messages.length;
 
-  if (config.deepseek.apiKey) {
+  if (config.deepseek.apiKey && route.type === "chat") {
+    const fastConfig = {
+      ...config,
+      deepseek: {
+        ...config.deepseek,
+        model: config.deepseek.chatModel || "deepseek-chat"
+      }
+    };
+    try {
+      reply = payload.stream
+        ? await requestDeepSeekStream(fastConfig, messages, payload.onDelta)
+        : await requestDeepSeek(fastConfig, messages);
+      const moodResult = parseMoodTag(reply);
+      const faceResult = parseFaceTag(moodResult.cleanReply);
+      reply = faceResult.cleanReply;
+      responseMode = "deepseek_chat";
+      meta = {
+        ...meta,
+        responseMode,
+        model: fastConfig.deepseek.model,
+        detectedMood: moodResult.detectedMood || relationshipProfile.emotion.suggestedMood,
+        faceParams: faceResult.faceParams || undefined
+      };
+    } catch (error) {
+      fallbackReason = error.message;
+      reply = `${buildFallbackReplyV2(config, payload.message, knowledge, { hasApiKey: true })}\n\n模型调用报错：${error.message}`;
+      meta = { ...meta, fallbackReason };
+    }
+  } else if (config.deepseek.apiKey) {
     try {
       // Function calling loop: up to 5 rounds of tool calls
-      let response = await callDeepSeekWithTools(config, messages, ALL_TOOLS);
+      const routeTools = getToolsForRoute(route.type);
+      let response = await callDeepSeekWithTools(config, messages, routeTools);
       let round = 0;
       const maxRounds = 5;
 
@@ -1085,17 +1140,20 @@ export async function buildAgentReply(baseDir, payload) {
         }
 
         // Next round
-        response = await callDeepSeekWithTools(config, messages, round < maxRounds - 1 ? ALL_TOOLS : null);
+        response = await callDeepSeekWithTools(config, messages, round < maxRounds - 1 ? routeTools : null);
       }
 
       // Final reply
       if (!response.content && interceptedMood) {
         // LLM only called set_mood without text — use mood as reply hint
         reply = {happy:"嗯嗯~", sad:"呜呜…", surprised:"诶？！", angry:"哼！", blush:"诶嘿~", thinking:"嗯…"}[interceptedMood] || "好的~";
-      } else if (payload.stream) {
+      } else if (payload.stream && toolUseCount === 0) {
         reply = await requestDeepSeekStream(config, messages, payload.onDelta);
       } else {
         reply = response.content || "模型没有返回有效内容。";
+        if (payload.stream && payload.onDelta) {
+          payload.onDelta(reply);
+        }
       }
       responseMode = toolUseCount > 0 ? "deepseek_tool" : "deepseek";
 

@@ -6,8 +6,16 @@ import { handle as systemHandle } from "./executors/system-executor.js";
 
 function detectAppIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
-  if (/(?:启动|打开|运行|拉起).*(?:qq|微信|网易云|浏览器|chrome|edge|vscode|记事本|画图)/.test(normalized)) {
+  const mentionsKnownApp = /qq|微信|wechat|weixin|网易云(?:音乐)?|cloudmusic|浏览器|chrome|edge|vscode|vs code|记事本|notepad|画图|mspaint/.test(normalized);
+  const mentionsGenericApp = /应用|程序|软件|进程|\.exe\b/.test(normalized);
+  const commandLike = /^(?:请)?(?:帮我|替我|给我)?(?:启动|打开|运行|拉起|关闭|关掉|退出|结束|终止)/.test(normalized)
+    || /^(?:请)?(?:帮我)?把.{1,30}(?:打开|启动|运行|关闭|关掉|退出|结束|终止)(?:吧|一下)?$/.test(normalized);
+
+  if (commandLike && (mentionsKnownApp || mentionsGenericApp)) {
     return { type: "app_control" };
+  }
+  if (mentionsKnownApp && /(?:开了吗|打开了吗|在运行吗|有没有运行|是不是开着|是否启动|启动了吗|还在吗)/.test(normalized)) {
+    return { type: "app_status" };
   }
   if (/(?:路径|安装位置|启动入口|appid).*(?:qq|微信|网易云|浏览器|chrome|edge|vscode)/.test(normalized)) {
     return { type: "app_lookup" };
@@ -31,12 +39,21 @@ function detectRagIntent(message) {
   return null;
 }
 
+function detectSystemIntent(message) {
+  const normalized = normalizeText(message).toLowerCase();
+  if (/cpu|内存|磁盘|运行中的应用|进程列表|系统资源|电脑状态/.test(normalized)) {
+    return { type: "system_status" };
+  }
+  return null;
+}
+
 export function resolveAgentRoute(message) {
   return (
     detectWorkspaceIntent(message)
     || detectAppIntent(message)
     || detectFileIntent(message)
     || detectRagIntent(message)
+    || detectSystemIntent(message)
     || { type: "chat" }
   );
 }

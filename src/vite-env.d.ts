@@ -24,6 +24,7 @@ interface AgentConfig {
     apiKey: string;
     baseUrl: string;
     model: string;
+    chatModel: string;
   };
   embedding: {
     apiKey: string;
@@ -135,7 +136,7 @@ interface ChatResult {
   reply: string;
   knowledge: AgentKnowledge[];
   meta: {
-    responseMode: "deepseek" | "deepseek_tool" | "fallback_local" | "local_tool";
+    responseMode: "deepseek" | "deepseek_chat" | "deepseek_tool" | "fallback_local" | "local_tool";
     usedKnowledge: boolean;
     knowledgeCount: number;
     knowledgeFiles: string[];

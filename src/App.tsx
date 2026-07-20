@@ -55,7 +55,8 @@ const previewConfig: AgentConfig = {
   deepseek: {
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
-    model: "deepseek-chat"
+    model: "deepseek-chat",
+    chatModel: "deepseek-chat"
   },
   embedding: {
     apiKey: "",
@@ -807,7 +808,7 @@ function App() {
   const selectedLive2DModel = live2dModels.find((model) => model.id === configDraft?.appearance?.live2dModel)
     ?? live2dModels[0];
   const selectedModelPreset = configDraft ? getModelPresetValue(configDraft.deepseek.model) : "deepseek-v4-flash";
-  const isReplyStreaming = lastReplyMeta?.sourceLabel === "生成中...";
+  const isReplyStreaming = /^(生成中|正在执行|正在查询)/.test(lastReplyMeta?.sourceLabel ?? "");
   const statusText = useMemo(() => {
     if (!configDraft) {
       return "初始化中";
@@ -1953,7 +1954,7 @@ function App() {
               />
             </label>
             <label>
-              模型预设
+              复杂任务模型预设
               <select value={selectedModelPreset} onChange={(event) => handleModelPresetChange(event.target.value)}>
                 {deepSeekModelPresets.map((item) => (
                   <option key={item.value} value={item.value}>
@@ -1969,7 +1970,7 @@ function App() {
                 : deepSeekModelPresets.find((item) => item.value === selectedModelPreset)?.hint}
             </p>
             <label>
-              模型名
+              复杂任务模型名
               <input
                 value={configDraft.deepseek.model}
                 onChange={(event) =>
@@ -1980,8 +1981,21 @@ function App() {
                 }
               />
             </label>
+            <label>
+              日常对话模型
+              <input
+                value={configDraft.deepseek.chatModel}
+                placeholder="deepseek-chat"
+                onChange={(event) =>
+                  setConfigDraft({
+                    ...configDraft,
+                    deepseek: { ...configDraft.deepseek, chatModel: event.target.value }
+                  })
+                }
+              />
+            </label>
             <p className="knowledge-hint">
-              当前对话已启用流式输出，支持边生成边显示。`flash` 更适合快回复，`pro` 更适合更高质量的复杂回答。
+              日常对话使用独立快速模型单次流式返回；电脑操作与代码任务使用复杂任务模型和对应工具。
             </p>
             <section className="panel-block" style={{ borderTop: "1px solid var(--border-color, #e0e0e0)", paddingTop: "0.75rem", marginTop: "0.5rem" }}>
               <p className="eyebrow">Embedding 配置（RAG 向量检索）</p>

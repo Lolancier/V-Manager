@@ -4,9 +4,6 @@ import { promisify } from "node:util";
 import {
   ignoredWindowTitles,
   normalizeRuntimeName,
-  parseCsvLine,
-  parseCpuTimeToSeconds,
-  parseMemoryToMB,
   wait
 } from "../shared/utils.js";
 
@@ -51,29 +48,34 @@ async function sampleCpuUsage() {
 // ---- Process snapshot ----
 
 async function getProcessSnapshot() {
-  const { stdout } = await execFileAsync("cmd.exe", ["/d", "/s", "/c", "chcp 65001>nul && tasklist /v /fo csv /nh"], {
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "$items = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {",
+    "  [pscustomobject]@{",
+    "    name = ($_.ProcessName + '.exe')",
+    "    pid = $_.Id",
+    "    memoryMB = [math]::Round($_.WorkingSet64 / 1MB, 1)",
+    "    cpuSeconds = if ($null -eq $_.CPU) { 0 } else { [math]::Round($_.CPU, 1) }",
+    "    windowTitle = $_.MainWindowTitle",
+    "    status = if ($_.Responding) { 'Running' } else { 'Not Responding' }",
+    "  }",
+    "})",
+    "$items | ConvertTo-Json -Compress"
+  ].join("\n");
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true,
     maxBuffer: 4 * 1024 * 1024,
     encoding: "utf8"
   });
-
-  const rows = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map(parseCsvLine)
-    .filter((cells) => cells.length >= 9)
-    .map((cells) => ({
-      name: cells[0],
-      pid: Number(cells[1]) || 0,
-      sessionName: cells[2],
-      sessionNumber: Number(cells[3]) || 0,
-      memoryMB: parseMemoryToMB(cells[4]),
-      status: cells[5],
-      userName: cells[6],
-      cpuSeconds: parseCpuTimeToSeconds(cells[7]),
-      windowTitle: cells[8]
-    }));
+  const parsed = JSON.parse(stdout.trim() || "[]");
+  const rows = (Array.isArray(parsed) ? parsed : [parsed]).map((item) => ({
+    name: String(item.name || ""),
+    pid: Number(item.pid) || 0,
+    memoryMB: Number(item.memoryMB) || 0,
+    cpuSeconds: Number(item.cpuSeconds) || 0,
+    windowTitle: String(item.windowTitle || ""),
+    status: String(item.status || "Unknown")
+  }));
 
   const visibleAppMap = new Map();
   for (const item of rows) {
@@ -115,6 +117,92 @@ async function getProcessSnapshot() {
     })),
     visibleApps: visibleApps.slice(0, 12),
     topProcesses
+  };
+}
+
+export function matchRunningProcesses(processes, terms) {
+  const normalizedTerms = [...new Set((Array.isArray(terms) ? terms : [terms])
+    .map((term) => normalizeRuntimeName(String(term || "").replace(/\.exe$/i, "")))
+    .filter((term) => term.length >= 2))];
+
+  if (!normalizedTerms.length) {
+    return [];
+  }
+
+  return (processes || [])
+    .filter((item) => item.pid && item.pid !== process.pid)
+    .map((item) => {
+      const normalizedName = normalizeRuntimeName(String(item.name || "").replace(/\.exe$/i, ""));
+      const normalizedTitle = isNoiseWindow(item.windowTitle) ? "" : normalizeRuntimeName(item.windowTitle);
+      const pidMatch = normalizedTerms.some((term) => /^\d+$/.test(term) && Number(term) === item.pid);
+      const exactName = normalizedTerms.some((term) => normalizedName === term);
+      const partialName = normalizedTerms.some((term) => normalizedName.includes(term) || term.includes(normalizedName));
+      const titleMatch = normalizedTerms.some((term) => normalizedTitle.includes(term));
+      return pidMatch || exactName || partialName || titleMatch
+        ? { ...item, matchType: pidMatch ? "pid_exact" : exactName ? "process_exact" : partialName ? "process_partial" : "window_title" }
+        : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const priority = { pid_exact: 0, process_exact: 1, process_partial: 2, window_title: 3 };
+      return priority[a.matchType] - priority[b.matchType] || a.pid - b.pid;
+    });
+}
+
+export async function findRunningProcesses(terms) {
+  const snapshot = await getProcessSnapshot();
+  return {
+    processCount: snapshot.processCount,
+    matches: matchRunningProcesses(snapshot.processes, terms)
+  };
+}
+
+export async function closeRunningProcesses(terms) {
+  const initial = await findRunningProcesses(terms);
+  const realInitialMatches = initial.matches.filter((item) => item.matchType !== "window_title");
+  const initialMatches = realInitialMatches.length ? realInitialMatches : initial.matches;
+  if (!initialMatches.length) {
+    return { ok: false, found: false, matched: [], remaining: [], forcedCount: 0 };
+  }
+
+  const pids = initialMatches.map((item) => item.pid);
+  const script = `$ids = @(${pids.join(",")}); Get-Process -Id $ids -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }`;
+  await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    encoding: "utf8"
+  }).catch(() => null);
+
+  await wait(700);
+  const afterGracefulResult = await findRunningProcesses(terms);
+  const afterGraceful = realInitialMatches.length
+    ? afterGracefulResult.matches.filter((item) => item.matchType !== "window_title")
+    : afterGracefulResult.matches.filter((item) => pids.includes(item.pid));
+  let forcedCount = 0;
+  for (const item of afterGraceful) {
+    try {
+      await execFileAsync("taskkill", ["/PID", String(item.pid), "/T", "/F"], {
+        windowsHide: true,
+        encoding: "utf8"
+      });
+      forcedCount += 1;
+    } catch {
+      // The process may have exited between verification and taskkill.
+    }
+  }
+
+  if (afterGraceful.length) {
+    await wait(250);
+  }
+  const finalResult = await findRunningProcesses(terms);
+  const remaining = realInitialMatches.length
+    ? finalResult.matches.filter((item) => item.matchType !== "window_title")
+    : finalResult.matches.filter((item) => pids.includes(item.pid));
+  return {
+    ok: remaining.length === 0,
+    found: true,
+    matched: initialMatches,
+    remaining,
+    forcedCount
   };
 }
 
@@ -256,6 +344,7 @@ function findProcessMatches(snapshot, target) {
  */
 export async function handle(message) {
   const lowered = message.toLowerCase();
+  const requestedProcessName = extractRequestedProcessName(message);
   const asksForQq = lowered.includes("qq");
   const asksForWeChat = lowered.includes("微信") || lowered.includes("wechat") || lowered.includes("weixin");
   const asksForAppCount =
@@ -266,9 +355,7 @@ export async function handle(message) {
   const asksForResource =
     lowered.includes("cpu") || lowered.includes("内存占用") || (lowered.includes("内存") && lowered.includes("多少"));
 
-  // Quick exit: only handle unambiguous system overview requests.
-  // Specific process queries ("X开了吗", "X有几个进程") fall through to LLM function calling.
-  if (!asksForQq && !asksForWeChat && !asksForResource) {
+  if (!asksForQq && !asksForWeChat && !asksForAppCount && !asksForResource && !requestedProcessName) {
     return null;
   }
 
@@ -294,6 +381,35 @@ export async function handle(message) {
     const uniqueMatches = [...new Map(weChatMatches.map((item) => [`${item.name}-${item.pid}`, item])).values()];
     return {
       reply: buildNaturalProcessReply("微信", uniqueMatches, snapshot),
+      meta: {
+        responseMode: "local_tool",
+        usedKnowledge: false,
+        knowledgeCount: 0,
+        knowledgeFiles: [],
+        fallbackReason: "",
+        localTool: "process_snapshot"
+      }
+    };
+  }
+
+  if (requestedProcessName) {
+    const matches = findProcessMatches(snapshot, requestedProcessName);
+    return {
+      reply: buildNaturalProcessReply(requestedProcessName, matches, snapshot),
+      meta: {
+        responseMode: "local_tool",
+        usedKnowledge: false,
+        knowledgeCount: 0,
+        knowledgeFiles: [],
+        fallbackReason: "",
+        localTool: "process_snapshot"
+      }
+    };
+  }
+
+  if (asksForAppCount) {
+    return {
+      reply: buildNaturalAppCountReply(snapshot),
       meta: {
         responseMode: "local_tool",
         usedKnowledge: false,
@@ -360,25 +476,9 @@ function isNoiseWindow(title) {
 }
 
 export async function checkProcessRunning(name) {
-  const snapshot = await getSystemResourceSnapshot();
-  const target = String(name || "").toLowerCase();
-
-  const matches = (snapshot.processes || []).filter((item) => {
-    const procName = String(item.name || "").toLowerCase();
-    const title = String(item.windowTitle || "").toLowerCase();
-    // Only match real processes, not noise windows like jump lists
-    const isRealMatch = procName.includes(target) || target.includes(procName);
-    const isTitleMatch = title.includes(target) && !isNoiseWindow(item.windowTitle);
-    return isRealMatch || isTitleMatch;
-  });
-
-  // Prioritize real process matches over window title matches
-  const realMatches = matches.filter((item) => {
-    const procName = String(item.name || "").toLowerCase();
-    return procName.includes(target) || target.includes(procName);
-  });
-
-  const topMatches = (realMatches.length > 0 ? realMatches : matches).slice(0, 5).map((item) => ({
+  const result = await findRunningProcesses([name]);
+  const realMatches = result.matches.filter((item) => item.matchType !== "window_title");
+  const topMatches = (realMatches.length > 0 ? realMatches : result.matches).slice(0, 5).map((item) => ({
     name: item.name,
     pid: item.pid,
     windowTitle: isNoiseWindow(item.windowTitle) ? "" : item.windowTitle || ""
@@ -389,9 +489,9 @@ export async function checkProcessRunning(name) {
     target: name,
     running: realMatches.length > 0,
     realMatchCount: realMatches.length,
-    totalMatchCount: matches.length,
+    totalMatchCount: result.matches.length,
     matches: topMatches,
-    totalProcesses: snapshot.processCount
+    totalProcesses: result.processCount
   };
 }
 

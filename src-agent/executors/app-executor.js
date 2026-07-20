@@ -5,6 +5,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import electron from "electron";
 import { loadAppRegistry, findAppRegistryEntry, getBuiltinAppLaunchMap } from "../app-registry.js";
+import { closeRunningProcesses, findRunningProcesses } from "./system-executor.js";
 import {
   dedupeItems,
   escapePowerShellLiteral,
@@ -14,7 +15,8 @@ import {
   normalizeText,
   pathExists,
   resolveUserPath,
-  stripWrappingQuotes
+  stripWrappingQuotes,
+  wait
 } from "../shared/utils.js";
 
 const execFileAsync = promisify(execFile);
@@ -51,6 +53,33 @@ function findLaunchPreset(target, registry = null) {
       })
     ) ?? null
   );
+}
+
+function findKnownAppMention(message, registry = null) {
+  const normalizedMessage = normalizeRuntimeName(message);
+  const registryApps = Array.isArray(registry?.apps) ? registry.apps : [];
+  const presets = [...registryApps, ...getKnownAppLaunchMap()];
+  const aliases = presets.flatMap((preset) =>
+    [...(preset.aliases ?? []), preset.label]
+      .filter(Boolean)
+      .map((alias) => ({ alias, preset, normalized: normalizeRuntimeName(alias) }))
+  ).filter((item) => item.normalized).sort((a, b) => b.normalized.length - a.normalized.length);
+  return aliases.find((item) => normalizedMessage.includes(item.normalized))?.preset ?? null;
+}
+
+function buildProcessTerms(target, preset, options = {}) {
+  const executableNames = (preset?.commands ?? [])
+    .map((command) => path.basename(command))
+    .filter((command) => /\.exe$/i.test(command));
+  if (options.processOnly && executableNames.length) {
+    return dedupeItems(executableNames);
+  }
+  return dedupeItems([
+    ...executableNames,
+    ...(preset?.aliases ?? []),
+    preset?.label,
+    target
+  ]).filter(Boolean);
 }
 
 // ---- Shortcut / installed app discovery ----
@@ -384,6 +413,37 @@ function extractLaunchTarget(message) {
   return "";
 }
 
+function extractCloseTarget(message) {
+  const normalized = normalizeText(message);
+  const match = normalized.match(/(?:关闭|关掉|退出|结束|终止|杀掉)\s*(.+?)(?:应用|程序|进程|软件)?(?:吧|一下|一下子)?$/i);
+  if (!match?.[1] || /怎么|为什么|回复|回答/.test(match[1])) {
+    return "";
+  }
+  return stripWrappingQuotes(match[1])
+    .replace(/^(一下|一下子|这个|那个)/, "")
+    .replace(/^(应用|程序|进程|软件|pid)\s*/i, "")
+    .replace(/(应用|程序|进程|软件)$/g, "")
+    .trim();
+}
+
+function extractStatusTarget(message) {
+  const normalized = normalizeText(message);
+  const patterns = [
+    /^(?:帮我)?(?:看看|看下|查下|查一下)?\s*(.+?)(?:有没有打开|开了吗|打开了吗|在运行吗|有没有运行|是不是开着|是否启动|启动了吗|还在吗)$/i,
+    /^(?:有没有打开|开了吗|打开了吗|在运行吗|有没有运行|是不是开着|是否启动|启动了吗)\s*(.+)$/i
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match?.[1]) {
+      return stripWrappingQuotes(match[1])
+        .replace(/^(这个|那个)/, "")
+        .replace(/(应用|程序|进程|软件)$/g, "")
+        .trim();
+    }
+  }
+  return "";
+}
+
 function extractAppLocatorTarget(message) {
   const normalized = normalizeText(message);
   const patterns = [
@@ -577,6 +637,34 @@ function buildAppLocatorReply(target, appInfo, preset) {
 
 export { launchAppByTarget };
 
+export async function closeApplicationByTarget(baseDir, target) {
+  const registry = baseDir ? await loadAppRegistry(baseDir) : null;
+  const preset = findLaunchPreset(target, registry) || findKnownAppMention(target, registry);
+  const terms = buildProcessTerms(target, preset, { processOnly: true });
+  const result = await closeRunningProcesses(terms);
+  return {
+    ...result,
+    target,
+    label: preset?.label || target,
+    terms
+  };
+}
+
+export async function getApplicationStatus(baseDir, target) {
+  const registry = baseDir ? await loadAppRegistry(baseDir) : null;
+  const preset = findLaunchPreset(target, registry) || findKnownAppMention(target, registry);
+  const terms = buildProcessTerms(target, preset, { processOnly: true });
+  const result = await findRunningProcesses(terms);
+  return {
+    ...result,
+    ok: true,
+    running: result.matches.length > 0,
+    target,
+    label: preset?.label || target,
+    terms
+  };
+}
+
 export async function locateApplication(name, baseDir) {
   const registry = baseDir ? await loadAppRegistry(baseDir) : null;
   const preset = findLaunchPreset(name, registry);
@@ -661,6 +749,52 @@ export async function handle(message, context = {}) {
     };
   }
 
+  const registry = baseDir ? await loadAppRegistry(baseDir) : null;
+  const knownApp = findKnownAppMention(message, registry);
+
+  // App close
+  const closeTarget = extractCloseTarget(message) || (knownApp && /关闭|关掉|退出|结束|终止|杀掉/.test(message) ? knownApp.label : "");
+  if (closeTarget && baseDir) {
+    const result = await closeApplicationByTarget(baseDir, closeTarget);
+    const matchedNames = [...new Set(result.matched.map((item) => item.name))].join("、");
+    const reply = !result.found
+      ? `我检查了当前进程，没有发现正在运行的 ${result.label}。`
+      : result.ok
+        ? `已经关闭 ${result.label}。本次确认并结束了 ${result.matched.length} 个相关进程${matchedNames ? `（${matchedNames}）` : ""}。`
+        : `我找到了 ${result.label}，但仍有 ${result.remaining.length} 个相关进程没有退出：${result.remaining.map((item) => `${item.name}（PID ${item.pid}）`).join("、")}。`;
+    return {
+      reply,
+      meta: {
+        responseMode: "local_tool",
+        usedKnowledge: false,
+        knowledgeCount: 0,
+        knowledgeFiles: [],
+        fallbackReason: result.ok || !result.found ? "" : "部分进程未退出",
+        localTool: "app_closer"
+      }
+    };
+  }
+
+  // App status
+  const statusTarget = extractStatusTarget(message) || (knownApp && /开了吗|打开了吗|在运行吗|有没有运行|是不是开着|是否启动|启动了吗|还在吗/.test(message) ? knownApp.label : "");
+  if (statusTarget && baseDir) {
+    const result = await getApplicationStatus(baseDir, statusTarget);
+    const reply = result.matches.length
+      ? `${result.label} 正在运行，检测到 ${result.matches.length} 个相关进程：${result.matches.slice(0, 4).map((item) => `${item.name}（PID ${item.pid}）`).join("、")}。`
+      : `${result.label} 当前没有运行。`;
+    return {
+      reply,
+      meta: {
+        responseMode: "local_tool",
+        usedKnowledge: false,
+        knowledgeCount: 0,
+        knowledgeFiles: [],
+        fallbackReason: "",
+        localTool: "app_status"
+      }
+    };
+  }
+
   // App locator
   const appLocatorTarget = extractAppLocatorTarget(message);
   if (appLocatorTarget && baseDir) {
@@ -681,15 +815,24 @@ export async function handle(message, context = {}) {
   }
 
   // App launch
-  const launchTarget = extractLaunchTarget(message);
+  const launchTarget = extractLaunchTarget(message) || (knownApp && /启动|打开|运行|拉起/.test(message) ? knownApp.label : "");
   if (launchTarget && baseDir) {
     try {
       const launchResult = await launchAppByTarget(baseDir, launchTarget);
+      let status = { matches: [] };
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await wait(attempt === 0 ? 350 : 600);
+        status = await getApplicationStatus(baseDir, launchResult.label);
+        if (status.matches.length) break;
+      }
       const evidence = launchResult.launcherPid
         ? ` 启动句柄 PID 是 ${launchResult.launcherPid}。`
         : "";
+      const verification = status.matches.length
+        ? ` 已确认进程 ${status.matches.slice(0, 3).map((item) => `${item.name}（PID ${item.pid}）`).join("、")} 正在运行。`
+        : " 启动调用已发出，但暂时还没在进程表中确认到它。";
       return {
-        reply: `已经帮你启动 ${launchResult.label} 了。我这次调用的是 ${launchResult.targetPath}。${evidence}`,
+        reply: `已经帮你启动 ${launchResult.label} 了。我这次调用的是 ${launchResult.targetPath}。${evidence}${verification}`,
         meta: {
           responseMode: "local_tool",
           usedKnowledge: false,

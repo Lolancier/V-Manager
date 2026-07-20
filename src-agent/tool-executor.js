@@ -1,5 +1,5 @@
-import { getSystemResourceSnapshot, getDiskSpace, checkProcessRunning, killProcess, listRunningApps } from "./executors/system-executor.js";
-import { launchAppByTarget, locateApplication } from "./executors/app-executor.js";
+import { getSystemResourceSnapshot, getDiskSpace, killProcess, listRunningApps } from "./executors/system-executor.js";
+import { closeApplicationByTarget, getApplicationStatus, launchAppByTarget, locateApplication } from "./executors/app-executor.js";
 import {
   listDirectoryContent,
   readFileContent,
@@ -51,9 +51,11 @@ export async function executeTool(name, args = {}, context = {}) {
       case "get_disk_space":
         return await getDiskSpace(args.drive);
       case "check_process_running":
-        return await checkProcessRunning(args.name);
+        return await getApplicationStatus(baseDir, args.name);
       case "kill_process":
-        return await killProcess(args.name);
+        return /^\d+$/.test(String(args.name || "").trim())
+          ? await killProcess(args.name)
+          : await closeApplicationByTarget(baseDir, args.name);
       case "list_running_apps":
         return await listRunningApps();
 
