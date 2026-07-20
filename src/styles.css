@@ -528,7 +528,16 @@ body:has(.bubble-window-shell) #root {
   flex: 1;
   min-height: 0;
   gap: 12px;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+}
+
+.composer-voice-feedback {
+  min-height: 16px;
+  margin: -4px 2px 0;
+  color: #66747a;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .composer-input-bubble {
@@ -564,6 +573,12 @@ body:has(.bubble-window-shell) #root {
   position: relative;
   z-index: 2;
   flex-wrap: nowrap;
+}
+
+.composer-window-form .voice-input-button {
+  min-height: 34px;
+  padding: 6px 9px;
+  white-space: nowrap;
 }
 
 .chat-window-list {
@@ -2358,6 +2373,10 @@ textarea:focus {
 :root[data-theme="dark"] .composer-window-panel .panel-mini-header strong,
 :root[data-theme="dark"] .composer-window-panel textarea {
   color: #e6ebec;
+}
+
+:root[data-theme="dark"] .composer-voice-feedback {
+  color: #aeb8bb;
 }
 
 :root[data-theme="dark"] .composer-window-panel .composer-input-bubble {

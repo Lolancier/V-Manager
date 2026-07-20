@@ -317,7 +317,7 @@ function getChatWindowBounds() {
 }
 
 function getComposerWindowBounds() {
-  return getWindowBoundsNearPet(430, 280, 180);
+  return getWindowBoundsNearPet(430, 310, 180);
 }
 
 function getBubbleWindowBounds() {

@@ -2579,7 +2579,19 @@ function App() {
                 rows={5}
               />
             </div>
+            {voiceInputMessage ? <p className="composer-voice-feedback" role="status">{voiceInputMessage}</p> : null}
             <div className="pet-history-actions no-drag">
+              <button
+                className={`voice-input-button ${recordingVoiceInput ? "is-recording" : ""}`}
+                type="button"
+                title={recordingVoiceInput ? "停止录音" : "本地语音输入"}
+                aria-label={recordingVoiceInput ? "停止录音" : "本地语音输入"}
+                disabled={transcribingVoiceInput}
+                onClick={() => void startVoiceInput()}
+              >
+                {transcribingVoiceInput ? <LoaderCircle size={16} /> : recordingVoiceInput ? <Square size={14} /> : <Mic size={17} />}
+                <span>{transcribingVoiceInput ? "识别中" : recordingVoiceInput ? "停止" : "语音"}</span>
+              </button>
               <button className="ghost-button compact" type="button" onClick={() => setInput("")}>
                 清空输入
               </button>
