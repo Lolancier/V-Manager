@@ -100,6 +100,7 @@ interface RelationshipProfile {
     stage: "new" | "familiar" | "friend" | "close_friend" | "kindred";
     stageLabel: string;
     interactions: number;
+    touchInteractions: number;
     positiveInteractions: number;
     negativeInteractions: number;
   };
@@ -263,6 +264,7 @@ interface Window {
     openLocalSttFolder: () => Promise<string>;
     getRelationshipProfile: () => Promise<RelationshipProfile>;
     resetRelationshipProfile: () => Promise<RelationshipProfile>;
+    petTouch: () => Promise<{ ok: boolean; busy?: boolean; cooldownMs?: number; reply?: string; mood?: string; faceParams?: Record<string, number>; profile?: RelationshipProfile }>;
     chat: (payload: { message: string }) => Promise<ChatWindowState>;
     searchFiles: (query: string) => Promise<FileSearchResult[]>;
     getAppRegistry: () => Promise<AppRegistrySnapshot>;

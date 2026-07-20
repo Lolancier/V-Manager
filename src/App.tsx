@@ -102,7 +102,7 @@ const previewBootstrap: AgentBootstrap = {
   config: previewConfig,
   relationshipProfile: {
     version: 1,
-    affection: { score: 12, stage: "new", stageLabel: "初识", interactions: 0, positiveInteractions: 0, negativeInteractions: 0 },
+    affection: { score: 12, stage: "new", stageLabel: "初识", interactions: 0, touchInteractions: 0, positiveInteractions: 0, negativeInteractions: 0 },
     emotion: { valence: 0.1, arousal: 0.25, label: "平静", suggestedMood: "idle" },
     daily: { date: "", positiveGrowth: 0 },
     createdAt: new Date().toISOString(),
@@ -490,6 +490,14 @@ function App() {
     windowY: number;
     lastX: number;
     lastY: number;
+    dragStarted: boolean;
+  } | null>(null);
+  const petTouchPointerRef = useRef<{
+    pointerId: number;
+    startScreenX: number;
+    startScreenY: number;
+    startedAt: number;
+    moved: boolean;
   } | null>(null);
   const bridge = window.agentDesktop;
   const availableVoiceOptions = useMemo(() => {
@@ -820,7 +828,7 @@ function App() {
     if (viewMode !== "bubble") return;
     const source = sanitizeBubbleReply(lastAssistantMessage.content);
 
-    if (!source.startsWith(bubbleSourceRef.current)) {
+    if ((!isReplyStreaming && source !== bubbleSourceRef.current) || !source.startsWith(bubbleSourceRef.current)) {
       bubbleConsumedRef.current = 0;
       bubblePendingSentencesRef.current = [];
       bubbleSegmentQueueRef.current = [];
@@ -1646,30 +1654,56 @@ function App() {
       return;
     }
 
+    const pointerId = event.pointerId;
+    petTouchPointerRef.current = {
+      pointerId,
+      startScreenX: event.screenX,
+      startScreenY: event.screenY,
+      startedAt: Date.now(),
+      moved: false
+    };
+    event.currentTarget.setPointerCapture(pointerId);
+
     if (posLocked) return;
 
     const bounds = await bridge.getPetWindowBounds();
+    if (petTouchPointerRef.current?.pointerId !== pointerId) return;
     dragStateRef.current = {
-      pointerId: event.pointerId,
+      pointerId,
       startScreenX: event.screenX,
       startScreenY: event.screenY,
       windowX: bounds.x,
       windowY: bounds.y,
       lastX: bounds.x,
-      lastY: bounds.y
+      lastY: bounds.y,
+      dragStarted: false
     };
-    setDragging(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
   }
 
   async function handleInteractionPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const touchPointer = petTouchPointerRef.current;
+    if (touchPointer?.pointerId === event.pointerId) {
+      const distance = Math.hypot(
+        event.screenX - touchPointer.startScreenX,
+        event.screenY - touchPointer.startScreenY
+      );
+      if (distance > 7) touchPointer.moved = true;
+    }
+
     const dragState = dragStateRef.current;
     if (!dragState || event.pointerId !== dragState.pointerId || !bridge) {
       return;
     }
 
-    const nextX = Math.round(dragState.windowX + (event.screenX - dragState.startScreenX));
-    const nextY = Math.round(dragState.windowY + (event.screenY - dragState.startScreenY));
+    const deltaX = event.screenX - dragState.startScreenX;
+    const deltaY = event.screenY - dragState.startScreenY;
+    if (!dragState.dragStarted && Math.hypot(deltaX, deltaY) <= 7) return;
+    if (!dragState.dragStarted) {
+      dragState.dragStarted = true;
+      setDragging(true);
+    }
+    const nextX = Math.round(dragState.windowX + deltaX);
+    const nextY = Math.round(dragState.windowY + deltaY);
 
     if (nextX === dragState.lastX && nextY === dragState.lastY) {
       return;
@@ -1681,17 +1715,23 @@ function App() {
   }
 
   function handleInteractionPointerEnd(event: ReactPointerEvent<HTMLDivElement>) {
+    const touchPointer = petTouchPointerRef.current;
     const dragState = dragStateRef.current;
-    if (!dragState || event.pointerId !== dragState.pointerId) {
-      return;
-    }
+    const isTrackedTouch = touchPointer?.pointerId === event.pointerId;
+    const shouldReact = isTrackedTouch
+      && event.type !== "pointercancel"
+      && !touchPointer.moved
+      && Date.now() - touchPointer.startedAt <= 650;
 
-    dragStateRef.current = null;
+    if (isTrackedTouch) petTouchPointerRef.current = null;
+    if (dragState?.pointerId === event.pointerId) dragStateRef.current = null;
     setDragging(false);
 
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+
+    if (shouldReact) void bridge?.petTouch();
   }
 
   if (!ready || !configDraft || !bootstrap) {
@@ -2943,7 +2983,7 @@ function App() {
   }
 
   function handlePetInteractionChange(interactive: boolean) {
-    if (dragStateRef.current || !bridge || viewMode !== "pet") return;
+    if (dragStateRef.current || petTouchPointerRef.current || !bridge || viewMode !== "pet") return;
     bridge.setPetMousePassthrough(!interactive);
   }
 

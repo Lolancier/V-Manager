@@ -16,6 +16,33 @@ const POSITIVE_RE = /谢谢|感谢|喜欢你|爱你|想你|可爱|真棒|厉害|
 const CARE_RE = /早安|晚安|休息|别太累|辛苦|吃饭|喝水|照顾好|陪你|想你|睡得好吗/;
 const APOLOGY_RE = /对不起|抱歉|不好意思|我错了/;
 const NEGATIVE_RE = /(?:滚|闭嘴)|你(?:真|太|是个)?(?:废物|垃圾|恶心|没用|烦死了|蠢死了)|讨厌你|不喜欢你|你真差/;
+const TOUCH_REPLIES = {
+  new: [
+    "你好。有什么事情吗？",
+    "我在，需要我做什么吗？",
+    "是在叫我吗？想聊点什么？"
+  ],
+  familiar: [
+    "来找我啦？今天需要我帮什么？",
+    "嗯，我在呢。想聊天，还是有事情交给我？",
+    "收到你的招呼了。现在想做什么？"
+  ],
+  friend: [
+    "戳到我啦。是想聊天，还是有任务交给我？",
+    "我在我在，怎么啦？",
+    "突然来找我，是不是想到什么有趣的事了？"
+  ],
+  close_friend: [
+    "嗯哼，被我发现你在戳我了。想聊聊吗？",
+    "我一直在。想说点什么，还是要我陪你做点事情？",
+    "找到我啦。今天想让我怎么陪你？"
+  ],
+  kindred: [
+    "一碰我就知道是你。说吧，今天想让我怎么陪你？",
+    "我在这里呢。想聊天、做事，还是只是来看看我？",
+    "嗯，收到你的招呼了。你慢慢说，我听着。"
+  ]
+};
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -63,6 +90,7 @@ function createDefaultProfile(now = new Date()) {
       stage: "new",
       stageLabel: "初识",
       interactions: 0,
+      touchInteractions: 0,
       positiveInteractions: 0,
       negativeInteractions: 0
     },
@@ -173,8 +201,10 @@ export async function recordRelationshipInteraction(baseDir, message) {
 
   const sentiment = signals.negative ? -1 : signals.positive || signals.care || signals.apology ? 1 : 0;
   const valenceDelta = signals.negative ? -0.75 : sentiment * 0.2 + (signals.care ? 0.05 : 0);
-  const valence = clamp(profile.emotion.valence + valenceDelta, -1, 1);
-  const stimulation = signals.excited ? 0.2 : signals.question ? 0.1 : text.length >= 40 ? 0.07 : -0.02;
+  const valence = signals.negative
+    ? clamp(Math.min(profile.emotion.valence + valenceDelta, -0.55), -1, 1)
+    : clamp(profile.emotion.valence + valenceDelta, -1, 1);
+  const stimulation = signals.negative ? 0.28 : signals.excited ? 0.2 : signals.question ? 0.1 : text.length >= 40 ? 0.07 : -0.02;
   const arousal = clamp(profile.emotion.arousal + stimulation, 0, 1);
   const nextProfile = normalizeProfile({
     ...profile,
@@ -204,6 +234,77 @@ export async function recordRelationshipInteraction(baseDir, message) {
   nextProfile.emotion.suggestedMood = suggestedMood(valence, arousal, signals);
   await writeProfile(getAgentPaths(baseDir).profilePath, nextProfile);
   return nextProfile;
+}
+
+function pickDifferentReply(pool, previousReply) {
+  const candidates = pool.filter((reply) => reply !== previousReply);
+  const available = candidates.length > 0 ? candidates : pool;
+  return available[Math.floor(Math.random() * available.length)];
+}
+
+function touchReactionForProfile(profile) {
+  let pool = TOUCH_REPLIES[profile.affection.stage] || TOUCH_REPLIES.new;
+  let mood = profile.affection.stage === "new" ? "surprised" : "happy";
+  if (profile.emotion.label === "不悦") {
+    pool = ["我听见了。你愿意好好说的话，我会认真听。", "我在，只是现在有一点不高兴。有什么事就慢慢说吧。"];
+    mood = "angry";
+  } else if (profile.emotion.label === "低落") {
+    pool = ["我在呢，只是现在想安静一点。你可以慢慢说。", "嗯，我听到了。今天想和我说些什么？"];
+    mood = "sad";
+  } else if (profile.affection.stage === "close_friend" || profile.affection.stage === "kindred") {
+    mood = Math.random() < 0.55 ? "blush" : "happy";
+  }
+  const reply = pickDifferentReply(pool, profile.lastTouchReply);
+  const faceParams = mood === "blush"
+    ? { ParamMouthForm: 0.3, ParamAngleZ: -5, Param54: 1 }
+    : mood === "happy"
+      ? { ParamMouthForm: 0.38, ParamAngleZ: 5 }
+      : mood === "surprised"
+        ? { ParamEyeLOpen: 1.25, ParamEyeROpen: 1.25, ParamAngleZ: -4 }
+        : mood === "angry"
+          ? { ParamMouthForm: -0.25, ParamBrowLY: -0.35, Param90: 1 }
+          : { ParamMouthForm: -0.15, ParamAngleZ: -3 };
+  return { reply, mood, faceParams };
+}
+
+export async function recordPetTouch(baseDir, { grow = true } = {}) {
+  const now = new Date();
+  const profile = await loadRelationshipProfile(baseDir);
+  const positiveAllowance = Math.max(0, DAILY_POSITIVE_CAP - profile.daily.positiveGrowth);
+  const appliedDelta = grow ? Math.min(0.08, positiveAllowance) : 0;
+  const score = clamp(profile.affection.score + appliedDelta, 0, 100);
+  const stage = stageForScore(score);
+  const valence = grow ? clamp(profile.emotion.valence + 0.03, -1, 1) : profile.emotion.valence;
+  const arousal = grow ? clamp(profile.emotion.arousal + 0.08, 0, 1) : profile.emotion.arousal;
+  const reaction = touchReactionForProfile(profile);
+  const nextProfile = normalizeProfile({
+    ...profile,
+    affection: {
+      ...profile.affection,
+      score,
+      stage: stage.id,
+      stageLabel: stage.label,
+      interactions: profile.affection.interactions + (grow ? 1 : 0),
+      touchInteractions: (profile.affection.touchInteractions || 0) + (grow ? 1 : 0),
+      positiveInteractions: profile.affection.positiveInteractions + (grow ? 1 : 0)
+    },
+    emotion: {
+      valence,
+      arousal,
+      label: emotionLabel(valence, arousal),
+      suggestedMood: reaction.mood
+    },
+    daily: {
+      date: localDateKey(now),
+      positiveGrowth: profile.daily.positiveGrowth + appliedDelta
+    },
+    lastTouchReply: reaction.reply,
+    lastInteractionAt: now.toISOString(),
+    updatedAt: now.toISOString()
+  }, now);
+  nextProfile.emotion.suggestedMood = reaction.mood;
+  await writeProfile(getAgentPaths(baseDir).profilePath, nextProfile);
+  return { ...reaction, profile: nextProfile };
 }
 
 export async function resetRelationshipProfile(baseDir) {

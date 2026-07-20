@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openLocalSttFolder: () => ipcRenderer.invoke("agent:open-local-stt-folder"),
   getRelationshipProfile: () => ipcRenderer.invoke("agent:get-relationship-profile"),
   resetRelationshipProfile: () => ipcRenderer.invoke("agent:reset-relationship-profile"),
+  petTouch: () => ipcRenderer.invoke("agent:pet-touch"),
   chat: (payload) => ipcRenderer.invoke("agent:chat", payload),
   searchFiles: (query) => ipcRenderer.invoke("agent:search-files", query),
   getAppRegistry: () => ipcRenderer.invoke("agent:get-app-registry"),

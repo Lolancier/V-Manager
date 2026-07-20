@@ -29,7 +29,7 @@ import {
 import { listWorkspaceCodeFiles, readWorkspaceCode } from "../src-agent/code-executor.js";
 import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
-import { loadRelationshipProfile, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
+import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,6 +215,7 @@ let chatState = {
   knowledge: [],
   lastReplyMeta: null
 };
+let lastPetTouchAt = 0;
 
 function getTitleBarOverlay(theme = currentAppearanceTheme, forceDark = false) {
   const dark = forceDark || theme === "dark";
@@ -1246,6 +1247,51 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   });
 
   return chatState;
+});
+
+ipcMain.handle("agent:pet-touch", async () => {
+  if (chatState.lastReplyMeta?.sourceLabel === "生成中...") {
+    return { ok: false, busy: true };
+  }
+  const now = Date.now();
+  const cooldownMs = 1400;
+  if (now - lastPetTouchAt < cooldownMs) {
+    return { ok: false, cooldownMs: cooldownMs - (now - lastPetTouchAt) };
+  }
+  lastPetTouchAt = now;
+
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  const reaction = await recordPetTouch(app.getPath("userData"), {
+    grow: config.relationship?.enabled !== false
+  });
+  const replacePreviousTouch = chatState.lastReplyMeta?.sourceLabel === "触碰互动"
+    && chatState.messages.at(-1)?.role === "assistant";
+  const nextMessages = replacePreviousTouch
+    ? [...chatState.messages.slice(0, -1), { role: "assistant", content: reaction.reply }]
+    : [...chatState.messages, { role: "assistant", content: reaction.reply }];
+  chatState = {
+    ...chatState,
+    messages: nextMessages,
+    lastReplyMeta: {
+      responseMode: "local_tool",
+      usedKnowledge: false,
+      knowledgeCount: 0,
+      knowledgeFiles: [],
+      fallbackReason: "",
+      model: "local-relationship-engine",
+      detectedMood: reaction.mood,
+      relationship: reaction.profile,
+      sourceLabel: "触碰互动"
+    }
+  };
+  broadcastChatState();
+  broadcastRelationshipProfile(reaction.profile);
+  petWindow?.webContents.send("agent:mood-updated", {
+    mood: reaction.mood,
+    faceParams: reaction.faceParams,
+    reply: reaction.reply
+  });
+  return { ok: true, ...reaction };
 });
 
 app.on("before-quit", () => {
