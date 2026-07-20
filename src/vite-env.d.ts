@@ -57,6 +57,12 @@ interface AgentConfig {
     language: string;
     silenceMs: number;
   };
+  astrbot: {
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+    contactMap: Record<string, string>;
+  };
   relationship: {
     enabled: boolean;
     showProgress: boolean;
@@ -277,6 +283,7 @@ interface Window {
     getFileManagerSnapshot: () => Promise<FileManagerSnapshot>;
     openExternal: (url: string) => Promise<boolean>;
     testDeepSeek: () => Promise<{ ok: boolean; message: string; config: AgentConfig }>;
+    testAstrBot: (config?: AgentConfig["astrbot"]) => Promise<{ ok: boolean; message: string; bots: unknown[] }>;
     clearMemory: () => Promise<boolean>;
     showPetContextMenu: () => void;
     openSettingsWindow: () => Promise<boolean>;

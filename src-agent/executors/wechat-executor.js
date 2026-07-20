@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { normalizeText } from "../shared/utils.js";
 import { launchAppByTarget } from "./app-executor.js";
+import { sendAstrBotMessage } from "../astrbot-client.js";
 
 const execFileAsync = promisify(execFile);
 const executorDir = path.dirname(fileURLToPath(import.meta.url));
@@ -135,6 +136,13 @@ export async function sendWeChatMessage(input) {
 
 export async function requestWeChatMessage(input, context = {}) {
   const request = validateWeChatMessageRequest(input);
+  if (context.config?.astrbot?.enabled) {
+    try {
+      return await sendAstrBotMessage(context.config.astrbot, request);
+    } catch (error) {
+      return { ok: false, contact: request.contact, provider: "astrbot", error: error.message };
+    }
+  }
   const existingPending = peekPendingMessage();
   if (existingPending) {
     return {
@@ -207,7 +215,9 @@ export async function handle(message, context = {}) {
     };
   }
   return {
-    reply: `已在微信中找到联系人“${result.contact}”并执行发送。`,
-    meta: { responseMode: "local_tool", localTool: "wechat_sender", fallbackReason: "" }
+    reply: result.provider === "astrbot"
+      ? `已通过 AstrBot 向微信联系人“${result.contact}”发送消息。`
+      : `已在微信中找到联系人“${result.contact}”并执行发送。`,
+    meta: { responseMode: "local_tool", localTool: result.provider === "astrbot" ? "astrbot_wechat_sender" : "wechat_sender", fallbackReason: "" }
   };
 }

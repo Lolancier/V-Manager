@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   getFileManagerSnapshot: () => ipcRenderer.invoke("agent:get-file-manager-snapshot"),
   openExternal: (url) => ipcRenderer.invoke("agent:open-external", url),
   testDeepSeek: () => ipcRenderer.invoke("agent:test-deepseek"),
+  testAstrBot: (astrbotConfig) => ipcRenderer.invoke("agent:test-astrbot", astrbotConfig),
   clearMemory: () => ipcRenderer.invoke("agent:clear-memory"),
   showPetContextMenu: () => ipcRenderer.send("agent:show-pet-context-menu"),
   openSettingsWindow: () => ipcRenderer.invoke("agent:open-settings-window"),

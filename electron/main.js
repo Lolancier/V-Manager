@@ -31,6 +31,7 @@ import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/e
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
+import { testAstrBotConnection } from "../src-agent/astrbot-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,6 +55,7 @@ let currentAppearanceTheme = "light";
 let currentAgentConfig = defaultConfig;
 let petWindowScale = 1;
 let positionLocked = false;
+let petHiddenForChat = false;
 let activeManualExpressions = new Set();
 const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
 const builtInLive2DModels = [
@@ -72,6 +74,11 @@ function mergeAgentConfig(nextConfig = {}) {
     ...nextConfig,
     deepseek: { ...defaultConfig.deepseek, ...(nextConfig.deepseek ?? {}) },
     embedding: { ...defaultConfig.embedding, ...(nextConfig.embedding ?? {}) },
+    astrbot: {
+      ...defaultConfig.astrbot,
+      ...(nextConfig.astrbot ?? {}),
+      contactMap: { ...defaultConfig.astrbot.contactMap, ...(nextConfig.astrbot?.contactMap ?? {}) }
+    },
     appearance: { ...defaultConfig.appearance, ...(nextConfig.appearance ?? {}) },
     voice: {
       ...defaultConfig.voice,
@@ -321,7 +328,7 @@ function getWindowBoundsNearPet(width, height, verticalOffset) {
 }
 
 function getChatWindowBounds() {
-  return getWindowBoundsNearPet(460, 640, 96);
+  return getWindowBoundsNearPet(1120, 720, 48);
 }
 
 function getComposerWindowBounds() {
@@ -548,10 +555,10 @@ function createChatWindow() {
     height: bounds.height,
     x: bounds.x,
     y: bounds.y,
-    minWidth: 400,
-    minHeight: 520,
-    alwaysOnTop: true,
-    backgroundColor: "#0f1118",
+    minWidth: 920,
+    minHeight: 620,
+    alwaysOnTop: false,
+    backgroundColor: "#f8eee7",
     titleBarStyle: "hidden",
     titleBarOverlay: getTitleBarOverlay(),
     autoHideMenuBar: true,
@@ -570,8 +577,12 @@ function createChatWindow() {
     if (!app.isQuiting) {
       event.preventDefault();
       win.hide();
+      restorePetAfterChat();
     }
   });
+
+  win.on("minimize", restorePetAfterChat);
+  win.on("restore", hidePetForChat);
 
   win.on("closed", () => {
     if (chatWindow === win) {
@@ -795,12 +806,26 @@ function openComposerWindow() {
 function openChatWindow() {
   const win = ensureChatWindow();
   win.setBounds(getChatWindowBounds());
-  win.setAlwaysOnTop(true, "floating");
+  win.setAlwaysOnTop(false);
+  hidePetForChat();
   win.show();
   win.moveTop();
   win.focus();
   win.webContents.send("agent:chat-state-updated", chatState);
   return true;
+}
+
+function hidePetForChat() {
+  if (!petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return;
+  petHiddenForChat = true;
+  petWindow.hide();
+  bubbleWindow?.hide();
+}
+
+function restorePetAfterChat() {
+  if (!petHiddenForChat || app.isQuiting || !petWindow || petWindow.isDestroyed()) return;
+  petHiddenForChat = false;
+  petWindow.showInactive();
 }
 
 function openCodeWindow() {
@@ -1101,7 +1126,12 @@ ipcMain.handle("agent:get-bootstrap", async () => {
       { id: "browser", name: "浏览器搜索", status: "ready", detail: "可在系统默认浏览器中打开网址，并使用 Bing、Google 或百度搜索。" },
       { id: "vscode", name: "VS Code 适配", status: "ready", detail: "可用 VS Code 打开本地文件或工作区，并定位到指定文件行。" },
       { id: "filesystem", name: "文件管理", status: "ready", detail: "当前支持打开文件/文件夹、列目录、读取文本、创建文件夹/文本文件、追加内容与显式删除。" },
-      { id: "messenger", name: "微信消息发送", status: "partial", detail: "可用“用微信给联系人发送消息：内容”发送单条文本；读取回复、连续对话和 QQ 适配待开发。" }
+      {
+        id: "messenger",
+        name: "消息联动",
+        status: "planned",
+        detail: "AstrBot、微信代发、消息读取与自动回复统一归入后续路线，本阶段不作为正式能力开放。"
+      }
     ]
   };
 });
@@ -1114,6 +1144,16 @@ ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   updateTitleBarOverlays();
   broadcastConfigUpdated(merged);
   return merged;
+});
+
+ipcMain.handle("agent:test-astrbot", async (_event, astrbotOverride) => {
+  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  try {
+    const result = await testAstrBotConnection({ ...config.astrbot, ...(astrbotOverride ?? {}) });
+    return { ok: true, message: `AstrBot 已连接，发现 ${result.bots.length} 个可用机器人/平台。`, bots: result.bots };
+  } catch (error) {
+    return { ok: false, message: `AstrBot 连接失败：${error.message}`, bots: [] };
+  }
 });
 
 ipcMain.handle("agent:get-relationship-profile", async () => {

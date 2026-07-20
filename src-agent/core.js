@@ -70,6 +70,12 @@ export const defaultConfig = {
     language: "zh",
     silenceMs: 1100
   },
+  astrbot: {
+    enabled: false,
+    baseUrl: "http://127.0.0.1:6185",
+    apiKey: "",
+    contactMap: {}
+  },
   relationship: {
     enabled: true,
     showProgress: true
@@ -117,6 +123,11 @@ function mergeConfig(rawConfig = {}) {
     speechInput: {
       ...defaultConfig.speechInput,
       ...(rawConfig.speechInput ?? {})
+    },
+    astrbot: {
+      ...defaultConfig.astrbot,
+      ...(rawConfig.astrbot ?? {}),
+      contactMap: { ...defaultConfig.astrbot.contactMap, ...(rawConfig.astrbot?.contactMap ?? {}) }
     },
     relationship: {
       ...defaultConfig.relationship,
@@ -1152,7 +1163,7 @@ export async function buildAgentReply(baseDir, payload) {
             payload.onDelta(`正在执行 ${tc.function.name}...`);
           }
 
-          const result = await executeTool(tc.function.name, args, { baseDir });
+          const result = await executeTool(tc.function.name, args, { baseDir, config });
           messages.push({
             role: "tool",
             tool_call_id: tc.id,

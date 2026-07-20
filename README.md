@@ -60,7 +60,8 @@
 - Live2D 模型渲染（Hiyori），支持触摸交互
 - 透明无边框窗口，可拖拽，常驻置顶
 - 气泡式对话浮窗（10 秒自动淡出）
-- 独立设置窗口、对话窗口、模型缩放窗口
+- 二次元陪伴工作台：Live2D 角色舞台、关系状态、快捷对话与聊天记录同屏
+- 独立设置窗口、快速输入窗口、模型缩放窗口
 - 独立代码工作台：文件树、代码预览、终端式对话，共享日常聊天记忆
 
 ## 技术架构
@@ -68,7 +69,7 @@
 ```
 Electron（桌面壳）
   ├── main.js              IPC 桥接 + 多窗口管理
-  └── preload.cjs           27 个 agent:channel 接口
+  └── preload.cjs           Electron 安全桥接接口
 
 React + Vite（界面层）
   └── src/App.tsx           6 种视图模式（pet/settings/scale/composer/chat/bubble）
@@ -92,6 +93,14 @@ Agent Core（Node.js）
 DeepSeek API
   └── /v1/chat/completions  流式对话 + function calling
 ```
+
+### 消息联动（后续路线）
+
+AstrBot、微信代发、消息读取与自动回复暂不作为当前版本的正式能力。已有实验代码与配置会保留，方便后续继续验证，但产品界面统一标记为“待开发”，本阶段不承诺可用性。设计记录见 [AstrBot 联动说明](docs/astrbot-weixin.md)。
+
+### EchoBot 参考说明
+
+0.7 的陪伴工作台参考了 [KdaiP/EchoBot](https://github.com/KdaiP/EchoBot) 的“角色舞台 + 对话控制区”信息架构与任务状态表达。V-Manager 保留自己的 Electron、React、Agent Core 与现有 Live2D 资源，没有引入 EchoBot 的角色模型或背景素材；EchoBot 源码采用 MIT License。
 
 ## 数据流
 

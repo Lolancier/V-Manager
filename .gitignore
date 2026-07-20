@@ -1,5 +1,6 @@
 node_modules
 dist
+downloads/
 .DS_Store
 Thumbs.db
 .idea/

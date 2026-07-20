@@ -8,7 +8,7 @@ import {
   useRef,
   useState
 } from "react";
-import { AlertCircle, CheckCircle2, LoaderCircle, Mic, RotateCcw, Square, Volume2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Code2, LoaderCircle, Mic, RotateCcw, Send, Settings2, Sparkles, Square, Volume2 } from "lucide-react";
 import Live2DPreview from "./pet/Live2DPreview";
 import { FaceParams, LIVE2D_MODEL_PRESETS, PetMood } from "./pet/live2dConfig";
 
@@ -89,6 +89,12 @@ const previewConfig: AgentConfig = {
     language: "zh",
     silenceMs: 1100
   },
+  astrbot: {
+    enabled: false,
+    baseUrl: "http://127.0.0.1:6185",
+    apiKey: "",
+    contactMap: {}
+  },
   relationship: {
     enabled: true,
     showProgress: true
@@ -120,7 +126,7 @@ const previewBootstrap: AgentBootstrap = {
     { id: "browser", name: "浏览器搜索", status: "partial", detail: "桌面模式可打开网址和搜索结果页；预览模式仅展示能力。" },
     { id: "vscode", name: "VS Code 适配", status: "partial", detail: "桌面模式可打开本地文件或工作区，并定位到指定行。" },
     { id: "filesystem", name: "文件管理", status: "planned", detail: "后续扩展文件读写、整理与索引。" },
-    { id: "messenger", name: "微信消息发送", status: "partial", detail: "桌面模式可向完全匹配的联系人发送单条文本；读取回复和连续对话待开发。" }
+    { id: "messenger", name: "消息联动", status: "planned", detail: "AstrBot、微信代发与自动回复已归入后续路线，本阶段不作为可用能力开放。" }
   ]
 };
 
@@ -412,6 +418,8 @@ function App() {
   const [fileSnapshot, setFileSnapshot] = useState<FileManagerSnapshot | null>(null);
   const [saveMessage, setSaveMessage] = useState("");
   const [connectionMessage, setConnectionMessage] = useState("");
+  const [astrBotConnectionMessage, setAstrBotConnectionMessage] = useState("");
+  const [testingAstrBot, setTestingAstrBot] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [clearingMemory, setClearingMemory] = useState(false);
   const [dataPathInfo, setDataPathInfo] = useState<{ baseDir: string; dataDir: string } | null>(null);
@@ -716,7 +724,7 @@ function App() {
     });
 
     const offMoodUpdated = bridge.onMoodUpdated?.((payload: { mood: string; faceParams: Record<string, number> | null; reply?: string }) => {
-      if (viewMode === "pet" && payload?.mood) {
+      if ((viewMode === "pet" || viewMode === "chat") && payload?.mood) {
         console.log("[App] received mood from LLM:", payload.mood);
         const llmMood = payload.mood as PetMood;
         const replyContent = payload.reply ?? [...messages].reverse().find((message) => message.role === "assistant")?.content ?? "";
@@ -1687,6 +1695,20 @@ function App() {
     };
   }
 
+  async function handleTestAstrBot() {
+    if (!bridge || !configDraft || testingAstrBot) return;
+    setTestingAstrBot(true);
+    setAstrBotConnectionMessage("正在连接 AstrBot...");
+    try {
+      const result = await bridge.testAstrBot(configDraft.astrbot);
+      setAstrBotConnectionMessage(result.message);
+    } catch (error) {
+      setAstrBotConnectionMessage(`AstrBot 连接失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setTestingAstrBot(false);
+    }
+  }
+
   async function handleInteractionPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
     const touchPointer = petTouchPointerRef.current;
     if (touchPointer?.pointerId === event.pointerId) {
@@ -2168,6 +2190,75 @@ function App() {
                   <p>{ability.detail}</p>
                 </article>
               ))}
+            </div>
+            <div className="relationship-settings">
+              <div className="relationship-heading">
+                <div>
+                  <strong>消息联动 · 实验存档</strong>
+                  <span>AstrBot、微信代发与自动回复已暂停开发，配置仅作保留</span>
+                </div>
+                <span className="relationship-stage">后续</span>
+              </div>
+              <label className="voice-switch">
+                <input
+                  type="checkbox"
+                  checked={configDraft.astrbot.enabled}
+                  disabled
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    astrbot: { ...configDraft.astrbot, enabled: event.target.checked }
+                  })}
+                />
+                保留 AstrBot 实验通道（非正式能力）
+              </label>
+              <label>
+                AstrBot 地址
+                <input
+                  value={configDraft.astrbot.baseUrl}
+                  placeholder="http://127.0.0.1:6185"
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    astrbot: { ...configDraft.astrbot, baseUrl: event.target.value }
+                  })}
+                />
+              </label>
+              <label>
+                API Key（只需 im scope）
+                <input
+                  type="password"
+                  value={configDraft.astrbot.apiKey}
+                  placeholder="abk_..."
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    astrbot: { ...configDraft.astrbot, apiKey: event.target.value }
+                  })}
+                />
+              </label>
+              <label>
+                联系人映射（每行：联系人=UMO）
+                <textarea
+                  rows={5}
+                  defaultValue={Object.entries(configDraft.astrbot.contactMap).map(([name, umo]) => `${name}=${umo}`).join("\n")}
+                  placeholder={"赵刘辛=weixin:FriendMessage:用户标识"}
+                  onBlur={(event) => {
+                    const contactMap = Object.fromEntries(event.target.value.split(/\r?\n/).map((line) => {
+                      const separator = line.indexOf("=");
+                      return separator > 0 ? [line.slice(0, separator).trim(), line.slice(separator + 1).trim()] : null;
+                    }).filter((entry): entry is [string, string] => Boolean(entry?.[0] && entry?.[1])));
+                    setConfigDraft({ ...configDraft, astrbot: { ...configDraft.astrbot, contactMap } });
+                  }}
+                />
+              </label>
+              <p className="knowledge-hint">UMO 可从 AstrBot 的消息会话/日志中取得。联系人需先与微信机器人建立过会话。</p>
+              <div className="action-row">
+                <button className="primary-button" type="button" onClick={() => void handleTestAstrBot()} disabled>
+                  联动已暂停
+                </button>
+                <button className="ghost-button compact" type="button" onClick={() => void bridge?.openExternal("https://docs.astrbot.app/platform/weixin_oc.html")}>
+                  打开接入文档
+                </button>
+              </div>
+              {astrBotConnectionMessage ? <p className="feedback-text">{astrBotConnectionMessage}</p> : null}
             </div>
           </section>
 
@@ -2782,17 +2873,65 @@ function App() {
   if (viewMode === "chat") {
     return (
       <div className="chat-window-shell">
-        <div className="window-drag-strip drag-region" aria-hidden="true" />
-        <section className="chat-window-panel">
-          <div className="panel-mini-header drag-region chat-window-header">
+        <header className="chat-companion-topbar drag-region">
+          <div className="chat-companion-brand">
+            <span className="chat-brand-mark"><Sparkles size={17} /></span>
             <div>
-              <p className="eyebrow">聊天栏</p>
-              <strong>{configDraft.personaName} 历史上下文</strong>
+              <strong>Vivi Companion</strong>
+              <span>你的桌面搭档</span>
             </div>
-            <span className={`runtime-badge ${lastReplyMeta?.responseMode ?? "fallback_local"}`}>
-              {lastReplyMeta?.sourceLabel ?? "尚未发送对话"}
-            </span>
           </div>
+          <div className="chat-topbar-actions no-drag">
+            <span className={`runtime-badge ${lastReplyMeta?.responseMode ?? "fallback_local"}`}>
+              <i />{sending ? "正在回应" : lastReplyMeta?.sourceLabel ?? statusText}
+            </span>
+            <button type="button" title="代码工作台" aria-label="打开代码工作台" onClick={() => void bridge?.openCodeWindow()}><Code2 size={17} /></button>
+            <button type="button" title="设置" aria-label="打开设置" onClick={() => void bridge?.openSettingsWindow()}><Settings2 size={17} /></button>
+          </div>
+        </header>
+
+        <main className="chat-companion-layout">
+          <aside className="companion-stage-card">
+            <div className="stage-ambient stage-ambient-one" aria-hidden="true" />
+            <div className="stage-ambient stage-ambient-two" aria-hidden="true" />
+            <div className="stage-stars" aria-hidden="true"><span>✦</span><span>·</span><span>✧</span><span>·</span></div>
+            <div className="companion-stage-heading">
+              <span className="companion-online-dot" />
+              <div>
+                <strong>{configDraft.personaName}</strong>
+                <span>{relationshipProfile.emotion.label} · {petMood === "thinking" ? "正在思考" : petSpeaking ? "正在说话" : "陪伴中"}</span>
+              </div>
+            </div>
+            <div className="chat-live2d-stage no-drag">
+              <Live2DPreview
+                mood={petMood}
+                modelId={selectedLive2DModel?.id ?? "qianqian"}
+                modelName={selectedLive2DModel?.label}
+                modelDirectory={selectedLive2DModel?.directory}
+                modelFileName={selectedLive2DModel?.fileName}
+                activeExpressionSet={activeExpressionSet}
+                faceParams={faceParams}
+                speaking={petSpeaking}
+              />
+            </div>
+          </aside>
+
+          <section className="chat-window-panel">
+            <div className="chat-conversation-heading">
+              <div>
+                <p className="eyebrow">COMPANION CHAT</p>
+                <h1>今天想一起做什么？</h1>
+              </div>
+              <span>{messages.length} 条消息</span>
+            </div>
+
+            <div className="chat-quick-prompts" aria-label="快捷提问">
+              {["陪我聊聊今天", "整理一下待办", "看看电脑状态"].map((prompt) => (
+                <button key={prompt} type="button" onClick={() => { setInput(prompt); window.setTimeout(() => composerRef.current?.focus(), 0); }}>
+                  {prompt}
+                </button>
+              ))}
+            </div>
 
           <div className="chat-window-list" ref={historyListRef}>
             {messages.map((message, index) => {
@@ -2821,17 +2960,19 @@ function App() {
             })}
           </div>
 
-          <form className="chat-window-composer" onSubmit={handleSend}>
+            <form className="chat-window-composer" onSubmit={handleSend}>
             <textarea
               ref={composerRef}
-              placeholder="继续对话... Enter 发送，Shift + Enter 换行"
+              placeholder={`和 ${configDraft.personaName} 说点什么...`}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               rows={4}
             />
             {voiceInputMessage ? <p className="voice-input-feedback">{voiceInputMessage}</p> : null}
-            <div className="pet-history-actions">
+              <div className="chat-composer-footer">
+                <span>Enter 发送 · Shift + Enter 换行</span>
+                <div className="chat-composer-actions">
               <button
                 className={`voice-input-button ${recordingVoiceInput ? "is-recording" : ""}`}
                 type="button"
@@ -2841,17 +2982,16 @@ function App() {
                 onClick={() => void startVoiceInput()}
               >
                 {transcribingVoiceInput ? <LoaderCircle size={17} /> : recordingVoiceInput ? <Square size={15} /> : <Mic size={18} />}
-                <span>{transcribingVoiceInput ? "识别中" : recordingVoiceInput ? "停止" : "语音输入"}</span>
+                    <span>{transcribingVoiceInput ? "识别中" : recordingVoiceInput ? "停止" : "语音"}</span>
               </button>
-              <button className="ghost-button compact" type="button" onClick={() => setInput("")}>
-                清空输入
+                  <button className="chat-send-button" type="submit" disabled={sending || !input.trim()}>
+                    <Send size={16} />{sending ? "思考中" : "发送"}
               </button>
-              <button className="primary-button" type="submit" disabled={sending}>
-                {sending ? "思考中..." : "发送"}
-              </button>
+                </div>
             </div>
           </form>
-        </section>
+          </section>
+        </main>
       </div>
     );
   }
