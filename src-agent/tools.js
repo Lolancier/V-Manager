@@ -186,7 +186,8 @@ const send_wechat_message = {
       properties: {
         contact: { type: "string", description: "微信联系人显示名称，必须完整、精确。" },
         message: { type: "string", description: "要发送的完整消息文本。" },
-        sendMode: { type: "string", enum: ["enter", "ctrl_enter"], description: "微信发送快捷键，默认 enter。" }
+        sendMode: { type: "string", enum: ["enter", "ctrl_enter"], description: "微信发送快捷键，默认 enter。" },
+        allowKeyboardFallback: { type: "boolean", description: "新版微信不暴露联系人控件时，是否明确允许选择完整搜索词的第一条结果。默认 false；只有用户知道误选风险并明确批准后才能设为 true。" }
       },
       required: ["contact", "message"]
     }

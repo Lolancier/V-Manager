@@ -29,8 +29,9 @@ export function validateWeChatMessageRequest(input = {}) {
 export function parseWeChatSendIntent(message) {
   const normalized = String(message || "").trim();
   const patterns = [
-    /^(?:请)?(?:帮我|替我)?用微信(?:给|向)\s*[“\"']?(.+?)[”\"']?\s*(?:发送|发)(?:一条)?消息\s*[：:]\s*([\s\S]+)$/i,
-    /^(?:请)?(?:帮我|替我)?微信\s*(?:给|向)?\s*[“\"']?(.+?)[”\"']?\s*(?:发送|发)(?:一条)?消息\s*[：:]\s*([\s\S]+)$/i
+    /^(?:请)?(?:帮我|替我)?用微信(?:给|向)\s*[“\"']?(.+?)[”\"']?\s*(?:发送|发)(?:一条)?消息(?:\s*[：:]\s*|\s*说\s*|\s*内容是\s*)([\s\S]+)$/i,
+    /^(?:请)?(?:帮我|替我)?微信(?:上)?\s*(?:给|向)?\s*[“\"']?(.+?)[”\"']?\s*(?:发送|发)(?:一条)?消息(?:\s*[：:]\s*|\s*说\s*|\s*内容是\s*)([\s\S]+)$/i,
+    /^(?:请)?(?:帮我)?给我微信上\s*[“\"']?(.+?)[”\"']?\s*(?:发送|发)(?:一条)?消息(?:\s*[：:]\s*|\s*说\s*|\s*内容是\s*)([\s\S]+)$/i
   ];
   for (const pattern of patterns) {
     const match = normalized.match(pattern);
@@ -59,19 +60,25 @@ function parseAutomationOutput(stdout, stderr) {
 
 export async function sendWeChatMessage(input) {
   const request = validateWeChatMessageRequest(input);
-  const script = await fs.readFile(scriptPath, "utf8");
-  const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+  await fs.access(scriptPath);
+  const escapedScriptPath = scriptPath.replace(/'/g, "''");
+  const bootstrap = [
+    `$source = [IO.File]::ReadAllText('${escapedScriptPath}', [Text.Encoding]::UTF8)`,
+    "& ([ScriptBlock]::Create($source))"
+  ].join("; ");
+  const encodedBootstrap = Buffer.from(bootstrap, "utf16le").toString("base64");
   const environment = {
     ...process.env,
     VM_WECHAT_CONTACT: request.contact,
     VM_WECHAT_MESSAGE: request.message,
-    VM_WECHAT_SEND_MODE: request.sendMode
+    VM_WECHAT_SEND_MODE: request.sendMode,
+    VM_WECHAT_KEYBOARD_FALLBACK: input.allowKeyboardFallback === true ? "true" : "false"
   };
 
   try {
     const { stdout, stderr } = await execFileAsync(
       "powershell.exe",
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript],
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedBootstrap],
       { windowsHide: true, timeout: 20000, maxBuffer: 1024 * 1024, encoding: "utf8", env: environment }
     );
     return parseAutomationOutput(stdout, stderr);

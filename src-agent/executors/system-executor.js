@@ -345,8 +345,9 @@ function findProcessMatches(snapshot, target) {
 export async function handle(message) {
   const lowered = message.toLowerCase();
   const requestedProcessName = extractRequestedProcessName(message);
-  const asksForQq = lowered.includes("qq");
-  const asksForWeChat = lowered.includes("微信") || lowered.includes("wechat") || lowered.includes("weixin");
+  const asksForRunningStatus = /(?:开着|开了|打开|启动|运行|进程|状态|在吗|还在|有没有|是否)/.test(lowered);
+  const asksForQq = lowered.includes("qq") && asksForRunningStatus;
+  const asksForWeChat = (lowered.includes("微信") || lowered.includes("wechat") || lowered.includes("weixin")) && asksForRunningStatus;
   const asksForAppCount =
     lowered.includes("多少应用") ||
     lowered.includes("几个应用") ||

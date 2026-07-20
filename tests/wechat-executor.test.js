@@ -29,12 +29,23 @@ test("parseWeChatSendIntent requires WeChat, exact contact and explicit content 
     message: "build passed",
     sendMode: "enter"
   });
+  assert.deepEqual(parseWeChatSendIntent("给我微信上赵刘辛发消息说宅是对的！"), {
+    contact: "赵刘辛",
+    message: "宅是对的！",
+    sendMode: "enter"
+  });
+  assert.deepEqual(parseWeChatSendIntent("用微信给赵刘辛发消息说测试一下"), {
+    contact: "赵刘辛",
+    message: "测试一下",
+    sendMode: "enter"
+  });
   assert.equal(parseWeChatSendIntent("给张三发消息：你好"), null);
   assert.equal(parseWeChatSendIntent("微信给张三发消息"), null);
 });
 
 test("explicit WeChat send commands use the messenger route", () => {
   assert.equal(resolveAgentRoute("用微信给张三发送消息：你好").type, "messenger");
+  assert.equal(resolveAgentRoute("给我微信上赵刘辛发消息说宅是对的！").type, "messenger");
 });
 
 test("send_wechat_message is registered as an Agent tool", () => {

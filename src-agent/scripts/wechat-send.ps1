@@ -108,10 +108,15 @@ function Get-ElementIdentity {
 function Select-ExactContact {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
-        [string]$Contact
+        [string]$Contact,
+        [bool]$AllowKeyboardFallback
     )
     $matches = Get-VisibleExactNameElements $Root $Contact
     if ($matches.Count -eq 0) {
+        if ($AllowKeyboardFallback) {
+            [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+            return "first_result_keyboard"
+        }
         throw "没有在微信搜索结果中找到完全匹配的联系人：$Contact"
     }
 
@@ -125,6 +130,10 @@ function Select-ExactContact {
         }
     }
     if ($candidates.Count -eq 0) {
+        if ($AllowKeyboardFallback) {
+            [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+            return "first_result_keyboard"
+        }
         throw ("找到了联系人 {0}，但当前微信版本没有暴露可安全操作的联系人控件。" -f $Contact)
     }
     if ($candidates.Count -ne 1) {
@@ -148,6 +157,24 @@ function Select-ExactContact {
     return "focus_enter"
 }
 
+function Set-SafeClipboardText {
+    param(
+        [string]$Text,
+        [hashtable]$ClipboardState
+    )
+    $dataObject = [System.Windows.Forms.Clipboard]::GetDataObject()
+    $formats = if ($null -ne $dataObject) { @($dataObject.GetFormats()) } else { @() }
+    if ($formats.Count -gt 0 -and -not [System.Windows.Forms.Clipboard]::ContainsText()) {
+        throw "当前剪贴板含有非文本内容，无法无损暂存；已停止自动发送。"
+    }
+    if (-not $ClipboardState.ContainsKey("captured")) {
+        $ClipboardState.captured = $true
+        $ClipboardState.hadText = [System.Windows.Forms.Clipboard]::ContainsText()
+        $ClipboardState.text = if ($ClipboardState.hadText) { [System.Windows.Forms.Clipboard]::GetText() } else { "" }
+    }
+    [System.Windows.Forms.Clipboard]::SetText($Text)
+}
+
 function Set-AutomationText {
     param(
         [System.Windows.Automation.AutomationElement]$Element,
@@ -160,17 +187,7 @@ function Set-AutomationText {
         return "value_pattern"
     }
 
-    $dataObject = [System.Windows.Forms.Clipboard]::GetDataObject()
-    $formats = if ($null -ne $dataObject) { @($dataObject.GetFormats()) } else { @() }
-    if ($formats.Count -gt 0 -and -not [System.Windows.Forms.Clipboard]::ContainsText()) {
-        throw "当前剪贴板含有非文本内容，无法无损暂存；已停止自动发送。"
-    }
-    if (-not $ClipboardState.ContainsKey("captured")) {
-        $ClipboardState.captured = $true
-        $ClipboardState.hadText = [System.Windows.Forms.Clipboard]::ContainsText()
-        $ClipboardState.text = if ($ClipboardState.hadText) { [System.Windows.Forms.Clipboard]::GetText() } else { "" }
-    }
-    [System.Windows.Forms.Clipboard]::SetText($Text)
+    Set-SafeClipboardText $Text $ClipboardState
     $Element.SetFocus()
     [System.Windows.Forms.SendKeys]::SendWait("^v")
     return "clipboard"
@@ -257,6 +274,7 @@ function Invoke-Send {
 $contact = [Environment]::GetEnvironmentVariable("VM_WECHAT_CONTACT")
 $message = [Environment]::GetEnvironmentVariable("VM_WECHAT_MESSAGE")
 $sendMode = [Environment]::GetEnvironmentVariable("VM_WECHAT_SEND_MODE")
+$allowKeyboardFallback = [Environment]::GetEnvironmentVariable("VM_WECHAT_KEYBOARD_FALLBACK") -eq "true"
 $clipboardState = @{}
 
 try {
@@ -314,23 +332,39 @@ try {
     Assert-WeChatForeground $wechat.Id
 
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($windowHandle)
-    $contactMethod = Select-ExactContact $root $contact
+    $contactMethod = Select-ExactContact $root $contact $allowKeyboardFallback
     Start-Sleep -Milliseconds 750
     Assert-WeChatForeground $wechat.Id
 
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($windowHandle)
-    $titleMatches = Get-VisibleExactNameElements $root $contact
-    if ($titleMatches.Count -eq 0) {
-        throw ("打开会话后无法再次确认联系人 {0}，已停止发送。" -f $contact)
-    }
+    $contactVerified = $contactMethod -ne "first_result_keyboard"
+    if ($contactVerified) {
+        $titleMatches = Get-VisibleExactNameElements $root $contact
+        if ($titleMatches.Count -eq 0) {
+            throw ("打开会话后无法再次确认联系人 {0}，已停止发送。" -f $contact)
+        }
 
-    $input = Get-MessageInput $root
-    $input.SetFocus()
-    [System.Windows.Forms.SendKeys]::SendWait("^a")
-    $messageMethod = Set-AutomationText $input $message $clipboardState
-    Start-Sleep -Milliseconds 180
-    Assert-WeChatForeground $wechat.Id
-    $sendMethod = Invoke-Send $root $input $sendMode
+        $input = Get-MessageInput $root
+        $input.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait("^a")
+        $messageMethod = Set-AutomationText $input $message $clipboardState
+        Start-Sleep -Milliseconds 180
+        Assert-WeChatForeground $wechat.Id
+        $sendMethod = Invoke-Send $root $input $sendMode
+    } else {
+        Set-SafeClipboardText $message $clipboardState
+        [System.Windows.Forms.SendKeys]::SendWait("^v")
+        $messageMethod = "keyboard_clipboard"
+        Start-Sleep -Milliseconds 180
+        Assert-WeChatForeground $wechat.Id
+        if ($sendMode -eq "ctrl_enter") {
+            [System.Windows.Forms.SendKeys]::SendWait("^{ENTER}")
+            $sendMethod = "ctrl_enter"
+        } else {
+            [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+            $sendMethod = "enter"
+        }
+    }
 
     Write-JsonResult @{
         ok = $true
@@ -338,6 +372,7 @@ try {
         processId = $wechat.Id
         searchMethod = $searchMethod
         contactMethod = $contactMethod
+        contactVerified = $contactVerified
         messageMethod = $messageMethod
         sendMethod = $sendMethod
     }
