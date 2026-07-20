@@ -4,12 +4,53 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { normalizeText } from "../shared/utils.js";
+import { launchAppByTarget } from "./app-executor.js";
 
 const execFileAsync = promisify(execFile);
 const executorDir = path.dirname(fileURLToPath(import.meta.url));
 const scriptPath = path.resolve(executorDir, "..", "scripts", "wechat-send.ps1");
 const MAX_CONTACT_LENGTH = 80;
 const MAX_MESSAGE_LENGTH = 2000;
+const PENDING_MESSAGE_TTL_MS = 10 * 60 * 1000;
+let pendingWeChatMessage = null;
+
+async function isWeChatRunning() {
+  const probe = [
+    "$process = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^(WeChat|Weixin)$' } | Select-Object -First 1",
+    "if ($null -ne $process) { 'true' } else { 'false' }"
+  ].join("; ");
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", probe],
+      { windowsHide: true, timeout: 5000, encoding: "utf8" }
+    );
+    return stdout.trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+function rememberPendingMessage(request) {
+  pendingWeChatMessage = { ...request, createdAt: Date.now() };
+}
+
+function peekPendingMessage() {
+  if (!pendingWeChatMessage) return null;
+  if (Date.now() - pendingWeChatMessage.createdAt > PENDING_MESSAGE_TTL_MS) {
+    pendingWeChatMessage = null;
+    return null;
+  }
+  return pendingWeChatMessage;
+}
+
+export function isWeChatContinuation(message) {
+  return /^(?:继续|继续发送|确认发送|可以继续|继续吧|确认继续)$/i.test(normalizeText(message));
+}
+
+export function isWeChatCancellation(message) {
+  return /^(?:取消|取消发送|别发了|不用发了)$/i.test(normalizeText(message));
+}
 
 export function validateWeChatMessageRequest(input = {}) {
   const rawContact = String(input.contact || "");
@@ -92,10 +133,73 @@ export async function sendWeChatMessage(input) {
   }
 }
 
-export async function handle(message) {
+export async function requestWeChatMessage(input, context = {}) {
+  const request = validateWeChatMessageRequest(input);
+  const existingPending = peekPendingMessage();
+  if (existingPending) {
+    return {
+      ok: false,
+      pending: true,
+      launched: false,
+      contact: existingPending.contact,
+      message: existingPending.message,
+      requiresConfirmation: true
+    };
+  }
+  if (await isWeChatRunning()) {
+    return await sendWeChatMessage({ ...input, ...request });
+  }
+
+  rememberPendingMessage({ ...request, allowKeyboardFallback: input.allowKeyboardFallback === true });
+  try {
+    const launch = await launchAppByTarget(context.baseDir, "微信");
+    return {
+      ok: false,
+      pending: true,
+      launched: true,
+      contact: request.contact,
+      message: request.message,
+      launchMode: launch.launchMode
+    };
+  } catch (error) {
+    pendingWeChatMessage = null;
+    return { ok: false, pending: false, launched: false, contact: request.contact, error: `微信没有运行，并且启动失败：${error.message}` };
+  }
+}
+
+export async function handle(message, context = {}) {
+  const pending = peekPendingMessage();
+  if (pending && isWeChatCancellation(message)) {
+    pendingWeChatMessage = null;
+    return {
+      reply: `好的，已取消给“${pending.contact}”的微信消息。`,
+      meta: { responseMode: "local_tool", localTool: "wechat_sender_cancelled", fallbackReason: "" }
+    };
+  }
+  if (pending && isWeChatContinuation(message)) {
+    const result = await sendWeChatMessage(pending);
+    if (!result.ok) {
+      return {
+        reply: `微信消息还没有发送：${result.error} 待发送内容仍为你保留，微信准备好后可以再次回复“继续”，或回复“取消”。`,
+        meta: { responseMode: "local_tool", localTool: "wechat_sender", fallbackReason: result.error }
+      };
+    }
+    pendingWeChatMessage = null;
+    return {
+      reply: `已继续向微信联系人“${result.contact}”发送消息。`,
+      meta: { responseMode: "local_tool", localTool: "wechat_sender", fallbackReason: "" }
+    };
+  }
+
   const intent = parseWeChatSendIntent(message);
   if (!intent) return null;
-  const result = await sendWeChatMessage(intent);
+  const result = await requestWeChatMessage(intent, context);
+  if (result.pending) {
+    return {
+      reply: `微信刚才没有运行，我已经先帮你打开了。等登录和窗口就绪后，要继续给“${result.contact}”发送“${result.message}”吗？你可以回复“继续”或“取消”。`,
+      meta: { responseMode: "local_tool", localTool: "wechat_sender_pending", fallbackReason: "" }
+    };
+  }
   if (!result.ok) {
     return {
       reply: `微信消息没有发送：${result.error}`,

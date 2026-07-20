@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseWeChatSendIntent, validateWeChatMessageRequest } from "../src-agent/executors/wechat-executor.js";
+import {
+  isWeChatCancellation,
+  isWeChatContinuation,
+  parseWeChatSendIntent,
+  validateWeChatMessageRequest
+} from "../src-agent/executors/wechat-executor.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { ALL_TOOLS } from "../src-agent/tools.js";
 import fs from "node:fs/promises";
@@ -51,6 +56,15 @@ test("explicit WeChat send commands use the messenger route", () => {
 
 test("send_wechat_message is registered as an Agent tool", () => {
   assert.ok(ALL_TOOLS.some((tool) => tool.function?.name === "send_wechat_message"));
+});
+
+test("pending WeChat messages accept explicit continuation or cancellation only", () => {
+  assert.equal(isWeChatContinuation("继续"), true);
+  assert.equal(isWeChatContinuation("确认发送"), true);
+  assert.equal(isWeChatContinuation("随便聊聊"), false);
+  assert.equal(isWeChatCancellation("取消发送"), true);
+  assert.equal(isWeChatCancellation("不用发了"), true);
+  assert.equal(isWeChatCancellation("等等"), false);
 });
 
 test("WeChat automation restores the existing client without launching another process", async () => {

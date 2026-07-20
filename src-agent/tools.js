@@ -180,7 +180,7 @@ const send_wechat_message = {
   type: "function",
   function: {
     name: "send_wechat_message",
-    description: "在已登录的 Windows 微信客户端中搜索完全同名的联系人并发送一条消息。只有用户在当前消息中明确指定联系人、完整消息内容并要求立即发送时才能调用；同名联系人、无法确认会话或微信失去前台焦点时会停止。",
+    description: "在 Windows 微信客户端中搜索联系人并发送一条消息。只有用户在当前消息中明确指定联系人、完整内容并要求发送时才能调用。微信已运行时直接恢复现有窗口；微信未运行时只启动客户端并返回 pending，必须等用户再次确认继续后才能发送。",
     parameters: {
       type: "object",
       properties: {

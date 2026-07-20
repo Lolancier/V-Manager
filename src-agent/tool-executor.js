@@ -25,7 +25,7 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import { openBrowserUrl, openInVscode, searchWeb } from "./executors/ui-automation-executor.js";
-import { sendWeChatMessage } from "./executors/wechat-executor.js";
+import { requestWeChatMessage } from "./executors/wechat-executor.js";
 
 /**
  * Execute a tool by name and return a structured result.
@@ -89,7 +89,7 @@ export async function executeTool(name, args = {}, context = {}) {
       case "open_in_vscode":
         return await openInVscode(args.path, args.line);
       case "send_wechat_message":
-        return await sendWeChatMessage(args);
+        return await requestWeChatMessage(args, context);
 
       // ---- File ----
       case "list_directory":
