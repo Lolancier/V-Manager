@@ -1,6 +1,6 @@
 {
     "name": "v-manager",
-    "version": "0.1.0",
+    "version": "0.6.0",
     "private": true,
     "description": "PC端多功能 Agent MVP，包含桌面壳、人格设定、对话与本地记忆/RAG。",
     "main": "electron/main.js",
