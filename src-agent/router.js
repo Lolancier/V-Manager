@@ -4,6 +4,7 @@ import { handle as appHandle } from "./executors/app-executor.js";
 import { handle as fileHandle } from "./executors/file-executor.js";
 import { handle as systemHandle } from "./executors/system-executor.js";
 import { handle as uiAutomationHandle } from "./executors/ui-automation-executor.js";
+import { handle as wechatHandle } from "./executors/wechat-executor.js";
 
 function detectAppIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
@@ -35,6 +36,14 @@ function detectUiAutomationIntent(message) {
   return null;
 }
 
+function detectMessengerIntent(message) {
+  const normalized = normalizeText(message).toLowerCase();
+  if (/(?:微信|wechat|weixin)/.test(normalized) && /(?:发送|发)(?:一条)?(?:微信)?消息/.test(normalized)) {
+    return { type: "messenger" };
+  }
+  return null;
+}
+
 function detectFileIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
   if (/(?:文件夹|目录|文件|文档|桌面|下载|d盘)/.test(normalized) && /(打开|查看|列出|读取|创建|删除|追加|写入)/.test(normalized)) {
@@ -62,6 +71,7 @@ function detectSystemIntent(message) {
 export function resolveAgentRoute(message) {
   return (
     detectWorkspaceIntent(message)
+    || detectMessengerIntent(message)
     || detectUiAutomationIntent(message)
     || detectAppIntent(message)
     || detectFileIntent(message)
@@ -77,6 +87,7 @@ export function resolveAgentRoute(message) {
  */
 export async function runRoutedLocalExecutor(message, context = {}) {
   const executors = [
+    { name: "wechat", fn: wechatHandle },
     { name: "ui-automation", fn: uiAutomationHandle },
     { name: "workspace", fn: workspaceHandle },
     { name: "app", fn: appHandle },

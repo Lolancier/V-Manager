@@ -120,7 +120,7 @@ const previewBootstrap: AgentBootstrap = {
     { id: "browser", name: "浏览器搜索", status: "partial", detail: "桌面模式可打开网址和搜索结果页；预览模式仅展示能力。" },
     { id: "vscode", name: "VS Code 适配", status: "partial", detail: "桌面模式可打开本地文件或工作区，并定位到指定行。" },
     { id: "filesystem", name: "文件管理", status: "planned", detail: "后续扩展文件读写、整理与索引。" },
-    { id: "messenger", name: "QQ/微信消息发送", status: "planned", detail: "后续通过 UI 自动化/系统脚本接入。" }
+    { id: "messenger", name: "微信消息发送", status: "partial", detail: "桌面模式可向完全匹配的联系人发送单条文本；读取回复和连续对话待开发。" }
   ]
 };
 

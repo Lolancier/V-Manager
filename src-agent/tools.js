@@ -176,6 +176,23 @@ const open_in_vscode = {
   }
 };
 
+const send_wechat_message = {
+  type: "function",
+  function: {
+    name: "send_wechat_message",
+    description: "在已登录的 Windows 微信客户端中搜索完全同名的联系人并发送一条消息。只有用户在当前消息中明确指定联系人、完整消息内容并要求立即发送时才能调用；同名联系人、无法确认会话或微信失去前台焦点时会停止。",
+    parameters: {
+      type: "object",
+      properties: {
+        contact: { type: "string", description: "微信联系人显示名称，必须完整、精确。" },
+        message: { type: "string", description: "要发送的完整消息文本。" },
+        sendMode: { type: "string", enum: ["enter", "ctrl_enter"], description: "微信发送快捷键，默认 enter。" }
+      },
+      required: ["contact", "message"]
+    }
+  }
+};
+
 // ---- File tools ----
 
 const list_directory = {
@@ -528,6 +545,7 @@ export const ALL_TOOLS = [
   open_browser_url,
   search_web,
   open_in_vscode,
+  send_wechat_message,
   // File
   list_directory,
   read_text_file,

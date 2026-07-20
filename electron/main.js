@@ -1101,7 +1101,7 @@ ipcMain.handle("agent:get-bootstrap", async () => {
       { id: "browser", name: "浏览器搜索", status: "ready", detail: "可在系统默认浏览器中打开网址，并使用 Bing、Google 或百度搜索。" },
       { id: "vscode", name: "VS Code 适配", status: "ready", detail: "可用 VS Code 打开本地文件或工作区，并定位到指定文件行。" },
       { id: "filesystem", name: "文件管理", status: "ready", detail: "当前支持打开文件/文件夹、列目录、读取文本、创建文件夹/文本文件、追加内容与显式删除。" },
-      { id: "messenger", name: "QQ/微信消息发送", status: "planned", detail: "尚未接通自动发送；当前不会代替用户发送消息。" }
+      { id: "messenger", name: "微信消息发送", status: "partial", detail: "可用“用微信给联系人发送消息：内容”发送单条文本；读取回复、连续对话和 QQ 适配待开发。" }
     ]
   };
 });

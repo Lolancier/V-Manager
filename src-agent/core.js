@@ -618,7 +618,7 @@ function buildSystemPrompt(config, knowledge) {
     `当前本地时间为：${currentTimeText}。`,
     "你需要基于本地知识库和近期上下文回答，避免凭空编造权限和操作结果。",
     "如果用户询问当前时间、日期、星期，优先使用上面的当前本地时间直接回答，不要自行编造。",
-    "浏览器网址打开、网页搜索和 VS Code 文件/工作区打开已经接通；QQ/微信自动发消息仍未接通，不得声称已发送。",
+    "浏览器网址打开、网页搜索和 VS Code 文件/工作区打开已经接通。微信仅支持在用户当前消息明确给出精确联系人和完整内容时发送单条消息；自动读取回复和连续对话仍未接通。QQ 自动发消息尚未接通。",
     "",
     knowledgeBlock
   ].join("\n");
@@ -662,7 +662,8 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnable
       "2. kill_process 和 delete_file_or_folder 属于破坏性操作，执行前必须说明目标并等待用户明确确认。",
       "3. 没有对应工具时，诚实说明目前没有这个能力。根据工具返回的 JSON 如实回复成功或失败。",
       "4. 表情控制必须通过 set_mood 工具完成，绝不在对话文本中写参数名或 JSON。豆豆眼 Param52 仅用于惊讶、吃惊或困惑，并且 mood 必须设为 surprised；普通思考、提问、开心、害羞等情绪禁止使用。",
-      "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行命令前，必须展示具体内容并等待用户明确回复确认执行。"
+      "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行命令前，必须展示具体内容并等待用户明确回复确认执行。",
+      "6. send_wechat_message 会真实对外发送消息。只有用户当前消息同时包含精确联系人、完整消息内容和明确发送要求时才能调用；不得根据历史消息补齐联系人或内容。"
     ]
     : [
       "当前是快速日常对话。直接自然地回应用户，不要声称执行了任何电脑操作。",
@@ -868,6 +869,7 @@ function sanitizeFaceParamsForMood(faceParams, mood) {
 
 function getToolsForRoute(routeType) {
   const groups = {
+    messenger: ["check_process_running", "launch_application", "send_wechat_message", "set_mood"],
     ui_automation: ["open_browser_url", "search_web", "open_in_vscode", "set_mood"],
     app_control: ["check_process_running", "kill_process", "list_running_apps", "launch_application", "find_application", "set_mood"],
     app_status: ["check_process_running", "list_running_apps", "find_application", "set_mood"],
