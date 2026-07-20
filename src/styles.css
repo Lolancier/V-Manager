@@ -1596,6 +1596,56 @@ textarea:focus {
   line-height: 1.5;
 }
 
+.voice-connection-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #dce2e4;
+  border-radius: 6px;
+  color: #556166;
+  background: #f6f8f8;
+}
+
+.voice-connection-feedback > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.voice-connection-feedback > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.voice-connection-feedback strong,
+.voice-connection-feedback span {
+  line-height: 1.45;
+}
+
+.voice-connection-feedback strong {
+  font-size: 12px;
+}
+
+.voice-connection-feedback span {
+  color: inherit;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.voice-connection-feedback.is-success {
+  border-color: #b8dcd6;
+  color: #116e65;
+  background: #edf8f6;
+}
+
+.voice-connection-feedback.is-error {
+  border-color: #e6c5c2;
+  color: #9d3029;
+  background: #fff3f2;
+}
+
 .asmr-workspace {
   margin-top: 24px;
   padding-top: 22px;
@@ -1712,6 +1762,24 @@ textarea:focus {
   border-color: #2ba79a;
   color: #dff8f4;
   background: #176d65;
+}
+
+:root[data-theme="dark"] .voice-connection-feedback {
+  border-color: #343c3f;
+  color: #aeb8bb;
+  background: #171d1f;
+}
+
+:root[data-theme="dark"] .voice-connection-feedback.is-success {
+  border-color: #277b72;
+  color: #dff8f4;
+  background: #173d39;
+}
+
+:root[data-theme="dark"] .voice-connection-feedback.is-error {
+  border-color: #79413d;
+  color: #ffd7d2;
+  background: #3d211f;
 }
 
 :root[data-theme="dark"] .asmr-workspace-heading > div > strong {

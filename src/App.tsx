@@ -8,7 +8,7 @@ import {
   useRef,
   useState
 } from "react";
-import { LoaderCircle, Mic, RotateCcw, Square, Volume2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, LoaderCircle, Mic, RotateCcw, Square, Volume2 } from "lucide-react";
 import Live2DPreview from "./pet/Live2DPreview";
 import { FaceParams, LIVE2D_MODEL_PRESETS, PetMood } from "./pet/live2dConfig";
 
@@ -29,6 +29,7 @@ type MoodBeat = {
 type WindowView = "pet" | "settings" | "scale" | "composer" | "chat" | "bubble" | "expressions" | "code";
 type SettingsSection = "appearance" | "persona" | "intelligence" | "voice" | "abilities" | "storage";
 type AsmrMode = "sleep" | "casual" | "custom";
+type VoiceConnectionState = "idle" | "testing" | "success" | "error";
 
 const settingsSections: Array<{ id: SettingsSection; label: string; description: string }> = [
   { id: "appearance", label: "个性化", description: "主题与窗口外观" },
@@ -408,6 +409,8 @@ function App() {
   const [generatingAsmr, setGeneratingAsmr] = useState(false);
   const [accountVoices, setAccountVoices] = useState<ElevenLabsVoiceOption[]>([]);
   const [loadingVoices, setLoadingVoices] = useState(false);
+  const [voiceConnectionState, setVoiceConnectionState] = useState<VoiceConnectionState>("idle");
+  const [voiceConnectionMessage, setVoiceConnectionMessage] = useState("");
   const [previewingVoice, setPreviewingVoice] = useState(false);
   const [localSttStatus, setLocalSttStatus] = useState<LocalSttStatus | null>(null);
   const [installingLocalStt, setInstallingLocalStt] = useState(false);
@@ -1263,13 +1266,16 @@ function App() {
   async function handleLoadElevenLabsVoices() {
     if (!bridge || !configDraft) return;
     setLoadingVoices(true);
-    setAsmrMessage("");
+    setVoiceConnectionState("testing");
+    setVoiceConnectionMessage("正在连接 ElevenLabs 并验证 API Key...");
     try {
       const voices = await bridge.listElevenLabsVoices(configDraft.voice);
       setAccountVoices(voices);
-      setAsmrMessage(`ElevenLabs 已连接，读取到 ${voices.length} 个账号可用音色。`);
+      setVoiceConnectionState("success");
+      setVoiceConnectionMessage(`连接成功，读取到 ${voices.length} 个账号可用音色。`);
     } catch (error) {
-      setAsmrMessage(`ElevenLabs 连接失败：${error instanceof Error ? error.message : String(error)}`);
+      setVoiceConnectionState("error");
+      setVoiceConnectionMessage(`连接失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setLoadingVoices(false);
     }
@@ -2212,10 +2218,14 @@ function App() {
                 <input
                   value={configDraft.voice.baseUrl}
                   placeholder="https://api.elevenlabs.io/v1"
-                  onChange={(event) => setConfigDraft({
-                    ...configDraft,
-                    voice: { ...configDraft.voice, baseUrl: event.target.value }
-                  })}
+                  onChange={(event) => {
+                    setVoiceConnectionState("idle");
+                    setVoiceConnectionMessage("");
+                    setConfigDraft({
+                      ...configDraft,
+                      voice: { ...configDraft.voice, baseUrl: event.target.value }
+                    });
+                  }}
                 />
               </label>
               <label>
@@ -2224,10 +2234,14 @@ function App() {
                   type="password"
                   value={configDraft.voice.apiKey}
                   placeholder="sk-..."
-                  onChange={(event) => setConfigDraft({
-                    ...configDraft,
-                    voice: { ...configDraft.voice, apiKey: event.target.value }
-                  })}
+                  onChange={(event) => {
+                    setVoiceConnectionState("idle");
+                    setVoiceConnectionMessage("");
+                    setConfigDraft({
+                      ...configDraft,
+                      voice: { ...configDraft.voice, apiKey: event.target.value }
+                    });
+                  }}
                 />
               </label>
               <label>
@@ -2328,10 +2342,21 @@ function App() {
               </label>
               <div className="voice-connect-row voice-config-wide">
                 <button className="ghost-button compact" type="button" onClick={() => void handleLoadElevenLabsVoices()} disabled={loadingVoices || !configDraft.voice.apiKey}>
-                  {loadingVoices ? "正在读取..." : "连接并刷新账号音色"}
+                  {loadingVoices ? "正在测试连接..." : "测试连接并刷新音色"}
                 </button>
                 <span>{elevenLabsModelPresets.find((model) => model.value === configDraft.voice.model)?.hint}</span>
               </div>
+              {voiceConnectionState !== "idle" ? (
+                <div className={`voice-connection-feedback is-${voiceConnectionState}`} role="status" aria-live="polite">
+                  {voiceConnectionState === "testing" ? <LoaderCircle className="is-spinning" size={17} /> : null}
+                  {voiceConnectionState === "success" ? <CheckCircle2 size={17} /> : null}
+                  {voiceConnectionState === "error" ? <AlertCircle size={17} /> : null}
+                  <div>
+                    <strong>{voiceConnectionState === "testing" ? "正在检测" : voiceConnectionState === "success" ? "ElevenLabs 可用" : "ElevenLabs 不可用"}</strong>
+                    <span>{voiceConnectionMessage}</span>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="local-stt-settings">

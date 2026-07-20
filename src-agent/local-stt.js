@@ -63,28 +63,41 @@ async function downloadFile(url, destination, onProgress, phase) {
 }
 
 async function downloadWhisperRuntime(paths, onProgress) {
-  const release = await fetch(RELEASE_API, {
-    headers: { accept: "application/vnd.github+json", "user-agent": "V-Manager" },
-    signal: AbortSignal.timeout(30000)
-  });
-  if (!release.ok) throw new Error(`无法读取 whisper.cpp 版本：HTTP ${release.status}`);
-  const data = await release.json();
-  const asset = data.assets?.find((item) => item.name === "whisper-bin-x64.zip");
-  if (!asset?.browser_download_url) throw new Error("whisper.cpp 未提供 Windows x64 运行包。");
-
   await fs.mkdir(paths.root, { recursive: true });
   const archivePath = path.join(paths.root, "whisper-bin-x64.zip");
-  await downloadFile(asset.browser_download_url, archivePath, onProgress, "runtime");
+  const archiveExists = await fs.access(archivePath).then(() => true).catch(() => false);
+  if (!archiveExists) {
+    const release = await fetch(RELEASE_API, {
+      headers: { accept: "application/vnd.github+json", "user-agent": "V-Manager" },
+      signal: AbortSignal.timeout(30000)
+    });
+    if (!release.ok) throw new Error(`无法读取 whisper.cpp 版本：HTTP ${release.status}`);
+    const data = await release.json();
+    const asset = data.assets?.find((item) => item.name === "whisper-bin-x64.zip");
+    if (!asset?.browser_download_url) throw new Error("whisper.cpp 未提供 Windows x64 运行包。");
+    await downloadFile(asset.browser_download_url, archivePath, onProgress, "runtime");
+  }
   await fs.mkdir(paths.runtimeDir, { recursive: true });
-  await execFileAsync("powershell.exe", [
-    "-NoProfile",
-    "-NonInteractive",
-    "-Command",
-    "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-    archivePath,
-    paths.runtimeDir
-  ], { windowsHide: true, timeout: 120000 });
-  await fs.unlink(archivePath).catch(() => {});
+  const quotePowerShellLiteral = (value) => `'${String(value).replaceAll("'", "''")}'`;
+  const extractCommand = [
+    "Expand-Archive",
+    `-LiteralPath ${quotePowerShellLiteral(archivePath)}`,
+    `-DestinationPath ${quotePowerShellLiteral(paths.runtimeDir)}`,
+    "-Force"
+  ].join(" ");
+  try {
+    await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      extractCommand
+    ], { windowsHide: true, timeout: 120000 });
+    await fs.unlink(archivePath).catch(() => {});
+  } catch (error) {
+    await fs.unlink(archivePath).catch(() => {});
+    console.error("[local-stt] whisper.cpp runtime extraction failed:", error);
+    throw new Error("whisper.cpp 运行时解压失败，已清理损坏的安装包，请重试安装。");
+  }
 }
 
 export async function getLocalSttStatus(baseDir, modelId = "small-q5_1") {
