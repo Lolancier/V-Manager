@@ -492,11 +492,28 @@ const create_workspace_file = {
   }
 };
 
+const write_workspace_code = {
+  type: "function",
+  function: {
+    name: "write_workspace_code",
+    description: "用完整内容更新工作区内的已有文件。适合文件整体重构；调用前必须先读取该文件。expected_content 应传入刚读取到的完整原文，用于避免覆盖并发改动。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "工作区内的相对文件路径" },
+        content: { type: "string", description: "更新后的完整文件内容" },
+        expected_content: { type: "string", description: "刚读取到的完整原文" }
+      },
+      required: ["path", "content", "expected_content"]
+    }
+  }
+};
+
 const run_workspace_command = {
   type: "function",
   function: {
     name: "run_workspace_command",
-    description: "在当前工作区运行受限的开发命令。必须先向用户展示完整命令并等待其最近一条消息明确回复“确认执行”。允许 npm run/npm test、npx tsc --noEmit 和只读 git 命令。",
+    description: "在当前工作区运行受限的构建、测试、类型检查和只读 Git 命令。自动模式需要用户确认；Agent 模式已由用户授权本轮连续执行。禁止安装依赖、shell 连接符和重定向。",
     parameters: {
       type: "object",
       properties: { command: { type: "string", description: "完整命令，例如 npm run build" } },
@@ -568,6 +585,7 @@ export const ALL_TOOLS = [
   read_workspace_code,
   apply_workspace_patch,
   create_workspace_file,
+  write_workspace_code,
   run_workspace_command,
   // Mood
   set_mood

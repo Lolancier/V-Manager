@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   getCodeWorkspace: () => ipcRenderer.invoke("agent:get-code-workspace"),
   selectCodeWorkspace: () => ipcRenderer.invoke("agent:select-code-workspace"),
   readCodeFile: (path) => ipcRenderer.invoke("agent:read-code-file", path),
+  writeCodeFile: (path, content, expectedContent) => ipcRenderer.invoke("agent:write-code-file", { path, content, expectedContent }),
   getPetWindowBounds: () => ipcRenderer.invoke("agent:get-pet-window-bounds"),
   getPetScale: () => ipcRenderer.invoke("agent:get-pet-scale"),
   getPositionLock: () => ipcRenderer.invoke("agent:get-position-lock"),
@@ -107,6 +108,11 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = (_event, expressions) => callback(expressions);
     ipcRenderer.on("agent:expressions-updated", listener);
     return () => ipcRenderer.removeListener("agent:expressions-updated", listener);
+  },
+  onCursorScreenPosition: (callback) => {
+    const listener = (_event, position) => callback(position);
+    ipcRenderer.on("agent:cursor-screen-position", listener);
+    return () => ipcRenderer.removeListener("agent:cursor-screen-position", listener);
   },
   onMoodUpdated: (callback) => {
     const listener = (_event, payload) => callback(payload);

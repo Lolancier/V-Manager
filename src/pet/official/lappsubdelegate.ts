@@ -286,6 +286,31 @@ export class LAppSubdelegate {
   }
 
   /**
+   * Updates gaze from a window-relative cursor position without requiring a
+   * pointer press or a hit on the canvas. Coordinates outside the canvas are
+   * reduced to a unit direction so tracking continues beyond the model body.
+   */
+  public onGlobalPointerMoved(clientX: number, clientY: number): void {
+    if (!this._canvas || !this._live2dManager) return;
+    const rect = this._canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    let x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    let y = 1 - ((clientY - rect.top) / rect.height) * 2;
+    const distance = Math.hypot(x, y);
+    if (distance > 1) {
+      x /= distance;
+      y /= distance;
+    }
+
+    this._live2dManager.onDrag(x, y);
+  }
+
+  public resetGlobalPointer(): void {
+    this._live2dManager?.onDrag(0, 0);
+  }
+
+  /**
    * クリックが終了したら呼ばれる。
    */
   public onPointEnded(pageX: number, pageY: number): void {

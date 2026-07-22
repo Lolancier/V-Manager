@@ -164,6 +164,23 @@ export async function createWorkspaceFile(args = {}, context = {}) {
   return { ok: true, path: relativePath, created: true };
 }
 
+export async function writeWorkspaceCode(args = {}, context = {}) {
+  assertConfirmed(context);
+  const { target, relativePath } = await resolveWorkspacePath(args.path, context);
+  const content = String(args.content ?? "");
+  const expectedContent = String(args.expected_content ?? "");
+  const hasExpectedContent = Object.prototype.hasOwnProperty.call(args, "expected_content");
+  if (Buffer.byteLength(content, "utf-8") > MAX_FILE_BYTES) throw new Error("单次写入内容超过 512KB 限制。");
+
+  const current = await fs.readFile(target, "utf-8");
+  if (hasExpectedContent && current !== expectedContent) {
+    throw new Error("保存前文件已被其他操作修改。请重新读取文件并合并改动，避免覆盖新内容。");
+  }
+  if (current === content) return { ok: true, path: relativePath, changed: false };
+  await fs.writeFile(target, content, "utf-8");
+  return { ok: true, path: relativePath, changed: true };
+}
+
 function parseAllowedCommand(command) {
   const value = String(command || "").trim();
   if (!value || /[&|;<>`$\n\r]/.test(value)) throw new Error("命令不能为空，且不能包含 shell 连接符或重定向符。");
@@ -171,17 +188,24 @@ function parseAllowedCommand(command) {
   const [bin, ...args] = parts;
   const allowed =
     (bin === "npm" && ((args[0] === "run" && args.length >= 2) || args[0] === "test")) ||
+    (["pnpm", "yarn"].includes(bin) && ((args[0] === "run" && args.length >= 2) || ["test", "build", "lint"].includes(args[0]))) ||
     (bin === "npx" && args[0] === "tsc" && args.slice(1).every((arg) => arg === "--noEmit" || arg === "--pretty")) ||
+    (bin === "node" && args[0] === "--test") ||
+    (["python", "py"].includes(bin) && args[0] === "-m" && args[1] === "pytest") ||
+    (bin === "pytest") ||
+    (bin === "cargo" && ["check", "test"].includes(args[0])) ||
+    (bin === "go" && args[0] === "test") ||
     (bin === "git" && ["status", "diff", "log", "rev-parse"].includes(args[0]));
   if (!allowed) {
-    throw new Error("只允许运行 npm run/npm test、npx tsc --noEmit，以及只读 git status/diff/log/rev-parse 命令。");
+    throw new Error("只允许运行项目构建/测试/检查命令，以及只读 git status/diff/log/rev-parse 命令；不允许安装依赖或执行 shell 连接符。");
   }
   return { bin, args, display: value };
 }
 
 export async function runWorkspaceCommand(command, context = {}) {
-  assertConfirmed(context);
   const { bin, args, display } = parseAllowedCommand(command);
+  const isReadOnlyGitCommand = bin === "git" && ["status", "diff", "log", "rev-parse"].includes(args[0]);
+  if (!isReadOnlyGitCommand) assertConfirmed(context);
   const cwd = getWorkspaceRoot(context);
   const output = await new Promise((resolve, reject) => {
     const child = spawn(bin, args, { cwd, shell: false, windowsHide: true });
@@ -189,8 +213,8 @@ export async function runWorkspaceCommand(command, context = {}) {
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error("命令执行超过 30 秒，已停止。"));
-    }, 30_000);
+      reject(new Error("命令执行超过 120 秒，已停止。"));
+    }, 120_000);
     child.stdout.on("data", (chunk) => { stdout = (stdout + chunk).slice(-20_000); });
     child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-20_000); });
     child.on("error", (error) => { clearTimeout(timer); reject(error); });

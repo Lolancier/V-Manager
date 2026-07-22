@@ -1,0 +1,3 @@
+[submodule "references/soullink-emotion-sdk"]
+	path = references/soullink-emotion-sdk
+	url = https://github.com/nanlingyin/soullink-emotion-sdk.git

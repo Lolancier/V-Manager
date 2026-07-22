@@ -31,6 +31,14 @@ type SettingsSection = "appearance" | "persona" | "intelligence" | "voice" | "ab
 type AsmrMode = "sleep" | "casual" | "custom";
 type VoiceConnectionState = "idle" | "testing" | "success" | "error";
 
+const codeAgentModes: Array<{ id: CodeAgentMode; label: string; hint: string }> = [
+  { id: "auto", label: "自动", hint: "自动判断；写入前会先确认" },
+  { id: "read", label: "问答", hint: "只读搜索与解释" },
+  { id: "plan", label: "规划", hint: "分析并制定方案，不改文件" },
+  { id: "agent", label: "Agent", hint: "连续编辑、检查并运行测试" },
+  { id: "review", label: "审查", hint: "检查代码和 Git 变更，不改文件" }
+];
+
 const settingsSections: Array<{ id: SettingsSection; label: string; description: string }> = [
   { id: "appearance", label: "个性化", description: "主题与窗口外观" },
   { id: "persona", label: "角色与陪伴", description: "称呼、性格和表达方式" },
@@ -65,7 +73,8 @@ const previewConfig: AgentConfig = {
   },
   appearance: {
     theme: "light",
-    live2dModel: "qianqian"
+    live2dModel: "qianqian",
+    mouseFollow: true
   },
   voice: {
     enabled: false,
@@ -412,6 +421,14 @@ function App() {
   const [codeFilter, setCodeFilter] = useState("");
   const [activeCodePath, setActiveCodePath] = useState("");
   const [activeCodeContent, setActiveCodeContent] = useState("");
+  const [codeDraftContent, setCodeDraftContent] = useState("");
+  const [codeEditing, setCodeEditing] = useState(false);
+  const [codeSaving, setCodeSaving] = useState(false);
+  const [codeSaveMessage, setCodeSaveMessage] = useState("");
+  const [codeAgentMode, setCodeAgentMode] = useState<CodeAgentMode>(() => {
+    const saved = window.localStorage.getItem("vivi-code-agent-mode");
+    return codeAgentModes.some((mode) => mode.id === saved) ? saved as CodeAgentMode : "auto";
+  });
   const [codeFileLoading, setCodeFileLoading] = useState(false);
   const [codeWorkspaceError, setCodeWorkspaceError] = useState("");
   const [systemSnapshot, setSystemSnapshot] = useState<SystemResourceSnapshot | null>(null);
@@ -723,10 +740,30 @@ function App() {
       setActiveExpressionSet(new Set(expressions));
     });
 
-    const offMoodUpdated = bridge.onMoodUpdated?.((payload: { mood: string; faceParams: Record<string, number> | null; reply?: string }) => {
+    const offMoodUpdated = bridge.onMoodUpdated?.((payload) => {
       if ((viewMode === "pet" || viewMode === "chat") && payload?.mood) {
-        console.log("[App] received mood from LLM:", payload.mood);
+        console.log(`[App] received ${payload.phase ?? "final"} mood:`, payload.mood);
         const llmMood = payload.mood as PetMood;
+        if (payload.phase === "anticipation") {
+          const durationMs = Math.max(420, Math.min(payload.durationMs ?? 760, 1400));
+          clearTimer(talkingHoldRef);
+          clearTimer(moodTimerRef);
+          clearTimer(faceTimerRef);
+          clearMoodBeatTimers();
+          setPetSpeaking(false);
+          setActiveExpressionSet(retainPersistentShapes);
+          setPetMood(llmMood);
+          setFaceParams(payload.faceParams ? { ...payload.faceParams } : null);
+          moodTimerRef.current = window.setTimeout(() => {
+            moodTimerRef.current = null;
+            setPetMood(streamingRef.current ? "thinking" : "idle");
+          }, durationMs);
+          faceTimerRef.current = window.setTimeout(() => {
+            faceTimerRef.current = null;
+            setFaceParams(null);
+          }, Math.min(durationMs + 180, 1500));
+          return;
+        }
         const replyContent = payload.reply ?? [...messages].reverse().find((message) => message.role === "assistant")?.content ?? "";
         const speechMs = estimateSpeechDurationMs(replyContent);
         const expressionMs = estimateExpressionDurationMs(replyContent);
@@ -1237,10 +1274,21 @@ function App() {
         return;
       }
 
-      const result = await bridge.chat({ message });
+      const result = await bridge.chat({
+        message,
+        codeContext: viewMode === "code"
+          ? { mode: codeAgentMode, activeFile: activeCodePath || undefined }
+          : undefined
+      });
       setMessages(result.messages);
       setKnowledge(result.knowledge);
       setLastReplyMeta(result.lastReplyMeta);
+      if (viewMode === "code" && (result.lastReplyMeta?.toolUseCount ?? 0) > 0) {
+        const currentPath = activeCodePath;
+        const snapshot = await bridge.getCodeWorkspace();
+        setCodeWorkspace(snapshot);
+        if (currentPath) await openCodeFile(currentPath);
+      }
       // Mood application is handled by main process → agent:mood-updated → pet window
     } finally {
       setSending(false);
@@ -1563,12 +1611,19 @@ function App() {
 
   async function openCodeFile(path: string) {
     if (!bridge) return;
+    if (codeEditing && codeDraftContent !== activeCodeContent && path !== activeCodePath) {
+      const shouldDiscard = window.confirm("当前文件有未保存改动，确定要放弃并打开其他文件吗？");
+      if (!shouldDiscard) return;
+    }
     setCodeFileLoading(true);
     setCodeWorkspaceError("");
     try {
       const result = await bridge.readCodeFile(path);
       setActiveCodePath(result.path);
       setActiveCodeContent(result.content);
+      setCodeDraftContent(result.content);
+      setCodeEditing(false);
+      setCodeSaveMessage("");
     } catch (error) {
       setCodeWorkspaceError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1585,6 +1640,8 @@ function App() {
     ));
     setActiveCodePath("");
     setActiveCodeContent("");
+    setCodeDraftContent("");
+    setCodeEditing(false);
     setCodeFilter("");
     const firstFile = snapshot.entries.find((entry) => entry.path === "README.md")
       ?? snapshot.entries.find((entry) => entry.path === "package.json")
@@ -1693,6 +1750,27 @@ function App() {
       lastY: bounds.y,
       dragStarted: false
     };
+  }
+
+  function changeCodeAgentMode(mode: CodeAgentMode) {
+    setCodeAgentMode(mode);
+    window.localStorage.setItem("vivi-code-agent-mode", mode);
+  }
+
+  async function saveActiveCodeFile() {
+    if (!bridge || !activeCodePath || codeSaving || codeDraftContent === activeCodeContent) return;
+    setCodeSaving(true);
+    setCodeSaveMessage("");
+    try {
+      const result = await bridge.writeCodeFile(activeCodePath, codeDraftContent, activeCodeContent);
+      setActiveCodeContent(codeDraftContent);
+      setCodeEditing(false);
+      setCodeSaveMessage(result.changed ? "已保存" : "没有变化");
+    } catch (error) {
+      setCodeSaveMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCodeSaving(false);
+    }
   }
 
   async function handleTestAstrBot() {
@@ -1832,6 +1910,20 @@ function App() {
                 <strong>暗色</strong>
                 <small>低亮度、沉浸，适合夜间使用</small>
               </button>
+            </div>
+            <div className="relationship-switches live2d-behavior-switches">
+              <label className="voice-switch">
+                <input
+                  type="checkbox"
+                  checked={configDraft.appearance?.mouseFollow !== false}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    appearance: { ...configDraft.appearance, mouseFollow: event.target.checked }
+                  })}
+                />
+                鼠标注视跟随
+              </label>
+              <span>鼠标离开模型本体和透明区域后仍会持续跟随，停止时自然保持视线。</span>
             </div>
             <div className="model-choice-section">
               <p className="eyebrow">Live2D 模型</p>
@@ -2912,6 +3004,7 @@ function App() {
                 activeExpressionSet={activeExpressionSet}
                 faceParams={faceParams}
                 speaking={petSpeaking}
+                mouseFollow={configDraft.appearance?.mouseFollow !== false}
               />
             </div>
           </aside>
@@ -3017,8 +3110,14 @@ function App() {
             <span>{codeWorkspace?.root ?? "正在读取工作区..."}</span>
           </div>
           <div className="code-header-actions">
-            <span className={`runtime-badge ${lastReplyMeta?.responseMode ?? "fallback_local"}`}>
-              {sending ? "Vivi 正在处理" : lastReplyMeta?.sourceLabel ?? "代码会话就绪"}
+            <label className="code-mode-picker" title={codeAgentModes.find((mode) => mode.id === codeAgentMode)?.hint}>
+              <span>工作模式</span>
+              <select value={codeAgentMode} onChange={(event) => changeCodeAgentMode(event.target.value as CodeAgentMode)}>
+                {codeAgentModes.map((mode) => <option value={mode.id} key={mode.id}>{mode.label}</option>)}
+              </select>
+            </label>
+            <span className={`runtime-badge ${lastReplyMeta?.responseMode ?? "fallback_local"}`} title="最近一次运行状态，不是按钮">
+              {sending ? "状态：Vivi 正在处理" : `状态：${lastReplyMeta?.sourceLabel ?? "代码会话就绪"}`}
             </span>
             <button className="code-icon-button" type="button" aria-label="关闭代码工作台" title="关闭" onClick={() => window.close()}>
               ×
@@ -3077,10 +3176,50 @@ function App() {
           <section className="code-editor-pane">
             <div className="code-editor-tabbar">
               <span className={activeCodePath ? "is-open" : ""}>{activeCodePath || "选择一个文件"}</span>
-              {codeFileLoading ? <small>读取中...</small> : <small>只读预览</small>}
+              <div className="code-editor-actions">
+                {codeSaveMessage ? <small>{codeSaveMessage}</small> : null}
+                {activeCodePath && !codeFileLoading ? (
+                  codeEditing ? (
+                    <>
+                      <button type="button" onClick={() => { setCodeDraftContent(activeCodeContent); setCodeEditing(false); setCodeSaveMessage(""); }}>放弃</button>
+                      <button
+                        className="is-primary"
+                        type="button"
+                        disabled={codeSaving || codeDraftContent === activeCodeContent}
+                        onClick={() => void saveActiveCodeFile()}
+                      >
+                        {codeSaving ? "保存中" : "保存"}
+                      </button>
+                    </>
+                  ) : <button type="button" onClick={() => setCodeEditing(true)}>编辑</button>
+                ) : <small>{codeFileLoading ? "读取中..." : "只读预览"}</small>}
+              </div>
             </div>
             {codeWorkspaceError ? <div className="code-empty-state">{codeWorkspaceError}</div> : null}
-            {!codeWorkspaceError && activeCodePath ? (
+            {!codeWorkspaceError && activeCodePath && codeEditing ? (
+              <textarea
+                className="code-editor-textarea"
+                aria-label={`编辑 ${activeCodePath}`}
+                spellCheck={false}
+                value={codeDraftContent}
+                onChange={(event) => setCodeDraftContent(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Tab") {
+                    event.preventDefault();
+                    const target = event.currentTarget;
+                    const start = target.selectionStart;
+                    const end = target.selectionEnd;
+                    setCodeDraftContent(`${codeDraftContent.slice(0, start)}  ${codeDraftContent.slice(end)}`);
+                    window.requestAnimationFrame(() => target.setSelectionRange(start + 2, start + 2));
+                  }
+                  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+                    event.preventDefault();
+                    void saveActiveCodeFile();
+                  }
+                }}
+              />
+            ) : null}
+            {!codeWorkspaceError && activeCodePath && !codeEditing ? (
               <pre className="code-editor-content" aria-label={activeCodePath}>
                 {codeLines.map((line, index) => (
                   <div className="code-line" key={`${activeCodePath}-${index}`}>
@@ -3099,7 +3238,7 @@ function App() {
             <div className="code-pane-title code-agent-title">
               <div>
                 <strong>{configDraft.personaName}</strong>
-                <span>代码会话与日常记忆共享</span>
+                <span>{codeAgentModes.find((mode) => mode.id === codeAgentMode)?.hint}</span>
               </div>
             </div>
             <div className="code-terminal-chat" ref={historyListRef}>
@@ -3119,6 +3258,8 @@ function App() {
               >
                 解释当前文件
               </button>
+              <button type="button" onClick={() => { changeCodeAgentMode("plan"); setInput(`为${activeCodePath ? ` ${activeCodePath}` : "当前项目"}制定修改计划，列出涉及文件和验证步骤`); }}>规划修改</button>
+              <button type="button" onClick={() => { changeCodeAgentMode("review"); setInput("审查当前 Git 变更，按风险级别指出问题并给出验证建议"); }}>审查变更</button>
             </div>
             <form className="code-agent-composer" onSubmit={handleSend}>
               <textarea
@@ -3277,6 +3418,7 @@ function App() {
               activeExpressionSet={activeExpressionSet}
               faceParams={faceParams}
               speaking={petSpeaking}
+              mouseFollow={configDraft.appearance?.mouseFollow !== false}
               onInteractionChange={handlePetInteractionChange}
             />
           </div>

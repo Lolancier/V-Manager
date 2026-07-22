@@ -26,18 +26,20 @@ import {
   testDeepSeekConnection,
   testEmbeddingConnection
 } from "../src-agent/core.js";
-import { listWorkspaceCodeFiles, readWorkspaceCode } from "../src-agent/code-executor.js";
+import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
 import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { testAstrBotConnection } from "../src-agent/astrbot-client.js";
+import { classifyFastReaction } from "../src-agent/fast-reaction.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 protocol.registerSchemesAsPrivileged([
-  { scheme: "vivi-model", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
+  { scheme: "vivi-model", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
+  { scheme: "vivi-asset", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }
 ]);
 
 const isDev = !app.isPackaged;
@@ -59,14 +61,16 @@ let petHiddenForChat = false;
 let activeManualExpressions = new Set();
 const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
 const builtInLive2DModels = [
-  { id: "qianqian", label: "芊芊", detail: "完整表情、形态与动作适配", builtIn: true },
-  { id: "hiyori", label: "Hiyori", detail: "Cubism 官方示例模型", builtIn: true },
-  { id: "epsilon", label: "Epsilon", detail: "轻量免费示例模型", builtIn: true }
+  { id: "qianqian", label: "芊芊", detail: "完整表情、形态与动作适配", builtIn: true, capabilities: { expressionCount: 32, motionGroupCount: 2, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } },
+  { id: "hiyori", label: "Hiyori", detail: "通用参数适配 · 动作 2 组", builtIn: true, capabilities: { expressionCount: 0, motionGroupCount: 2, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } },
+  { id: "epsilon", label: "Epsilon", detail: "通用参数 + 8 个原生表情", builtIn: true, capabilities: { expressionCount: 8, motionGroupCount: 6, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } }
 ];
 let live2dModelOptions = [...builtInLive2DModels];
 let customModelRoots = new Map();
 let modelDirectoryWatcher = null;
 let modelScanTimer = null;
+let cursorTrackingTimer = null;
+const cursorDeliveryState = new Map();
 
 function mergeAgentConfig(nextConfig = {}) {
   return {
@@ -157,13 +161,30 @@ async function readCustomModelOption(modelsDirectory, modelFile) {
     const id = `custom-${Buffer.from(relativeModelFile).toString("base64url")}`;
     const baseName = path.basename(modelFile).replace(/\.model3\.json$/i, "");
     const parentName = path.basename(modelRoot);
+    const expressions = definition?.FileReferences?.Expressions ?? [];
+    const motions = definition?.FileReferences?.Motions ?? {};
+    const groups = definition?.Groups ?? [];
+    const hasGroup = (name) => groups.some((group) => String(group?.Name || "").toLowerCase() === name.toLowerCase() && (group?.Ids?.length ?? 0) > 0);
+    const capabilities = {
+      expressionCount: expressions.length,
+      motionGroupCount: Object.keys(motions).length,
+      hasLipSync: hasGroup("LipSync"),
+      hasEyeBlink: hasGroup("EyeBlink"),
+      hasDisplayInfo: Boolean(definition?.FileReferences?.DisplayInfo)
+    };
+    const abilityLabels = [
+      expressions.length ? `${expressions.length} 个原生表情` : "通用参数",
+      capabilities.hasLipSync ? "口型" : null,
+      capabilities.hasEyeBlink ? "眨眼" : null
+    ].filter(Boolean);
     return {
       id,
       label: baseName || parentName,
-      detail: `用户模型 · ${path.relative(modelsDirectory, modelRoot) || parentName}`,
+      detail: `用户模型 · ${abilityLabels.join(" + ")} · ${path.relative(modelsDirectory, modelRoot) || parentName}`,
       directory: `vivi-model://local/${encodeURIComponent(id)}/`,
       fileName: path.basename(modelFile),
       builtIn: false,
+      capabilities,
       root: modelRoot
     };
   } catch {
@@ -209,8 +230,11 @@ function startLive2DModelWatcher() {
 function getModelContentType(filePath) {
   const extension = path.extname(filePath).toLowerCase();
   if (extension === ".json") return "application/json";
+  if (extension === ".js") return "application/javascript";
+  if (extension === ".css") return "text/css";
   if (extension === ".png") return "image/png";
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".webp") return "image/webp";
   return "application/octet-stream";
 }
 let chatState = {
@@ -277,6 +301,11 @@ function getReplySourceLabel(meta) {
   }
 
   if (meta.responseMode === "deepseek" || meta.responseMode === "deepseek_tool") {
+    if (meta.codeMode) {
+      const labels = { auto: "自动", read: "问答", plan: "规划", agent: "Agent", review: "审查" };
+      const toolSuffix = meta.toolUseCount ? ` · ${meta.toolUseCount} 次工具` : "";
+      return `Vivi Code · ${labels[meta.codeMode] || meta.codeMode}${toolSuffix}`;
+    }
     return meta.model ? `DeepSeek · ${meta.model}` : "DeepSeek";
   }
 
@@ -826,6 +855,10 @@ function restorePetAfterChat() {
   if (!petHiddenForChat || app.isQuiting || !petWindow || petWindow.isDestroyed()) return;
   petHiddenForChat = false;
   petWindow.showInactive();
+  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
+    updateBubbleWindowLayout();
+    bubbleWindow.showInactive();
+  }
 }
 
 function openCodeWindow() {
@@ -864,6 +897,11 @@ function broadcastChatState() {
   codeWindow?.webContents.send("agent:chat-state-updated", chatState);
 }
 
+function broadcastMoodUpdate(payload) {
+  petWindow?.webContents.send("agent:mood-updated", payload);
+  chatWindow?.webContents.send("agent:mood-updated", payload);
+}
+
 function broadcastConfigUpdated(config) {
   for (const win of [petWindow, settingsWindow, scaleWindow, composerWindow, chatWindow, bubbleWindow, expressionWindow, codeWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:config-updated", config);
@@ -882,6 +920,36 @@ function broadcastLive2DModels() {
   }
 }
 
+function deliverCursorPosition(win, point) {
+  if (!win || win.isDestroyed() || !win.isVisible()) return;
+  const bounds = win.getContentBounds();
+  const signature = `${point.x}:${point.y}:${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
+  if (cursorDeliveryState.get(win.id) === signature) return;
+  cursorDeliveryState.set(win.id, signature);
+  win.webContents.send("agent:cursor-screen-position", {
+    screenX: point.x,
+    screenY: point.y,
+    clientX: point.x - bounds.x,
+    clientY: point.y - bounds.y
+  });
+}
+
+function startGlobalCursorTracking() {
+  if (cursorTrackingTimer) return;
+  cursorTrackingTimer = setInterval(() => {
+    if (currentAgentConfig.appearance?.mouseFollow === false) return;
+    const point = screen.getCursorScreenPoint();
+    deliverCursorPosition(petWindow, point);
+    deliverCursorPosition(chatWindow, point);
+  }, 33);
+}
+
+function stopGlobalCursorTracking() {
+  if (cursorTrackingTimer) clearInterval(cursorTrackingTimer);
+  cursorTrackingTimer = null;
+  cursorDeliveryState.clear();
+}
+
 async function updateLive2DModel(modelId) {
   if (!live2dModelOptions.some((model) => model.id === modelId)) return false;
   currentAgentConfig = mergeAgentConfig({
@@ -891,6 +959,17 @@ async function updateLive2DModel(modelId) {
   await saveConfig(app.getPath("userData"), currentAgentConfig);
   broadcastConfigUpdated(currentAgentConfig);
   return true;
+}
+
+async function updateMouseFollow(enabled) {
+  currentAgentConfig = mergeAgentConfig({
+    ...currentAgentConfig,
+    appearance: { ...currentAgentConfig.appearance, mouseFollow: Boolean(enabled) }
+  });
+  cursorDeliveryState.clear();
+  await saveConfig(app.getPath("userData"), currentAgentConfig);
+  broadcastConfigUpdated(currentAgentConfig);
+  return currentAgentConfig.appearance.mouseFollow;
 }
 
 function broadcastActiveExpressions() {
@@ -982,6 +1061,13 @@ function buildPetContextMenu() {
       label: "设置",
       submenu: [
         {
+          label: "鼠标注视跟随",
+          type: "checkbox",
+          checked: currentAgentConfig.appearance?.mouseFollow !== false,
+          click: (menuItem) => { void updateMouseFollow(menuItem.checked); }
+        },
+        { type: "separator" },
+        {
           label: "人设与模型",
           click: () => {
             openSettingsWindow();
@@ -1061,6 +1147,25 @@ app.whenReady().then(async () => {
   currentAgentConfig = mergeAgentConfig(startupConfig);
   currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
   await refreshLive2DModels({ broadcast: false });
+  protocol.handle("vivi-asset", async (request) => {
+    try {
+      const url = new URL(request.url);
+      if (url.hostname !== "app") return new Response("Not found", { status: 404 });
+      const assetRoot = path.join(app.getAppPath(), isDev ? "public" : "dist");
+      const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (parts.length === 0) return new Response("Not found", { status: 404 });
+      const filePath = path.resolve(assetRoot, ...parts);
+      const relative = path.relative(assetRoot, filePath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) return new Response("Forbidden", { status: 403 });
+      const content = await fs.readFile(filePath);
+      return new Response(content, { headers: {
+        "content-type": getModelContentType(filePath),
+        "access-control-allow-origin": "*"
+      } });
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+  });
   protocol.handle("vivi-model", async (request) => {
     try {
       const url = new URL(request.url);
@@ -1085,6 +1190,7 @@ app.whenReady().then(async () => {
   createPetWindow();
   createBubbleWindow();
   updateBubbleWindowLayout();
+  startGlobalCursorTracking();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1139,6 +1245,9 @@ ipcMain.handle("agent:get-bootstrap", async () => {
 ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   const merged = mergeAgentConfig(nextConfig);
   await saveConfig(app.getPath("userData"), merged);
+  if (currentAgentConfig.appearance?.mouseFollow !== merged.appearance?.mouseFollow) {
+    cursorDeliveryState.clear();
+  }
   currentAgentConfig = merged;
   currentAppearanceTheme = merged.appearance?.theme === "dark" ? "dark" : "light";
   updateTitleBarOverlays();
@@ -1229,7 +1338,7 @@ ipcMain.handle("agent:open-local-stt-folder", async () => {
 
 ipcMain.handle("agent:chat", async (_event, payload) => {
   const userMessage = { role: "user", content: payload.message };
-  const route = resolveAgentRoute(payload.message);
+  const route = payload.codeContext ? { type: "workspace_code" } : resolveAgentRoute(payload.message);
   const isAction = route.type !== "chat";
   const isQuery = /查询|查看|看看|检查|状态|多少|有没有|在运行吗|还在吗/.test(payload.message);
   const pendingText = isAction ? (isQuery ? "正在查询本机状态..." : "正在执行...") : "";
@@ -1248,6 +1357,14 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
+
+  // Stage 1: react locally before any network/LLM work starts. This gives the
+  // character an immediate, deliberately subtle acknowledgement of the user.
+  const fastReaction = classifyFastReaction(payload.message);
+  broadcastMoodUpdate({
+    phase: "anticipation",
+    ...fastReaction
+  });
 
   const result = await buildAgentReply(app.getPath("userData"), {
     ...payload,
@@ -1288,9 +1405,10 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   );
   broadcastActiveExpressions();
 
-  // Push reply performance cues to the pet window model. If the LLM skips
-  // set_mood, the renderer still derives lightweight mood beats from text.
-  petWindow?.webContents.send("agent:mood-updated", {
+  // Keep whichever Live2D surface is visible in sync. The chat model needs the
+  // same finite speaking cue as the desktop pet or its mouth animation never ends.
+  broadcastMoodUpdate({
+    phase: "final",
     mood: result.meta?.detectedMood || "happy",
     faceParams: result.meta?.faceParams || null,
     reply: result.reply
@@ -1336,7 +1454,8 @@ ipcMain.handle("agent:pet-touch", async () => {
   };
   broadcastChatState();
   broadcastRelationshipProfile(reaction.profile);
-  petWindow?.webContents.send("agent:mood-updated", {
+  broadcastMoodUpdate({
+    phase: "final",
     mood: reaction.mood,
     faceParams: reaction.faceParams,
     reply: reaction.reply
@@ -1345,6 +1464,7 @@ ipcMain.handle("agent:pet-touch", async () => {
 });
 
 app.on("before-quit", () => {
+  stopGlobalCursorTracking();
   modelDirectoryWatcher?.close();
   modelDirectoryWatcher = null;
 });
@@ -1428,6 +1548,17 @@ ipcMain.handle("agent:get-code-workspace", async () => {
 
 ipcMain.handle("agent:read-code-file", async (_event, relativePath) => {
   return readWorkspaceCode(relativePath, { workspaceDir: getActiveWorkspaceDir() });
+});
+
+ipcMain.handle("agent:write-code-file", async (_event, payload) => {
+  return writeWorkspaceCode(
+    {
+      path: payload?.path,
+      content: payload?.content,
+      expected_content: payload?.expectedContent
+    },
+    { workspaceDir: getActiveWorkspaceDir(), codeAgentConfirmed: true }
+  );
 });
 
 ipcMain.handle("agent:select-code-workspace", async () => {

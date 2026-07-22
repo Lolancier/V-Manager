@@ -641,6 +641,23 @@ export class LAppModel extends CubismUserModel {
     this._paramOverrides = overrides;
   }
 
+  /** Parameters actually present in the loaded moc. Used for model adaptation. */
+  public getAvailableParameterIds(): string[] {
+    if (!this._model) return [];
+    const ids: string[] = [];
+    for (let index = 0; index < this._model.getParameterCount(); index++) {
+      ids.push(this._model.getParameterId(index).getString());
+    }
+    return ids;
+  }
+
+  /** Native exp3 expressions that have finished loading. */
+  public getAvailableExpressionNames(): string[] {
+    return [...this._expressions.entries()]
+      .filter(([, motion]) => motion != null)
+      .map(([name]) => name);
+  }
+
   /**
    * 引数で指定したモーションの再生を開始する
    * @param group モーショングループ名

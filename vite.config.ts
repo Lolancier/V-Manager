@@ -3,6 +3,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  // Electron loads the production renderer through file://. Relative bundle
+  // URLs keep scripts and styles inside dist instead of resolving from C:\.
+  base: "./",
   plugins: [react()],
   resolve: {
     alias: {

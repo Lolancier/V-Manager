@@ -34,6 +34,7 @@ interface AgentConfig {
   appearance: {
     theme: "light" | "dark";
     live2dModel: string;
+    mouseFollow: boolean;
   };
   voice: {
     enabled: boolean;
@@ -80,6 +81,13 @@ interface Live2DModelOption {
   directory?: string;
   fileName?: string;
   builtIn: boolean;
+  capabilities?: {
+    expressionCount: number;
+    motionGroupCount: number;
+    hasLipSync: boolean;
+    hasEyeBlink: boolean;
+    hasDisplayInfo: boolean;
+  };
 }
 
 interface ElevenLabsVoiceOption {
@@ -152,8 +160,12 @@ interface ChatResult {
     detectedMood?: string;
     faceParams?: Record<string, number>;
     relationship?: RelationshipProfile;
+    codeMode?: CodeAgentMode;
+    toolUseCount?: number;
   };
 }
+
+type CodeAgentMode = "auto" | "read" | "plan" | "agent" | "review";
 
 interface ChatWindowState {
   messages: Array<{
@@ -272,7 +284,7 @@ interface Window {
     getRelationshipProfile: () => Promise<RelationshipProfile>;
     resetRelationshipProfile: () => Promise<RelationshipProfile>;
     petTouch: () => Promise<{ ok: boolean; busy?: boolean; cooldownMs?: number; reply?: string; mood?: string; faceParams?: Record<string, number>; profile?: RelationshipProfile }>;
-    chat: (payload: { message: string }) => Promise<ChatWindowState>;
+    chat: (payload: { message: string; codeContext?: { mode: CodeAgentMode; activeFile?: string } }) => Promise<ChatWindowState>;
     searchFiles: (query: string) => Promise<FileSearchResult[]>;
     getAppRegistry: () => Promise<AppRegistrySnapshot>;
     refreshAppRegistry: () => Promise<AppRegistrySnapshot>;
@@ -298,6 +310,7 @@ interface Window {
     getCodeWorkspace: () => Promise<CodeWorkspaceSnapshot>;
     selectCodeWorkspace: () => Promise<CodeWorkspaceSnapshot | null>;
     readCodeFile: (path: string) => Promise<{ ok: boolean; path: string; content: string; truncated: boolean }>;
+    writeCodeFile: (path: string, content: string, expectedContent: string) => Promise<{ ok: boolean; path: string; changed: boolean }>;
     getPetWindowBounds: () => Promise<{ x: number; y: number; width: number; height: number }>;
     getPetScale: () => Promise<number>;
     getPositionLock: () => Promise<boolean>;
@@ -319,7 +332,17 @@ interface Window {
     onTriggerExpression: (callback: (name: string) => void) => () => void;
     onClearExpressions: (callback: () => void) => () => void;
     onExpressionsUpdated: (callback: (expressions: string[]) => void) => () => void;
-    onMoodUpdated?: (callback: (payload: { mood: string; faceParams: Record<string, number> | null; reply?: string }) => void) => () => void;
+    onCursorScreenPosition: (callback: (position: { screenX: number; screenY: number; clientX: number; clientY: number }) => void) => () => void;
+    onMoodUpdated?: (callback: (payload: {
+      phase?: "anticipation" | "final";
+      mood: string;
+      faceParams: Record<string, number> | null;
+      reply?: string;
+      kind?: string;
+      confidence?: number;
+      intensity?: number;
+      durationMs?: number;
+    }) => void) => () => void;
     onRelationshipUpdated: (callback: (profile: RelationshipProfile) => void) => () => void;
   };
 }

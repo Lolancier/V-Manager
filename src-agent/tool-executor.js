@@ -20,6 +20,7 @@ import {
   readWorkspaceCode,
   applyWorkspacePatch,
   createWorkspaceFile,
+  writeWorkspaceCode,
   runWorkspaceCommand
 } from "./code-executor.js";
 import fs from "node:fs/promises";
@@ -151,11 +152,17 @@ export async function executeTool(name, args = {}, context = {}) {
 
       // ---- Workspace ----
       case "list_workspace": {
-        const result = await executeWorkspaceIntent({ type: "workspace_list", targetPath: args.path || "" }, { cwd: process.cwd() });
+        const result = await executeWorkspaceIntent(
+          { type: "workspace_list", targetPath: args.path || "" },
+          { cwd: context.workspaceDir || process.cwd() }
+        );
         return { ok: true, reply: result?.reply || "" };
       }
       case "switch_workspace": {
-        const result = await executeWorkspaceIntent({ type: "workspace_switch", targetPath: args.path || "" }, { cwd: process.cwd() });
+        const result = await executeWorkspaceIntent(
+          { type: "workspace_switch", targetPath: args.path || "" },
+          { cwd: context.workspaceDir || process.cwd() }
+        );
         return { ok: true, reply: result?.reply || "" };
       }
 
@@ -168,6 +175,8 @@ export async function executeTool(name, args = {}, context = {}) {
         return await applyWorkspacePatch(args, context);
       case "create_workspace_file":
         return await createWorkspaceFile(args, context);
+      case "write_workspace_code":
+        return await writeWorkspaceCode(args, context);
       case "run_workspace_command":
         return await runWorkspaceCommand(args.command, context);
 

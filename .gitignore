@@ -1,9 +1,12 @@
 node_modules
 dist
+release/
+release-fixed/
 downloads/
 .DS_Store
 Thumbs.db
 .idea/
+.claude/
 .tmp-agent-*/
 agent-data/
 data/*.json

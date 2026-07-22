@@ -5,6 +5,9 @@ import {
   MOOD_LABEL_MAP, MoodParamPreset, ParamOscillation, ParamTarget, PetMood,
   pickMoodCombo,
 } from "./live2dConfig";
+import { resolvePublicAssetUrl } from "./publicAssetUrl";
+import { Live2DParameterMixer } from "./Live2DParameterMixer";
+import { getMoodPresetForModel, Live2DModelAdapter } from "./Live2DModelAdapter";
 
 type Live2DPreviewProps = {
   mood: PetMood;
@@ -15,6 +18,7 @@ type Live2DPreviewProps = {
   activeExpressionSet: Set<string>;
   faceParams: FaceParams | null;
   speaking: boolean;
+  mouseFollow?: boolean;
   onInteractionChange?: (interactive: boolean) => void;
 };
 
@@ -104,15 +108,21 @@ function ensureScript(src: string) {
 
 const moodLabelMap: Record<PetMood, string> = MOOD_LABEL_MAP;
 
-export default function Live2DPreview({ mood, modelId, modelName, modelDirectory, modelFileName, activeExpressionSet, faceParams, speaking, onInteractionChange }: Live2DPreviewProps) {
+export default function Live2DPreview({ mood, modelId, modelName, modelDirectory, modelFileName, activeExpressionSet, faceParams, speaking, mouseFollow = true, onInteractionChange }: Live2DPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const runtimeRef = useRef<any>(null);
   const frameRef = useRef<number | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const animatorRef = useRef(new ParameterAnimator());
+  const parameterMixerRef = useRef(new Live2DParameterMixer());
+  const modelAdapterRef = useRef(new Live2DModelAdapter());
+  const adapterSignatureRef = useRef("");
+  const lastAdapterProbeRef = useRef(0);
+  const lastNativeExpressionRef = useRef("");
   const idleTimerRef = useRef<number | null>(null);
   const idleClearRef = useRef<number | null>(null);
   const prevMoodRef = useRef<PetMood>("idle");
+  const currentMoodRef = useRef<PetMood>(mood);
   const activeExprRef = useRef<Set<string>>(new Set());     // manual panel
   const moodComboRef = useRef<string[]>([]);                 // mood-driven combo
   const idlePropRef = useRef<string | null>(null);           // idle random prop
@@ -142,13 +152,24 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
     interactionChangeRef.current = onInteractionChange;
   }, [onInteractionChange]);
 
+  useEffect(() => {
+    const bridge = window.agentDesktop;
+    if (!bridge) return;
+
+    if (!mouseFollow) runtimeRef.current?.runtime.resetGlobalPointer?.();
+    return bridge.onCursorScreenPosition((position) => {
+      if (!mouseFollow) return;
+      runtimeRef.current?.runtime.onGlobalPointerMoved?.(position.clientX, position.clientY);
+    });
+  }, [mouseFollow]);
+
   // ---- SDK bootstrap ----
   useEffect(() => {
     let disposed = false;
     async function boot() {
       try {
         setLoadState("loading"); setMsg("正在加载 Cubism Core...");
-        await ensureScript("/vendor/live2d/live2dcubismcore.min.js");
+        await ensureScript(resolvePublicAssetUrl("vendor/live2d/live2dcubismcore.min.js"));
         const [{ CubismFramework, LogLevel, Option }, { LAppPal }, { LAppSubdelegate }, LAppDefine] = await Promise.all([
           import("@framework/live2dcubismframework"), import("./official/lapppal"), import("./official/lappsubdelegate"), import("./official/lappdefine")
         ]);
@@ -217,7 +238,7 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
         };
 
         // Initial preset
-        animatorRef.current.applyPreset(activeModel.moodParams.idle);
+        animatorRef.current.applyPreset(getMoodPresetForModel(modelId, "idle"));
 
         const loop = (ts: number) => {
           if (disposed || !runtimeRef.current) return;
@@ -228,6 +249,21 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
 
           // ---- Combinable expressions: merge all layers → overrides ----
           if (m) {
+            if (!adapterSignatureRef.current || ts - lastAdapterProbeRef.current >= 400) {
+              lastAdapterProbeRef.current = ts;
+              const parameterIds = m.getAvailableParameterIds?.() ?? [];
+              const expressionNames = m.getAvailableExpressionNames?.() ?? [];
+              const adapterSignature = `${currentModelIdRef.current}:${parameterIds.join("|")}:${expressionNames.join("|")}`;
+              if (parameterIds.length > 0 && adapterSignature !== adapterSignatureRef.current) {
+                adapterSignatureRef.current = adapterSignature;
+                modelAdapterRef.current = new Live2DModelAdapter(parameterIds, expressionNames);
+                const nativeExpression = modelAdapterRef.current.resolveNativeExpression(currentMoodRef.current);
+                if (nativeExpression && nativeExpression !== lastNativeExpressionRef.current) {
+                  try { m.setExpression(nativeExpression); lastNativeExpressionRef.current = nativeExpression; } catch {}
+                }
+              }
+            }
+
             const overrides = new Map<string, number>();
 
             // Layer 0: animator-computed values (mood preset targets/oscillations)
@@ -281,7 +317,8 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
               overrides.set("ParamMouthForm", Math.max(baseMouthForm, 0.08));
             }
 
-            m.setParamOverrides(overrides);
+            const adaptedOverrides = modelAdapterRef.current.adapt(overrides);
+            m.setParamOverrides(parameterMixerRef.current.smooth(adaptedOverrides, ts));
           }
           // ---- /Combinable expressions ----
 
@@ -306,6 +343,11 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
       disposed = true; cleanupRef.current?.(); cleanupRef.current = null;
       if (frameRef.current !== null) { window.cancelAnimationFrame(frameRef.current); frameRef.current = null; }
       animatorRef.current.reset();
+      parameterMixerRef.current.reset();
+      modelAdapterRef.current = new Live2DModelAdapter();
+      adapterSignatureRef.current = "";
+      lastAdapterProbeRef.current = 0;
+      lastNativeExpressionRef.current = "";
       if (runtimeRef.current) { runtimeRef.current.runtime.release(); runtimeRef.current = null; }
     };
   }, []);
@@ -316,6 +358,13 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
     activeExprRef.current = new Set(activeExpressionSet);
     moodComboRef.current = pickMoodCombo(mood);
     idlePropRef.current = null;
+    parameterMixerRef.current.reset();
+    modelAdapterRef.current = new Live2DModelAdapter();
+    adapterSignatureRef.current = "";
+    lastAdapterProbeRef.current = 0;
+    lastNativeExpressionRef.current = "";
+    animatorRef.current.reset();
+    animatorRef.current.applyPreset(getMoodPresetForModel(modelId, mood));
     runtimeRef.current.runtime.getLive2DManager().loadModel(modelId, modelDirectory, modelFileName);
     const displayName = modelName ?? LIVE2D_MODEL_PRESETS.find((model) => model.id === modelId)?.name ?? activeModel.name;
     setMsg(`${displayName}已载入`);
@@ -323,18 +372,25 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
 
   // ---- Mood → preset + combo ----
   useEffect(() => {
+    currentMoodRef.current = mood;
     if (!runtimeRef.current || loadState !== "ready") return;
     if (mood === prevMoodRef.current) return;
     prevMoodRef.current = mood;
 
     // 1. Apply parameter targets/oscillations
-    const preset = activeModel.moodParams[mood];
+    const preset = getMoodPresetForModel(modelId, mood);
     if (preset) animatorRef.current.applyPreset(preset);
 
     // 2. Pick and apply mood combo expressions
     const combo = pickMoodCombo(mood);
     moodComboRef.current = combo;
-  }, [loadState, mood]);
+
+    const model = runtimeRef.current.runtime.getLive2DManager()?._models?.[0];
+    const nativeExpression = modelAdapterRef.current.resolveNativeExpression(mood);
+    if (nativeExpression && nativeExpression !== lastNativeExpressionRef.current && model) {
+      try { model.setExpression(nativeExpression); lastNativeExpressionRef.current = nativeExpression; } catch {}
+    }
+  }, [loadState, modelId, mood]);
 
   // ---- Combinable expression toggle: track changes for reset (reset handled by per-frame override rebuild) ----
   useEffect(() => {

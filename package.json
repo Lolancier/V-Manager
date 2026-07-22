@@ -11,6 +11,8 @@
         "dev:electron": "wait-on tcp:5173 && electron .",
         "build": "vite build",
         "preview": "vite preview",
+        "pack": "vite build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ electron-builder --dir",
+        "dist": "vite build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ electron-builder",
         "test": "node --test tests/*.test.js"
     },
     "dependencies": {
@@ -25,9 +27,32 @@
         "@types/react-dom": "^19.2.3",
         "@vitejs/plugin-react": "^4.4.1",
         "concurrently": "^9.2.0",
+        "cross-env": "^10.1.0",
         "electron": "^32.3.0",
+        "electron-builder": "^26.15.3",
         "typescript": "^7.0.2",
         "vite": "^5.4.10",
         "wait-on": "^8.0.1"
+    },
+    "build": {
+        "appId": "com.v-manager.app",
+        "productName": "V-Manager",
+        "directories": {
+            "output": "../V-Manager-builds"
+        },
+        "files": [
+            "dist/**/*",
+            "electron/**/*",
+            "src-agent/**/*",
+            "index.html",
+            "package.json"
+        ],
+        "win": {
+            "target": "nsis"
+        },
+        "nsis": {
+            "oneClick": false,
+            "allowToChangeInstallationDirectory": true
+        }
     }
 }

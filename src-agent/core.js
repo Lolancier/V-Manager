@@ -46,7 +46,8 @@ export const defaultConfig = {
   },
   appearance: {
     theme: "light",
-    live2dModel: "qianqian"
+    live2dModel: "qianqian",
+    mouseFollow: true
   },
   voice: {
     enabled: false,
@@ -659,7 +660,33 @@ function buildSystemPromptV2(config, knowledge) {
   ].join("\n");
 }
 
-function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnabled = true) {
+const CODE_AGENT_MODES = new Set(["auto", "read", "plan", "agent", "review"]);
+
+function normalizeCodeContext(codeContext) {
+  if (!codeContext || typeof codeContext !== "object") return null;
+  const mode = CODE_AGENT_MODES.has(codeContext.mode) ? codeContext.mode : "auto";
+  const activeFile = String(codeContext.activeFile || "").trim();
+  return { mode, activeFile };
+}
+
+function buildCodeModePrompt(codeContext) {
+  if (!codeContext) return "";
+  const activeFile = codeContext.activeFile ? `当前编辑器文件：${codeContext.activeFile}。` : "当前没有打开的编辑器文件。";
+  const modeRules = {
+    auto: "自动模式：先判断任务复杂度。读取与分析可直接完成；需要写入或运行非只读命令时，先给出具体计划并请用户回复“确认执行”。",
+    read: "只读问答模式：只允许查看、搜索和解释代码，不得修改文件或运行会改变工作区状态的命令。",
+    plan: "规划模式：充分读取相关代码，输出可执行的分步方案、涉及文件和验证方式，但不得写文件或运行会改变状态的命令。",
+    agent: "Agent 执行模式：用户已通过模式选择授权本轮进行工作区内的代码修改与受限开发命令。自主完成读取、编辑、检查和必要测试，不要在每个安全步骤前重复索要确认；遇到删除、大范围覆盖或工作区外操作仍必须停下确认。",
+    review: "审查模式：重点检查真实代码和 git diff，说明问题、风险和建议；允许只读 Git 命令，不得修改文件。"
+  };
+  return [
+    "你正在 Vivi Code 代码工作台中。技术判断必须严谨，但仍保持原有人设的自然语气：可以温和、有陪伴感、有少量口语，不要退化成冷冰冰的命令行日志；同时不要用角色扮演遮掩错误、风险或测试结果。",
+    activeFile,
+    modeRules[codeContext.mode]
+  ].join("\n");
+}
+
+function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnabled = true, codeContext = null) {
   const now = new Date();
   const currentTimeText = now.toLocaleString("zh-CN", { hour12: false });
   const knowledgeBlock = knowledge.length
@@ -673,7 +700,9 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnable
       "2. kill_process 和 delete_file_or_folder 属于破坏性操作，执行前必须说明目标并等待用户明确确认。",
       "3. 没有对应工具时，诚实说明目前没有这个能力。根据工具返回的 JSON 如实回复成功或失败。",
       "4. 表情控制必须通过 set_mood 工具完成，绝不在对话文本中写参数名或 JSON。豆豆眼 Param52 仅用于惊讶、吃惊或困惑，并且 mood 必须设为 surprised；普通思考、提问、开心、害羞等情绪禁止使用。",
-      "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行命令前，必须展示具体内容并等待用户明确回复确认执行。",
+      codeContext?.mode === "agent"
+        ? "5. 处理代码工作区时先读取真实代码。当前为用户主动选择的 Agent 执行模式，可连续完成工作区内的安全编辑与验证；删除、大范围覆盖和越界操作仍需另行确认。"
+        : "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行非只读命令前，必须展示具体内容并等待用户明确回复确认执行。",
       "6. send_wechat_message 会真实对外发送消息。只有用户当前消息同时包含精确联系人、完整消息内容和明确发送要求时才能调用；不得根据历史消息补齐联系人或内容。工具返回 pending 时表示仅启动了微信，必须询问用户并等待下一条明确的继续确认。"
     ]
     : [
@@ -688,6 +717,7 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnable
     "",
     `当前本地时间为：${currentTimeText}。`,
     config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
+    buildCodeModePrompt(codeContext),
     "",
     ...behaviorRules,
     "",
@@ -878,7 +908,7 @@ function sanitizeFaceParamsForMood(faceParams, mood) {
   return Object.keys(safeParams).length ? safeParams : null;
 }
 
-function getToolsForRoute(routeType) {
+function getToolsForRoute(routeType, codeContext = null) {
   const groups = {
     messenger: ["check_process_running", "launch_application", "send_wechat_message", "set_mood"],
     ui_automation: ["open_browser_url", "search_web", "open_in_vscode", "set_mood"],
@@ -889,7 +919,14 @@ function getToolsForRoute(routeType) {
     file_system: ["list_directory", "read_text_file", "open_file_or_folder", "create_folder", "create_text_file", "append_to_file", "delete_file_or_folder", "search_files", "set_mood"],
     rag_control: ["search_knowledge_base", "get_rag_status", "rebuild_rag_index", "set_mood"]
   };
-  const workspaceTools = ["list_workspace", "switch_workspace", "search_workspace_code", "read_workspace_code", "apply_workspace_patch", "create_workspace_file", "run_workspace_command", "set_mood"];
+  const workspaceReadTools = ["list_workspace", "search_workspace_code", "read_workspace_code", "run_workspace_command", "set_mood"];
+  const workspaceTools = ["list_workspace", "switch_workspace", "search_workspace_code", "read_workspace_code", "apply_workspace_patch", "create_workspace_file", "write_workspace_code", "run_workspace_command", "set_mood"];
+  if (codeContext && ["read", "plan", "review"].includes(codeContext.mode)) {
+    return ALL_TOOLS.filter((tool) => workspaceReadTools.includes(tool.function?.name));
+  }
+  if (codeContext) {
+    return ALL_TOOLS.filter((tool) => workspaceTools.includes(tool.function?.name) && tool.function?.name !== "switch_workspace");
+  }
   const allowed = routeType.startsWith("workspace_") ? workspaceTools : groups[routeType];
   return allowed ? ALL_TOOLS.filter((tool) => allowed.includes(tool.function?.name)) : ALL_TOOLS;
 }
@@ -907,7 +944,8 @@ export async function buildAgentReply(baseDir, payload) {
     : history;
   const commandResolution = resolveCommandWithContext(payload.message, normalizedHistory);
   const effectiveMessage = commandResolution.expandedMessage || payload.message;
-  const route = resolveAgentRoute(effectiveMessage);
+  const codeContext = normalizeCodeContext(payload.codeContext);
+  const route = codeContext ? { type: "workspace_code" } : resolveAgentRoute(effectiveMessage);
 
   // --- Local executor dispatch (formerly tryHandleLocalDesktopQuery) ---
   const executorContext = {
@@ -915,7 +953,7 @@ export async function buildAgentReply(baseDir, payload) {
     history: normalizedHistory,
     config,
     workspaceDir: activeWorkspaceDir,
-    codeAgentConfirmed: hasExplicitCodeAgentConfirmation(payload.message)
+    codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message)
   };
 
   const clarificationReply = commandResolution.clarificationQuestion
@@ -932,7 +970,7 @@ export async function buildAgentReply(baseDir, payload) {
     }
     : null;
 
-  const localToolReply = clarificationReply ?? await runRoutedLocalExecutor(effectiveMessage, executorContext);
+  const localToolReply = codeContext ? null : (clarificationReply ?? await runRoutedLocalExecutor(effectiveMessage, executorContext));
 
   if (localToolReply) {
     const meta = {
@@ -1033,7 +1071,7 @@ export async function buildAgentReply(baseDir, payload) {
   const messages = [
     {
       role: "system",
-      content: buildSystemPromptV3(config, knowledge, relationshipProfile, route.type !== "chat")
+      content: buildSystemPromptV3(config, knowledge, relationshipProfile, route.type !== "chat", codeContext)
     },
     ...recentHistory,
     {
@@ -1060,7 +1098,8 @@ export async function buildAgentReply(baseDir, payload) {
     ragMode: ragResult.meta.ragMode,
     embeddingProvider: ragResult.meta.embeddingProvider,
     detectedMood: relationshipProfile.emotion.suggestedMood,
-    relationship: relationshipProfile
+    relationship: relationshipProfile,
+    codeMode: codeContext?.mode
   };
 
   // Track where history-derived messages end — only tool calls added
@@ -1099,10 +1138,10 @@ export async function buildAgentReply(baseDir, payload) {
   } else if (config.deepseek.apiKey) {
     try {
       // Function calling loop: up to 5 rounds of tool calls
-      const routeTools = getToolsForRoute(route.type);
+      const routeTools = getToolsForRoute(route.type, codeContext);
       let response = await callDeepSeekWithTools(config, messages, routeTools);
       let round = 0;
-      const maxRounds = 5;
+      const maxRounds = codeContext?.mode === "agent" ? 12 : 6;
 
       // ---- Intercept set_mood tool call (structured mood, not text tag) ----
       let interceptedMood = null;
@@ -1163,7 +1202,7 @@ export async function buildAgentReply(baseDir, payload) {
             payload.onDelta(`正在执行 ${tc.function.name}...`);
           }
 
-          const result = await executeTool(tc.function.name, args, { baseDir, config });
+          const result = await executeTool(tc.function.name, args, executorContext);
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
@@ -1189,6 +1228,7 @@ export async function buildAgentReply(baseDir, payload) {
         }
       }
       responseMode = toolUseCount > 0 ? "deepseek_tool" : "deepseek";
+      meta = { ...meta, toolUseCount };
 
       // Use intercepted tool-call mood (priority) or fall back to text-tag parsing
       let detectedMood = interceptedMood;

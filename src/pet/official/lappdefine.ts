@@ -6,6 +6,7 @@
  */
 
 import { LogLevel } from '@framework/live2dcubismframework';
+import { resolvePublicAssetUrl } from '../publicAssetUrl';
 
 /**
  * Sample Appで使用する定数
@@ -39,9 +40,9 @@ export type ModelResource = {
 };
 
 export const ModelResources: ModelResource[] = [
-  { id: 'qianqian', directory: '/live2d/qianqian/芊芊/', fileName: '芊芊.model3.json' },
-  { id: 'hiyori', directory: '/live2d/hiyori/', fileName: 'Hiyori.model3.json' },
-  { id: 'epsilon', directory: '/live2d/epsilon_free/', fileName: 'Epsilon_free.model3.json' }
+  { id: 'qianqian', directory: resolvePublicAssetUrl('live2d/qianqian/芊芊/'), fileName: '芊芊.model3.json' },
+  { id: 'hiyori', directory: resolvePublicAssetUrl('live2d/hiyori/'), fileName: 'Hiyori.model3.json' },
+  { id: 'epsilon', directory: resolvePublicAssetUrl('live2d/epsilon_free/'), fileName: 'Epsilon_free.model3.json' }
 ];
 
 let activeModelId = 'qianqian';
@@ -62,7 +63,7 @@ export function getActiveModelResource(): ModelResource {
 }
 
 // シェーダー相対パス
-export const ShaderPath = '/live2d-official/shaders/WebGL/';
+export const ShaderPath = resolvePublicAssetUrl('live2d-official/shaders/WebGL/');
 
 // モデルの後ろにある背景の画像ファイル
 export const BackImageName = 'back_class_normal.png';

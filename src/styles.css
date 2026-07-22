@@ -1708,6 +1708,16 @@ textarea:focus {
   gap: 12px;
 }
 
+.live2d-behavior-switches {
+  margin-top: 14px;
+  align-items: center;
+}
+
+.live2d-behavior-switches > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .relationship-heading > div {
   display: grid;
   gap: 3px;
@@ -1992,6 +2002,8 @@ textarea:focus {
 
 .chat-window-panel button,
 .code-workbench-header button,
+.code-workbench-header select,
+.code-workbench-header label,
 .expression-window-shell button,
 .scale-window-card button,
 .scale-window-card input {
@@ -3108,6 +3120,32 @@ body:has(.chat-window-shell) #root {
   white-space: nowrap;
 }
 
+.code-mode-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #7f8a8f;
+  font-size: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.code-mode-picker select {
+  height: 28px;
+  padding: 0 24px 0 8px;
+  border: 1px solid #343b3e;
+  border-radius: 4px;
+  outline: none;
+  color: #d8dfe1;
+  background: #181d1f;
+  font: 11px "Microsoft YaHei UI", sans-serif;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.code-mode-picker select:focus {
+  border-color: #42a79f;
+}
+
 .code-icon-button {
   width: 30px;
   height: 30px;
@@ -3338,6 +3376,41 @@ body:has(.chat-window-shell) #root {
   font-size: 10px;
 }
 
+.code-editor-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.code-editor-actions button {
+  min-width: 48px;
+  height: 25px;
+  padding: 0 8px;
+  border: 1px solid #394145;
+  border-radius: 4px;
+  color: #b9c2c5;
+  background: #1a2023;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.code-editor-actions button:hover:not(:disabled) {
+  color: #fff;
+  border-color: #4b827e;
+}
+
+.code-editor-actions button.is-primary {
+  color: #eafffd;
+  border-color: #338a83;
+  background: #246a65;
+}
+
+.code-editor-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .code-editor-content {
   min-height: 0;
   margin: 0;
@@ -3347,6 +3420,22 @@ body:has(.chat-window-shell) #root {
   background: #0c0f11;
   font: 13px/1.65 Consolas, "Cascadia Code", monospace;
   tab-size: 2;
+}
+
+.code-editor-textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 16px 40px;
+  resize: none;
+  border: 0;
+  outline: none;
+  color: #d7dddf;
+  background: #0c0f11;
+  font: 13px/1.65 Consolas, "Cascadia Code", monospace;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
 }
 
 .code-line {
@@ -3414,6 +3503,7 @@ body:has(.chat-window-shell) #root {
 
 .code-quick-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 8px 10px;
   border-top: 1px solid #24282c;
