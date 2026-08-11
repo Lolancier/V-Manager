@@ -118,17 +118,10 @@ async function deleteLocalTarget(targetPath) {
     throw new Error("没有识别到要删除的路径。");
   }
 
-  const stat = await statPath(targetPath);
-  if (!stat) {
+  if (!await statPath(targetPath)) {
     throw new Error(`没有找到 ${targetPath}`);
   }
-
-  if (stat.isDirectory()) {
-    await fs.rm(targetPath, { recursive: true, force: true });
-  } else {
-    await fs.unlink(targetPath);
-  }
-
+  await shell.trashItem(targetPath);
   return targetPath;
 }
 
@@ -364,7 +357,7 @@ export async function appendToFileCmd(targetPath, content) {
 
 export async function deletePathCmd(targetPath) {
   const deleted = await deleteLocalTarget(targetPath);
-  return { ok: true, path: deleted };
+  return { ok: true, path: deleted, disposition: "recycle_bin", permanentlyDeleted: false };
 }
 
 // ---- Executor handle ----
@@ -559,7 +552,7 @@ export async function handle(message) {
     try {
       const deletedPath = await deleteLocalTarget(deleteTarget);
       return {
-        reply: `已经删除：${deletedPath}`,
+        reply: `已经移入 Windows 回收站：${deletedPath}。Vivi 不会直接永久删除文件。`,
         meta: {
           responseMode: "local_tool",
           usedKnowledge: false,

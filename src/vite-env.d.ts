@@ -35,10 +35,20 @@ interface AgentConfig {
     theme: "light" | "dark";
     live2dModel: string;
     mouseFollow: boolean;
+    renderFps: number;
+    powerSaving: boolean;
   };
   voice: {
     enabled: boolean;
-    provider: "elevenlabs";
+    provider: "local" | "gpt_sovits" | "elevenlabs";
+    localPackId: string;
+    localSpeakerId: number;
+    localSpeed: number;
+    localSilenceScale: number;
+    gptSovitsBaseUrl: string;
+    gptSovitsProfileId: string;
+    gptSovitsSpeed: number;
+    gptSovitsAutoStart: boolean;
     baseUrl: string;
     apiKey: string;
     model: string;
@@ -67,6 +77,40 @@ interface AgentConfig {
   relationship: {
     enabled: boolean;
     showProgress: boolean;
+  };
+  proactive: {
+    enabled: boolean;
+    healthReminders: boolean;
+    lateNightCare: boolean;
+    systemNotifications: boolean;
+    workMinutes: number;
+    reminderCooldownMinutes: number;
+    dailyLimit: number;
+    idleResetMinutes: number;
+    viviRestAfterMinutes: number;
+    lateNightHour: number;
+    quietStart: string;
+    quietEnd: string;
+  };
+  interests: {
+    enabled: boolean;
+    permissionLevel: "off" | "diary_only" | "create" | "preview";
+    activities: { diary: boolean; miniGames: boolean; drawing: boolean };
+    dailyTaskLimit: number;
+    dailyTokenBudget: number;
+    maxTaskMinutes: number;
+    maxDiskMB: number;
+    idleMinutes: number;
+    minimumHoursBetweenTasks: number;
+    activeStart: string;
+    activeEnd: string;
+    diaryHour: number;
+    autoOpenPreview: boolean;
+    networkAccess: "off" | "weather" | "weather_news";
+    autoLocation: boolean;
+    weatherLocation: string;
+    newsTopics: { hot: boolean; gaming: boolean; science: boolean; ai: boolean };
+    newsFeeds: string[];
   };
   memory: {
     maxMessages: number;
@@ -108,6 +152,51 @@ interface LocalSttStatus {
   modelId: string;
 }
 
+interface StartupStatus {
+  phase: "booting" | "voice" | "models" | "data" | "renderer" | "ready" | "warning";
+  progress: number;
+  title: string;
+  detail: string;
+  warning?: string;
+}
+
+interface GptSovitsRuntimeStatus {
+  ready: boolean;
+  started?: boolean;
+  stopped?: boolean;
+}
+
+interface LocalTtsPackStatus {
+  id: string;
+  name: string;
+  description: string;
+  language: string;
+  engine: string;
+  modelSizeMB: number;
+  downloadSizeMB: number;
+  license: string;
+  sourceUrl: string;
+  speakers: Array<{ id: number; name: string }>;
+  installed: boolean;
+  modelSize: number;
+  root: string;
+  packDir: string;
+}
+
+interface GptSovitsProfileStatus {
+  id: string;
+  name: string;
+  author: string;
+  description: string;
+  version: string;
+  license: string;
+  sourceUrl: string;
+  promptText: string;
+  installed: boolean;
+  root: string;
+  files: Array<{ role: string; name: string; size: number; sha256: string; path: string; downloaded: boolean; actualSize: number; hashValid: boolean }>;
+}
+
 interface RelationshipProfile {
   version: number;
   affection: {
@@ -134,9 +223,51 @@ interface RelationshipProfile {
   updatedAt: string;
 }
 
+interface PersonaPayload {
+  identityName: string;
+  identity: string;
+  selfReference: string;
+  userAddress: string;
+  relationship: string;
+  values: string[];
+  personalityTraits: string[];
+  speechStyle: string;
+  habits: string;
+  boundaries: string;
+  background: string;
+  cosplay: string;
+  extra: string;
+  exampleLines: string[];
+  voicePackId: string;
+  live2dModelId: string;
+}
+
+interface PersonaCard {
+  id: string;
+  name: string;
+  status: "active" | "archived";
+  version: number;
+  isActive?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  payload: PersonaPayload;
+}
+
+interface MemoryDatabaseStats {
+  path: string;
+  rawMessageCount: number;
+  conversationCount: number;
+  personaCardCount: number;
+  schemaVersion: number;
+}
+
 interface AgentBootstrap {
   config: AgentConfig;
   relationshipProfile: RelationshipProfile;
+  personaCards?: PersonaCard[];
+  activePersonaCard?: PersonaCard | null;
+  memoryDatabase?: MemoryDatabaseStats;
   live2dModels?: Live2DModelOption[];
   knowledgeFiles: string[];
   abilities: AgentAbility[];
@@ -162,6 +293,77 @@ interface ChatResult {
     relationship?: RelationshipProfile;
     codeMode?: CodeAgentMode;
     toolUseCount?: number;
+  };
+}
+
+interface LifeState {
+  version: number;
+  ownerStatus: "active" | "away";
+  viviStatus: "companion" | "resting";
+  sessionStartedAt: string | null;
+  lastTickAt: string;
+  lastActiveAt: string;
+  activeMinutes: number;
+  energy: number;
+  restUntil: string | null;
+  pausedUntil: string | null;
+  daily: { date: string; proactiveCount: number };
+  updatedAt: string;
+}
+
+interface CompanionMemoryStore {
+  version: number;
+  facts: Array<{ id: string; content: string; createdAt: string }>;
+  episodes: Array<{ id: string; content: string; createdAt: string }>;
+  habits: Array<{ id: string; content: string; createdAt: string }>;
+  commitments: Array<{ id: string; content: string; createdAt: string; status: "open" | "resolved"; lastFollowUpDate?: string | null }>;
+  feedback: { ignored: number; later: number; liked: number; interruptionScore: number; lastFeedbackAt?: string | null };
+  updatedAt?: string | null;
+}
+
+type InterestActivityType = "diary" | "mini_game" | "drawing";
+
+interface InterestSandboxActivity {
+  id: string;
+  day: string;
+  type: InterestActivityType;
+  status: "completed" | "failed" | "cancelled";
+  title: string;
+  summary: string;
+  artifactPath: string;
+  tokens: number;
+  action?: "created" | "updated";
+  createdAt: string;
+}
+
+interface InterestSandboxSnapshot {
+  root: string;
+  activities: InterestSandboxActivity[];
+  today: { date: string; taskCount: number; creativeTaskCount: number; diaryWritten: boolean; tokenCount: number };
+  diskBytes: number;
+  session: { day: string; launchedAt: string; diaryDueAt: string; lastTaskCompletedAt?: string | null; pendingActivity?: InterestActivityType | null };
+  location: { latitude: number; longitude: number; accuracy: number; city?: string; region?: string; country?: string; source: string; updatedAt: string } | null;
+}
+
+interface InterestRuntimeState {
+  status: "idle" | "working";
+  type: InterestActivityType | null;
+  label: string;
+  startedAt: string | null;
+}
+
+interface ScheduleItem {
+  id: string;
+  type: "reminder" | "power";
+  action?: "shutdown" | "restart";
+  title: string;
+  message: string;
+  dueAt: string;
+  status: "pending_confirmation" | "scheduled" | "executing" | "completed" | "cancelled" | "missed" | "failed";
+  createdAt: string;
+  confirmedAt?: string | null;
+  integration?: {
+    windows?: { status: string; taskName?: string; dueAt?: string; error?: string };
   };
 }
 
@@ -227,6 +429,31 @@ interface FileManagerSnapshot {
   driveDFolders: FileSearchResult[];
 }
 
+interface ManagedDirectoryScan {
+  root: string;
+  scannedAt: string;
+  total: number;
+  files: Array<{ name: string; path: string; type: string; size: number; modifiedAt: string }>;
+}
+
+interface FileOrganizationPreview {
+  id: string;
+  root: string;
+  mode: "type" | "date";
+  kind: "organize" | "quarantine";
+  status: "pending" | "executed";
+  moves: Array<{ source: string; destination: string; name: string; type: string; size: number; modifiedAt: string }>;
+}
+
+interface FileOperation {
+  id: string;
+  kind: string;
+  status: string;
+  undoable: boolean;
+  createdAt: string;
+  moves: Array<{ from: string; to: string }>;
+}
+
 interface AppRegistryEntry {
   id: string;
   label: string;
@@ -269,7 +496,16 @@ interface RagStatusSnapshot {
 interface Window {
   agentDesktop?: {
     getBootstrap: () => Promise<AgentBootstrap>;
+    getStartupStatus: () => Promise<StartupStatus>;
+    notifyRendererReady: (payload: { view: string; modelStatus?: "ready" | "error" }) => void;
     saveConfig: (config: AgentConfig) => Promise<AgentConfig>;
+    listPersonaCards: () => Promise<PersonaCard[]>;
+    createPersonaCard: (input: { name: string; payload: PersonaPayload }) => Promise<{ card: PersonaCard; cards: PersonaCard[] }>;
+    updatePersonaCard: (cardId: string, input: { name: string; payload: PersonaPayload }) => Promise<{ card: PersonaCard; cards: PersonaCard[]; config?: AgentConfig }>;
+    activatePersonaCard: (cardId: string) => Promise<{ card: PersonaCard; cards: PersonaCard[]; config: AgentConfig }>;
+    archivePersonaCard: (cardId: string) => Promise<PersonaCard[]>;
+    restorePersonaCard: (cardId: string) => Promise<PersonaCard[]>;
+    getMemoryDatabaseStats: () => Promise<MemoryDatabaseStats>;
     getLive2DModels: () => Promise<Live2DModelOption[]>;
     refreshLive2DModels: () => Promise<Live2DModelOption[]>;
     openLive2DModelsFolder: () => Promise<string>;
@@ -277,6 +513,15 @@ interface Window {
     generateAsmrScript: (mode: string, prompt: string) => Promise<string>;
     listElevenLabsVoices: (voiceConfig?: AgentConfig["voice"]) => Promise<ElevenLabsVoiceOption[]>;
     synthesizeSpeech: (text: string, asmr: boolean, voiceConfig?: AgentConfig["voice"]) => Promise<{ audioBase64: string; mimeType: string; requestId: string; characterCost: string; cached: boolean }>;
+    reportSpeechSignal: (signal: { active: boolean; level: number }) => void;
+    listLocalTtsPacks: () => Promise<LocalTtsPackStatus[]>;
+    installLocalTtsPack: (packId: string) => Promise<LocalTtsPackStatus>;
+    openLocalTtsFolder: () => Promise<string>;
+    listGptSovitsProfiles: () => Promise<GptSovitsProfileStatus[]>;
+    installGptSovitsProfile: (profileId: string) => Promise<GptSovitsProfileStatus>;
+    getGptSovitsRuntimeStatus: (baseUrl?: string) => Promise<GptSovitsRuntimeStatus>;
+    startGptSovitsRuntime: (baseUrl?: string) => Promise<GptSovitsRuntimeStatus>;
+    stopGptSovitsRuntime: (baseUrl?: string) => Promise<GptSovitsRuntimeStatus>;
     getLocalSttStatus: (modelId?: string) => Promise<LocalSttStatus>;
     installLocalStt: (modelId: string) => Promise<LocalSttStatus>;
     transcribeLocalSpeech: (audioBytes: Uint8Array) => Promise<{ text: string; modelId: string; language: string }>;
@@ -293,6 +538,11 @@ interface Window {
     testEmbedding: () => Promise<{ ok: boolean; message: string; model: string; baseUrl: string; dimensions?: number }>;
     getSystemResourceSnapshot: () => Promise<SystemResourceSnapshot>;
     getFileManagerSnapshot: () => Promise<FileManagerSnapshot>;
+    scanManagedDirectory: (target: string) => Promise<ManagedDirectoryScan>;
+    previewFileOrganization: (target: string, mode: "type" | "date", quarantine: boolean) => Promise<FileOrganizationPreview>;
+    executeFileOrganization: (previewId: string) => Promise<FileOperation>;
+    listFileOperations: () => Promise<FileOperation[]>;
+    undoFileOperation: (operationId?: string) => Promise<FileOperation>;
     openExternal: (url: string) => Promise<boolean>;
     testDeepSeek: () => Promise<{ ok: boolean; message: string; config: AgentConfig }>;
     testAstrBot: (config?: AgentConfig["astrbot"]) => Promise<{ ok: boolean; message: string; bots: unknown[] }>;
@@ -302,6 +552,20 @@ interface Window {
     openComposerWindow: () => Promise<boolean>;
     openChatWindow: () => Promise<boolean>;
     openCodeWindow: () => Promise<boolean>;
+    getAutoLaunch: () => Promise<boolean>;
+    setAutoLaunch: (enabled: boolean) => Promise<boolean>;
+    getLifeState: () => Promise<LifeState>;
+    getCompanionMemory: () => Promise<CompanionMemoryStore>;
+    getInterestSandbox: () => Promise<InterestSandboxSnapshot>;
+    getInterestState: () => Promise<InterestRuntimeState>;
+    updateInterestLocation: (location: { latitude: number; longitude: number; accuracy: number }) => Promise<InterestSandboxSnapshot>;
+    runInterestActivity: (type: InterestActivityType) => Promise<{ activity: InterestSandboxActivity; snapshot: InterestSandboxSnapshot }>;
+    openInterestSandbox: () => Promise<string>;
+    openInterestArtifact: (artifactPath: string) => Promise<boolean>;
+    pauseProactiveToday: () => Promise<LifeState>;
+    resetWorkSession: () => Promise<LifeState>;
+    listSchedules: () => Promise<ScheduleItem[]>;
+    cancelSchedule: (id: string) => Promise<ScheduleItem>;
     openScaleWindow: () => Promise<boolean>;
     openExpressionWindow: () => Promise<boolean>;
     triggerExpression: (name: string) => Promise<boolean>;
@@ -322,16 +586,23 @@ interface Window {
     getDataPath: () => Promise<{ baseDir: string; dataDir: string; configPath: string; memoryPath: string; knowledgeDir: string; ragDir: string; registryDir: string }>;
     openDataFolder: () => Promise<boolean>;
     onMenuAction: (callback: (action: string) => void) => () => void;
+    onStartupProgress: (callback: (status: StartupStatus) => void) => () => void;
     onConfigUpdated: (callback: (config: AgentConfig) => void) => () => void;
+    onAutoLaunchUpdated: (callback: (enabled: boolean) => void) => () => void;
+    onLifeStateUpdated: (callback: (state: LifeState) => void) => () => void;
+    onSchedulesUpdated: (callback: (items: ScheduleItem[]) => void) => () => void;
     onLive2DModelsUpdated: (callback: (models: Live2DModelOption[]) => void) => () => void;
     onPetScaleUpdated: (callback: (scale: number) => void) => () => void;
     onChatStateUpdated: (callback: (state: ChatWindowState) => void) => () => void;
     onBubblePlacementUpdated: (callback: (placement: "left" | "right") => void) => () => void;
     onLocalSttProgress: (callback: (progress: { phase: "runtime" | "model"; received: number; total: number; percent: number }) => void) => () => void;
+    onLocalTtsProgress: (callback: (progress: { phase: "voice-pack"; packId: string; received: number; total: number; percent: number }) => void) => () => void;
+    onGptSovitsProgress: (callback: (progress: { phase: "gpt-sovits-profile"; profileId: string; file: string; received: number; total: number; percent: number }) => void) => () => void;
     onPositionLockUpdated: (callback: (locked: boolean) => void) => () => void;
     onTriggerExpression: (callback: (name: string) => void) => () => void;
     onClearExpressions: (callback: () => void) => () => void;
     onExpressionsUpdated: (callback: (expressions: string[]) => void) => () => void;
+    onInterestStateUpdated: (callback: (state: InterestRuntimeState) => void) => () => void;
     onCursorScreenPosition: (callback: (position: { screenX: number; screenY: number; clientX: number; clientY: number }) => void) => () => void;
     onMoodUpdated?: (callback: (payload: {
       phase?: "anticipation" | "final";
@@ -343,6 +614,7 @@ interface Window {
       intensity?: number;
       durationMs?: number;
     }) => void) => () => void;
+    onSpeechSignalUpdated?: (callback: (signal: { active: boolean; level: number }) => void) => () => void;
     onRelationshipUpdated: (callback: (profile: RelationshipProfile) => void) => () => void;
   };
 }

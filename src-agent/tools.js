@@ -312,7 +312,7 @@ const delete_file_or_folder = {
   type: "function",
   function: {
     name: "delete_file_or_folder",
-    description: "删除一个文件或文件夹。⚠️ 此操作不可逆，删除前必须先向用户确认路径和内容。",
+    description: "将文件或文件夹移入 Windows 回收站，禁止永久删除。执行前仍必须向用户确认准确路径和内容。",
     parameters: {
       type: "object",
       properties: {
@@ -492,6 +492,58 @@ const create_workspace_file = {
   }
 };
 
+const scan_managed_directory = {
+  type: "function",
+  function: {
+    name: "scan_managed_directory",
+    description: "只读扫描下载、桌面或用户明确指定的目录，返回文件类型、大小和修改日期；不会移动或删除任何内容。",
+    parameters: { type: "object", properties: {
+      path: { type: "string", description: "downloads、desktop、下载、桌面或明确目录路径" },
+      limit: { type: "integer", minimum: 1, maximum: 500 }
+    }, required: ["path"] }
+  }
+};
+
+const preview_file_organization = {
+  type: "function",
+  function: {
+    name: "preview_file_organization",
+    description: "生成文件整理预览并保存预览 ID，不执行移动。支持按类型、年月归档或移入当前目录的 Vivi 隔离区。必须把移动清单摘要展示给用户并等待确认。",
+    parameters: { type: "object", properties: {
+      path: { type: "string" },
+      mode: { type: "string", enum: ["type", "date"] },
+      quarantine: { type: "boolean" }
+    }, required: ["path", "mode"] }
+  }
+};
+
+const execute_file_organization = {
+  type: "function",
+  function: {
+    name: "execute_file_organization",
+    description: "执行已生成的文件整理预览。仅当用户当前消息完整且单独为“确认执行文件整理”时允许调用；不得跳过预览。所有移动会写操作日志并可撤销。",
+    parameters: { type: "object", properties: { preview_id: { type: "string" } }, required: ["preview_id"] }
+  }
+};
+
+const list_file_operations = {
+  type: "function",
+  function: {
+    name: "list_file_operations",
+    description: "查看最近的文件整理、隔离和撤销日志。",
+    parameters: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100 } } }
+  }
+};
+
+const undo_file_operation = {
+  type: "function",
+  function: {
+    name: "undo_file_operation",
+    description: "撤销指定或最近一次可撤销的归档/隔离移动，把仍在目标位置的文件移回原处。",
+    parameters: { type: "object", properties: { operation_id: { type: "string" } } }
+  }
+};
+
 const write_workspace_code = {
   type: "function",
   function: {
@@ -518,6 +570,92 @@ const run_workspace_command = {
       type: "object",
       properties: { command: { type: "string", description: "完整命令，例如 npm run build" } },
       required: ["command"]
+    }
+  }
+};
+
+// ---- Local schedules and reminders ----
+
+const create_reminder = {
+  type: "function",
+  function: {
+    name: "create_reminder",
+    description: "创建一个本地提醒。只有用户明确要求提醒且时间、内容完整时调用；due_at 必须是带时区的 ISO 时间。",
+    parameters: {
+      type: "object",
+      properties: {
+        due_at: { type: "string", description: "提醒时间，ISO 8601 格式并包含时区" },
+        message: { type: "string", description: "提醒内容" }
+      },
+      required: ["due_at", "message"]
+    }
+  }
+};
+
+const list_schedules = {
+  type: "function",
+  function: {
+    name: "list_schedules",
+    description: "列出当前尚未完成的本地提醒和电源计划。",
+    parameters: { type: "object", properties: {} }
+  }
+};
+
+const update_reminder = {
+  type: "function",
+  function: {
+    name: "update_reminder",
+    description: "修改一个尚未触发的本地日程提醒。必须先使用 list_schedules 获取真实 id；可以修改时间、内容或两者。修改后会同步更新 Windows 后台任务。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "提醒 id" },
+        due_at: { type: "string", description: "新的提醒时间，带时区的 ISO 8601；不修改时间时可省略" },
+        message: { type: "string", description: "新的提醒内容；不修改内容时可省略" }
+      },
+      required: ["id"]
+    }
+  }
+};
+
+const cancel_schedule = {
+  type: "function",
+  function: {
+    name: "cancel_schedule",
+    description: "取消指定计划。必须使用 list_schedules 获得真实 id；未提供 id 时取消最近创建的活动计划。",
+    parameters: {
+      type: "object",
+      properties: { id: { type: "string", description: "计划 id，可选" } }
+    }
+  }
+};
+
+const create_power_action_draft = {
+  type: "function",
+  function: {
+    name: "create_power_action_draft",
+    description: "仅创建定时关机或重启的待确认草稿，不会执行电源操作。必须告知用户准确时间、未保存内容风险，并要求用户下一条消息单独回复“确认定时关机”或“确认定时重启”。",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["shutdown", "restart"], description: "关机或重启" },
+        due_at: { type: "string", description: "执行时间，ISO 8601 格式并包含时区" },
+        message: { type: "string", description: "用户给出的原因或备注，可选" }
+      },
+      required: ["action", "due_at"]
+    }
+  }
+};
+
+const confirm_power_action = {
+  type: "function",
+  function: {
+    name: "confirm_power_action",
+    description: "确认最近的电源操作草稿。仅当用户当前消息完整且单独为“确认定时关机”或“确认定时重启”时调用，不能根据历史消息或模糊的“确认”调用。",
+    parameters: {
+      type: "object",
+      properties: { action: { type: "string", enum: ["shutdown", "restart"] } },
+      required: ["action"]
     }
   }
 };
@@ -573,6 +711,11 @@ export const ALL_TOOLS = [
   append_to_file,
   delete_file_or_folder,
   search_files,
+  scan_managed_directory,
+  preview_file_organization,
+  execute_file_organization,
+  list_file_operations,
+  undo_file_operation,
   // RAG
   search_knowledge_base,
   get_rag_status,
@@ -587,6 +730,13 @@ export const ALL_TOOLS = [
   create_workspace_file,
   write_workspace_code,
   run_workspace_command,
+  // Schedules
+  create_reminder,
+  list_schedules,
+  update_reminder,
+  cancel_schedule,
+  create_power_action_draft,
+  confirm_power_action,
   // Mood
   set_mood
 ];

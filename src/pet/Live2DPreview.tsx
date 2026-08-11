@@ -18,8 +18,12 @@ type Live2DPreviewProps = {
   activeExpressionSet: Set<string>;
   faceParams: FaceParams | null;
   speaking: boolean;
+  speechSignalRef?: { current: { active: boolean; level: number } };
   mouseFollow?: boolean;
+  renderFps?: number;
+  powerSaving?: boolean;
   onInteractionChange?: (interactive: boolean) => void;
+  onLoadStateChange?: (state: "ready" | "error") => void;
 };
 
 // ---- ParameterAnimator ----
@@ -108,10 +112,11 @@ function ensureScript(src: string) {
 
 const moodLabelMap: Record<PetMood, string> = MOOD_LABEL_MAP;
 
-export default function Live2DPreview({ mood, modelId, modelName, modelDirectory, modelFileName, activeExpressionSet, faceParams, speaking, mouseFollow = true, onInteractionChange }: Live2DPreviewProps) {
+export default function Live2DPreview({ mood, modelId, modelName, modelDirectory, modelFileName, activeExpressionSet, faceParams, speaking, speechSignalRef, mouseFollow = true, renderFps = 30, powerSaving = true, onInteractionChange, onLoadStateChange }: Live2DPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const runtimeRef = useRef<any>(null);
   const frameRef = useRef<number | null>(null);
+  const frameTimerRef = useRef<number | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const animatorRef = useRef(new ParameterAnimator());
   const parameterMixerRef = useRef(new Live2DParameterMixer());
@@ -129,7 +134,10 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
   const prevExprRef = useRef<Set<string>>(new Set());
   const faceRef = useRef<FaceParams | null>(null);           // LLM face tag
   const speakingRef = useRef(false);
+  const renderFpsRef = useRef(renderFps);
+  const powerSavingRef = useRef(powerSaving);
   const interactionChangeRef = useRef(onInteractionChange);
+  const loadStateChangeRef = useRef(onLoadStateChange);
   const currentModelIdRef = useRef(modelId);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [msg, setMsg] = useState("正在启动...");
@@ -149,8 +157,20 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
   }, [speaking]);
 
   useEffect(() => {
+    renderFpsRef.current = Math.max(15, Math.min(60, Number(renderFps) || 30));
+  }, [renderFps]);
+
+  useEffect(() => {
+    powerSavingRef.current = powerSaving;
+  }, [powerSaving]);
+
+  useEffect(() => {
     interactionChangeRef.current = onInteractionChange;
   }, [onInteractionChange]);
+
+  useEffect(() => {
+    loadStateChangeRef.current = onLoadStateChange;
+  }, [onLoadStateChange]);
 
   useEffect(() => {
     const bridge = window.agentDesktop;
@@ -240,8 +260,24 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
         // Initial preset
         animatorRef.current.applyPreset(getMoodPresetForModel(modelId, "idle"));
 
+        const scheduleFrame = (delayMs = 0) => {
+          if (disposed || document.hidden || frameRef.current !== null || frameTimerRef.current !== null) return;
+          if (delayMs > 1) {
+            frameTimerRef.current = window.setTimeout(() => {
+              frameTimerRef.current = null;
+              if (!disposed && !document.hidden) frameRef.current = window.requestAnimationFrame(loop);
+            }, delayMs);
+            return;
+          }
+          frameRef.current = window.requestAnimationFrame(loop);
+        };
         const loop = (ts: number) => {
-          if (disposed || !runtimeRef.current) return;
+          frameRef.current = null;
+          if (disposed || document.hidden || !runtimeRef.current) return;
+          const configuredFps = renderFpsRef.current;
+          const isIdle = currentMoodRef.current === "idle" && !speakingRef.current;
+          const targetFps = powerSavingRef.current && isIdle ? Math.min(configuredFps, 20) : configuredFps;
+          const frameInterval = 1000 / targetFps;
           runtimeRef.current.pal.updateTime();
 
           const mgr = rt.getLive2DManager();
@@ -306,11 +342,18 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
               }
             }
 
-            if (speakingRef.current) {
-              const t = ts / 1000;
-              const syllableWave = Math.max(0, Math.sin(t * 18.5));
-              const accentWave = Math.max(0, Math.sin(t * 31 + 0.8));
-              const mouthOpen = Math.min(0.72, 0.06 + syllableWave * 0.36 + accentWave * 0.18);
+            const speechSignal = speechSignalRef?.current;
+            if (speakingRef.current || speechSignal?.active) {
+              let mouthOpen: number;
+              if (speechSignal?.active) {
+                const normalizedLevel = Math.max(0, speechSignal.level - 0.008);
+                mouthOpen = Math.min(0.82, 0.025 + Math.pow(normalizedLevel * 5.8, 0.72));
+              } else {
+                const t = ts / 1000;
+                const syllableWave = Math.max(0, Math.sin(t * 18.5));
+                const accentWave = Math.max(0, Math.sin(t * 31 + 0.8));
+                mouthOpen = Math.min(0.72, 0.06 + syllableWave * 0.36 + accentWave * 0.18);
+              }
               const baseMouthOpen = overrides.get("ParamMouthOpenY") ?? 0;
               const baseMouthForm = overrides.get("ParamMouthForm") ?? 0;
               overrides.set("ParamMouthOpenY", Math.max(baseMouthOpen * 0.55, mouthOpen));
@@ -328,20 +371,40 @@ export default function Live2DPreview({ mood, modelId, modelName, modelDirectory
           const expr = animatorRef.current.getPendingExpression();
           if (expr !== null && m) { try { if (expr) m.setExpression(expr); } catch {} }
 
-          frameRef.current = window.requestAnimationFrame(loop);
+          // Wake shortly before the next due frame, then let rAF align the actual
+          // WebGL update with the compositor without polling at monitor refresh rate.
+          scheduleFrame(Math.max(0, frameInterval - 4));
         };
-        frameRef.current = window.requestAnimationFrame(loop);
+        const handleVisibilityChange = () => {
+          if (document.hidden) {
+            if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+            frameRef.current = null;
+            if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
+            frameTimerRef.current = null;
+            runtimeRef.current?.runtime.resetGlobalPointer?.();
+            return;
+          }
+          scheduleFrame();
+        };
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        const cleanupPointerEvents = cleanupRef.current;
+        cleanupRef.current = () => {
+          cleanupPointerEvents?.();
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
+        };
+        scheduleFrame();
 
         const displayName = modelName ?? LIVE2D_MODEL_PRESETS.find((model) => model.id === modelId)?.name ?? activeModel.name;
-        setLoadState("ready"); setMsg(`${displayName}已载入`);
+        setLoadState("ready"); setMsg(`${displayName}已载入`); loadStateChangeRef.current?.("ready");
       } catch (e) {
-        setLoadState("error"); setMsg(e instanceof Error ? e.message : "初始化失败");
+        setLoadState("error"); setMsg(e instanceof Error ? e.message : "初始化失败"); loadStateChangeRef.current?.("error");
       }
     }
     boot();
     return () => {
       disposed = true; cleanupRef.current?.(); cleanupRef.current = null;
       if (frameRef.current !== null) { window.cancelAnimationFrame(frameRef.current); frameRef.current = null; }
+      if (frameTimerRef.current !== null) { window.clearTimeout(frameTimerRef.current); frameTimerRef.current = null; }
       animatorRef.current.reset();
       parameterMixerRef.current.reset();
       modelAdapterRef.current = new Live2DModelAdapter();

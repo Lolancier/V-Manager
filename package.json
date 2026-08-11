@@ -1,6 +1,6 @@
 {
     "name": "v-manager",
-    "version": "0.7.0",
+    "version": "0.9.2",
     "private": true,
     "description": "PC端多功能 Agent MVP，包含桌面壳、人格设定、对话与本地记忆/RAG。",
     "main": "electron/main.js",
@@ -11,6 +11,8 @@
         "dev:electron": "wait-on tcp:5173 && electron .",
         "build": "vite build",
         "preview": "vite preview",
+        "tts:gpt-sovits:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-gpt-sovits.ps1",
+        "tts:gpt-sovits:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-gpt-sovits.ps1",
         "pack": "vite build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ electron-builder --dir",
         "dist": "vite build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ electron-builder",
         "test": "node --test tests/*.test.js"
@@ -20,7 +22,9 @@
         "pixi-live2d-display": "^0.4.0",
         "pixi.js": "^6.5.10",
         "react": "^18.3.1",
-        "react-dom": "^18.3.1"
+        "react-dom": "^18.3.1",
+        "sherpa-onnx-node": "^1.13.4",
+        "sql.js": "^1.13.0"
     },
     "devDependencies": {
         "@types/react": "^19.2.17",
@@ -37,6 +41,9 @@
     "build": {
         "appId": "com.v-manager.app",
         "productName": "V-Manager",
+        "asarUnpack": [
+            "node_modules/sherpa-onnx-*/**/*"
+        ],
         "directories": {
             "output": "../V-Manager-builds"
         },

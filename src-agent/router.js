@@ -5,6 +5,19 @@ import { handle as fileHandle } from "./executors/file-executor.js";
 import { handle as systemHandle } from "./executors/system-executor.js";
 import { handle as uiAutomationHandle } from "./executors/ui-automation-executor.js";
 import { handle as wechatHandle } from "./executors/wechat-executor.js";
+import { handle as scheduleHandle } from "./executors/schedule-executor.js";
+
+function detectScheduleIntent(message) {
+  const normalized = normalizeText(message).toLowerCase();
+  const mentionsSchedule = /提醒|备忘|闹铃|定时|计划|日程|安排|事项/.test(normalized);
+  const mentionsTimeOrControl = /分钟|小时|今天|今日|明天|今晚|点|时|查看|有什么|列表|清单|取消|关机|重启/.test(normalized);
+  if ((mentionsSchedule && mentionsTimeOrControl)
+    || /(?:确认|取消|撤销)(?:执行)?(?:定时)?(?:关机|重启)/.test(normalized)
+    || /(?:分钟|小时)后(?:关机|重启)/.test(normalized)) {
+    return { type: "schedule" };
+  }
+  return null;
+}
 
 function detectAppIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
@@ -46,7 +59,7 @@ function detectMessengerIntent(message) {
 
 function detectFileIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
-  if (/(?:文件夹|目录|文件|文档|桌面|下载|d盘)/.test(normalized) && /(打开|查看|列出|读取|创建|删除|追加|写入)/.test(normalized)) {
+  if (/(?:文件夹|目录|文件|文档|桌面|下载|d盘|回收站|隔离区)/.test(normalized) && /(打开|查看|列出|读取|创建|删除|追加|写入|扫描|整理|归档|隔离|撤销)/.test(normalized)) {
     return { type: "file_system" };
   }
   return null;
@@ -71,6 +84,7 @@ function detectSystemIntent(message) {
 export function resolveAgentRoute(message) {
   return (
     detectWorkspaceIntent(message)
+    || detectScheduleIntent(message)
     || detectMessengerIntent(message)
     || detectUiAutomationIntent(message)
     || detectAppIntent(message)
@@ -87,6 +101,7 @@ export function resolveAgentRoute(message) {
  */
 export async function runRoutedLocalExecutor(message, context = {}) {
   const executors = [
+    { name: "schedule", fn: scheduleHandle },
     { name: "wechat", fn: wechatHandle },
     { name: "ui-automation", fn: uiAutomationHandle },
     { name: "workspace", fn: workspaceHandle },

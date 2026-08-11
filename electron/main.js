@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, screen, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, powerMonitor, protocol, screen, session, shell, Tray } from "electron";
 import { createHash } from "node:crypto";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
@@ -28,11 +28,83 @@ import {
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
 import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
+import {
+  installLocalTtsPack,
+  listLocalTtsPacks,
+  synthesizeLocalSpeech
+} from "../src-agent/local-tts.js";
+import {
+  installGptSovitsProfile,
+  listGptSovitsProfiles,
+  synthesizeGptSovitsSpeech
+} from "../src-agent/gpt-sovits.js";
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
+import { pruneAudioCache, touchAudioCacheFile } from "../src-agent/audio-cache.js";
+import { sanitizeSpeechText } from "../src-agent/speech-text.js";
+import { ensureGptSovitsService, isGptSovitsServiceReady, stopGptSovitsService } from "../src-agent/gpt-sovits-runtime.js";
+import { classifyDiaryRequest, diaryOpenReply, diaryStatusReply } from "../src-agent/diary-privacy.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { testAstrBotConnection } from "../src-agent/astrbot-client.js";
 import { classifyFastReaction } from "../src-agent/fast-reaction.js";
+import {
+  createOrganizationPreview,
+  executeOrganizationPreview,
+  listFileOperations,
+  scanManagedDirectory,
+  undoFileOperation
+} from "../src-agent/safe-file-manager.js";
+import {
+  clearCompanionMemory,
+  detectProactiveFeedback,
+  getFollowUpCandidate,
+  loadCompanionMemory,
+  markCommitmentFollowedUp,
+  recordProactiveFeedback
+} from "../src-agent/companion-memory.js";
+import {
+  evaluateLifeTick,
+  loadLifeState,
+  pauseProactiveForToday,
+  resetWorkSession,
+  saveLifeState
+} from "../src-agent/proactive-engine.js";
+import {
+  abortWindowsPowerAction,
+  cancelSchedule,
+  executeWindowsPowerAction,
+  listSchedulesForDay,
+  listSchedules,
+  markPowerResult,
+  processDueSchedules,
+  updateScheduleIntegration
+} from "../src-agent/schedule-engine.js";
+import {
+  buildScheduledLaunchSpec,
+  registerWindowsScheduleTask,
+  unregisterWindowsScheduleTask
+} from "../src-agent/windows-task-scheduler.js";
+import {
+  getInterestSandboxSnapshot,
+  initializeInterestSession,
+  isSafeInterestArtifact,
+  saveInterestLocation,
+  normalizeInterestConfig,
+  runInterestActivity,
+  selectInterestActivity,
+  updateInterestSession
+} from "../src-agent/interest-sandbox.js";
+import { getMemoryDatabaseStats } from "../src-agent/local-database.js";
+import {
+  activatePersonaCard,
+  applyPersonaCardToConfig,
+  archivePersonaCard,
+  createPersonaCard,
+  getActivePersonaCard,
+  listPersonaCards,
+  restorePersonaCard,
+  updatePersonaCard
+} from "../src-agent/persona-cards.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,7 +116,11 @@ protocol.registerSchemesAsPrivileged([
 
 const isDev = !app.isPackaged;
 const devServerUrl = "http://localhost:5173";
+const isBackgroundScheduleLaunch = process.argv.includes("--vivi-background-schedule");
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 let petWindow = null;
+let startupWindow = null;
 let settingsWindow = null;
 let scaleWindow = null;
 let composerWindow = null;
@@ -53,12 +129,14 @@ let bubbleWindow = null;
 let bubbleContentSize = { width: 330, height: 180 };
 let expressionWindow = null;
 let codeWindow = null;
+let tray = null;
 let currentAppearanceTheme = "light";
 let currentAgentConfig = defaultConfig;
 let petWindowScale = 1;
 let positionLocked = false;
 let petHiddenForChat = false;
 let activeManualExpressions = new Set();
+let activeInterestExpressions = new Set();
 const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
 const builtInLive2DModels = [
   { id: "qianqian", label: "芊芊", detail: "完整表情、形态与动作适配", builtIn: true, capabilities: { expressionCount: 32, motionGroupCount: 2, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } },
@@ -70,12 +148,41 @@ let customModelRoots = new Map();
 let modelDirectoryWatcher = null;
 let modelScanTimer = null;
 let cursorTrackingTimer = null;
+let proactiveTimer = null;
+let currentLifeState = null;
+let proactiveTickRunning = false;
+let scheduleTimer = null;
+let scheduleTickRunning = false;
+let interestTimer = null;
+let interestTickRunning = false;
+let currentInterestActivity = null;
+let agentTaskRunning = false;
 const cursorDeliveryState = new Map();
+let startupReleaseTimer = null;
+let startupRendererModelStatus = null;
+let shutdownCleanupDone = false;
+let gptSovitsShutdownStarted = false;
+let startupStatus = {
+  phase: "booting",
+  progress: 4,
+  title: "正在唤醒 Vivi",
+  detail: "准备本地运行环境…",
+  warning: ""
+};
+
+function publishStartupStatus(next) {
+  startupStatus = { ...startupStatus, ...next };
+  if (startupWindow && !startupWindow.isDestroyed()) {
+    startupWindow.webContents.send("agent:startup-progress", startupStatus);
+  }
+  return startupStatus;
+}
 
 function mergeAgentConfig(nextConfig = {}) {
+  const { calendar: _removedCalendar, ...supportedConfig } = nextConfig;
   return {
     ...defaultConfig,
-    ...nextConfig,
+    ...supportedConfig,
     deepseek: { ...defaultConfig.deepseek, ...(nextConfig.deepseek ?? {}) },
     embedding: { ...defaultConfig.embedding, ...(nextConfig.embedding ?? {}) },
     astrbot: {
@@ -93,15 +200,29 @@ function mergeAgentConfig(nextConfig = {}) {
     },
     speechInput: { ...defaultConfig.speechInput, ...(nextConfig.speechInput ?? {}) },
     relationship: { ...defaultConfig.relationship, ...(nextConfig.relationship ?? {}) },
+    proactive: { ...defaultConfig.proactive, ...(nextConfig.proactive ?? {}) },
+    interests: normalizeInterestConfig(nextConfig.interests),
     memory: { ...defaultConfig.memory, ...(nextConfig.memory ?? {}) }
   };
 }
 
 async function synthesizeSpeechWithCache(voiceConfig, text, asmr) {
   const cacheDir = path.join(app.getPath("userData"), "agent-data", "audio-cache");
+  const speechText = sanitizeSpeechText(text);
+  if (!speechText) throw new Error("回复中只有舞台动作或内心独白，没有可朗读的正文。");
+  await fs.mkdir(cacheDir, { recursive: true });
+  await pruneAudioCache(cacheDir);
   const cacheKey = createHash("sha256").update(JSON.stringify({
-    text,
+    text: speechText,
     asmr,
+    provider: voiceConfig.provider,
+    localPackId: voiceConfig.localPackId,
+    localSpeakerId: voiceConfig.localSpeakerId,
+    localSpeed: voiceConfig.localSpeed,
+    localSilenceScale: voiceConfig.localSilenceScale,
+    gptSovitsBaseUrl: voiceConfig.gptSovitsBaseUrl,
+    gptSovitsProfileId: voiceConfig.gptSovitsProfileId,
+    gptSovitsSpeed: voiceConfig.gptSovitsSpeed,
     baseUrl: voiceConfig.baseUrl,
     model: voiceConfig.model,
     voice: voiceConfig.voice,
@@ -110,15 +231,29 @@ async function synthesizeSpeechWithCache(voiceConfig, text, asmr) {
     stability: voiceConfig.stability,
     similarityBoost: voiceConfig.similarityBoost
   })).digest("hex");
-  const audioPath = path.join(cacheDir, `${cacheKey}.mp3`);
+  const usesWav = voiceConfig.provider === "local" || voiceConfig.provider === "gpt_sovits";
+  const audioPath = path.join(cacheDir, `${cacheKey}.${usesWav ? "wav" : "mp3"}`);
   const cached = await fs.readFile(audioPath).catch(() => null);
   if (cached) {
-    return { audioBase64: cached.toString("base64"), mimeType: "audio/mpeg", requestId: "cache", characterCost: "0", cached: true };
+    await touchAudioCacheFile(audioPath);
+    await pruneAudioCache(cacheDir, { preserve: [audioPath] });
+    return { audioBase64: cached.toString("base64"), mimeType: usesWav ? "audio/wav" : "audio/mpeg", requestId: "cache", characterCost: "0", cached: true };
   }
 
-  const result = await synthesizeElevenLabsSpeech(voiceConfig, text, { asmr });
-  await fs.mkdir(cacheDir, { recursive: true });
+  if (voiceConfig.provider === "gpt_sovits") {
+    if (voiceConfig.gptSovitsAutoStart !== false) {
+      await ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl);
+    } else if (!await isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl)) {
+      throw new Error("GPT-SoVITS 当前未运行。请到“设置 → 语音与 ASMR”手动启动，或开启“随 V-Manager 启动”。");
+    }
+  }
+  const result = voiceConfig.provider === "local"
+    ? await synthesizeLocalSpeech(app.getPath("userData"), voiceConfig, speechText)
+    : voiceConfig.provider === "gpt_sovits"
+      ? await synthesizeGptSovitsSpeech(app.getPath("userData"), voiceConfig, speechText)
+      : await synthesizeElevenLabsSpeech(voiceConfig, speechText, { asmr });
   await fs.writeFile(audioPath, Buffer.from(result.audioBase64, "base64"));
+  await pruneAudioCache(cacheDir, { preserve: [audioPath] });
   return { ...result, cached: false };
 }
 
@@ -236,6 +371,18 @@ function getModelContentType(filePath) {
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
   if (extension === ".webp") return "image/webp";
   return "application/octet-stream";
+}
+
+function broadcastLocalTtsProgress(progress) {
+  for (const win of [settingsWindow, chatWindow, composerWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:local-tts-progress", progress);
+  }
+}
+
+function broadcastGptSovitsProgress(progress) {
+  for (const win of [settingsWindow, chatWindow, composerWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:gpt-sovits-progress", progress);
+  }
 }
 let chatState = {
   messages: [
@@ -392,6 +539,65 @@ function getBubbleWindowBounds() {
   };
 }
 
+function createStartupWindow() {
+  if (isBackgroundScheduleLaunch) return null;
+  if (startupWindow && !startupWindow.isDestroyed()) return startupWindow;
+  const win = new BrowserWindow({
+    width: 560,
+    height: 360,
+    frame: false,
+    transparent: true,
+    hasShadow: true,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    center: true,
+    alwaysOnTop: true,
+    backgroundColor: "#00000000",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  loadView(win, "startup");
+  win.once("ready-to-show", () => {
+    if (!win.isDestroyed()) win.show();
+  });
+  win.on("close", () => {
+    if (startupStatus.phase !== "ready" && !app.isQuiting) {
+      app.isQuiting = true;
+      app.quit();
+    }
+  });
+  win.on("closed", () => {
+    if (startupWindow === win) startupWindow = null;
+  });
+  startupWindow = win;
+  return win;
+}
+
+function releaseStartupToApplication(modelStatus = "ready") {
+  if (startupStatus.phase === "ready") return;
+  if (startupReleaseTimer) clearTimeout(startupReleaseTimer);
+  startupReleaseTimer = null;
+  publishStartupStatus({
+    phase: "ready",
+    progress: 100,
+    title: modelStatus === "error" ? "已以兼容模式启动" : "准备完成",
+    detail: modelStatus === "error" ? "Live2D 模型加载异常，其他功能仍可使用。" : "Vivi 已经醒来。"
+  });
+  setTimeout(() => {
+    if (!isBackgroundScheduleLaunch) showPetWindow();
+    if (startupWindow && !startupWindow.isDestroyed()) {
+      startupWindow.setClosable(true);
+      startupWindow.close();
+    }
+  }, 320);
+}
+
 function createPetWindow() {
   const initialSize = getPetWindowSize();
   const win = new BrowserWindow({
@@ -407,6 +613,7 @@ function createPetWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
+    show: false,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: {
@@ -426,21 +633,27 @@ function createPetWindow() {
     updateBubbleWindowLayout();
   });
 
+  for (const eventName of ["show", "hide", "minimize", "restore"]) {
+    win.on(eventName, syncGlobalCursorTracking);
+  }
+
   win.webContents.on("context-menu", () => {
     buildPetContextMenu().popup({
       window: win
     });
   });
 
-  win.on("closed", () => {
-    if (petWindow === win) {
-      petWindow = null;
-    }
-
+  win.on("close", (event) => {
     if (!app.isQuiting) {
-      app.isQuiting = true;
-      app.quit();
+      event.preventDefault();
+      win.hide();
+      bubbleWindow?.hide();
     }
+  });
+
+  win.on("closed", () => {
+    if (petWindow === win) petWindow = null;
+    syncGlobalCursorTracking();
   });
 
   petWindow = win;
@@ -612,11 +825,15 @@ function createChatWindow() {
 
   win.on("minimize", restorePetAfterChat);
   win.on("restore", hidePetForChat);
+  for (const eventName of ["show", "hide", "minimize", "restore"]) {
+    win.on(eventName, syncGlobalCursorTracking);
+  }
 
   win.on("closed", () => {
     if (chatWindow === win) {
       chatWindow = null;
     }
+    syncGlobalCursorTracking();
   });
 
   chatWindow = win;
@@ -675,6 +892,7 @@ function createBubbleWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
+    show: !isBackgroundScheduleLaunch,
     focusable: true,
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
@@ -769,7 +987,7 @@ function createExpressionWindow() {
   loadView(win, "expressions");
 
   win.webContents.on("did-finish-load", () => {
-    win.webContents.send("agent:expressions-updated", [...activeManualExpressions]);
+    win.webContents.send("agent:expressions-updated", getActiveExpressions());
   });
 
   win.on("close", (event) => {
@@ -800,7 +1018,7 @@ function openExpressionWindow() {
   const win = ensureExpressionWindow();
   win.show();
   win.focus();
-  win.webContents.send("agent:expressions-updated", [...activeManualExpressions]);
+  win.webContents.send("agent:expressions-updated", getActiveExpressions());
   return true;
 }
 
@@ -849,16 +1067,150 @@ function hidePetForChat() {
   petHiddenForChat = true;
   petWindow.hide();
   bubbleWindow?.hide();
+  syncGlobalCursorTracking();
+  refreshTrayMenu();
 }
 
 function restorePetAfterChat() {
   if (!petHiddenForChat || app.isQuiting || !petWindow || petWindow.isDestroyed()) return;
   petHiddenForChat = false;
   petWindow.showInactive();
-  if (bubbleWindow && !bubbleWindow.isDestroyed()) {
-    updateBubbleWindowLayout();
-    bubbleWindow.showInactive();
+  wakeBubbleWindow(true);
+  syncGlobalCursorTracking();
+  refreshTrayMenu();
+}
+
+function showPetWindow() {
+  if (!isBackgroundScheduleLaunch && startupStatus.phase !== "ready") {
+    if (startupWindow && !startupWindow.isDestroyed()) {
+      startupWindow.show();
+      startupWindow.focus();
+    }
+    return false;
   }
+  if (!petWindow || petWindow.isDestroyed()) createPetWindow();
+  petHiddenForChat = false;
+  petWindow.showInactive();
+  petWindow.moveTop();
+  wakeBubbleWindow(true);
+  syncGlobalCursorTracking();
+  refreshTrayMenu();
+  return true;
+}
+
+function wakeBubbleWindow(replayLastReply = false) {
+  if (petHiddenForChat || !petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return false;
+  const bubble = ensureBubbleWindow();
+  updateBubbleWindowLayout();
+  if (replayLastReply) {
+    const replay = () => bubble.webContents.send("agent:menu-action", "show-bubble");
+    if (bubble.webContents.isLoadingMainFrame()) bubble.webContents.once("did-finish-load", replay);
+    else replay();
+  }
+  bubble.showInactive();
+  return true;
+}
+
+function hidePetWindow() {
+  petHiddenForChat = false;
+  petWindow?.hide();
+  bubbleWindow?.hide();
+  syncGlobalCursorTracking();
+  refreshTrayMenu();
+  return true;
+}
+
+function getLoginItemOptions(openAtLogin) {
+  return {
+    openAtLogin,
+    path: process.execPath,
+    args: isDev ? [app.getAppPath()] : []
+  };
+}
+
+function isAutoLaunchEnabled() {
+  return app.getLoginItemSettings(getLoginItemOptions(false)).openAtLogin;
+}
+
+function setAutoLaunchEnabled(enabled) {
+  app.setLoginItemSettings(getLoginItemOptions(Boolean(enabled)));
+  const applied = isAutoLaunchEnabled();
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send("agent:auto-launch-updated", applied);
+  }
+  return applied;
+}
+
+function createTrayIcon() {
+  const size = 32;
+  const bitmap = Buffer.alloc(size * size * 4);
+  const setPixel = (x, y, red, green, blue, alpha = 255) => {
+    if (x < 0 || y < 0 || x >= size || y >= size) return;
+    const offset = (y * size + x) * 4;
+    bitmap[offset] = blue;
+    bitmap[offset + 1] = green;
+    bitmap[offset + 2] = red;
+    bitmap[offset + 3] = alpha;
+  };
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = x - 15.5;
+      const dy = y - 15.5;
+      if (dx * dx + dy * dy <= 14 * 14) setPixel(x, y, 31, 174, 161);
+    }
+  }
+  for (let y = 8; y <= 22; y += 1) {
+    const progress = (y - 8) / 14;
+    const leftX = Math.round(9 + progress * 6);
+    const rightX = Math.round(22 - progress * 6);
+    for (let width = -1; width <= 1; width += 1) {
+      setPixel(leftX + width, y, 255, 255, 255);
+      setPixel(rightX + width, y, 255, 255, 255);
+    }
+  }
+  return nativeImage.createFromBitmap(bitmap, { width: size, height: size, scaleFactor: 1 }).resize({ width: 16, height: 16 });
+}
+
+function buildTrayContextMenu() {
+  const petVisible = Boolean(petWindow && !petWindow.isDestroyed() && petWindow.isVisible());
+  return Menu.buildFromTemplate([
+    { label: "Vivi 正在后台运行", enabled: false },
+    { type: "separator" },
+    { label: petVisible ? "隐藏桌宠" : "显示桌宠", click: () => petVisible ? hidePetWindow() : showPetWindow() },
+    { label: "打开聊天栏", click: () => openChatWindow() },
+    { label: "快速输入", click: () => openComposerWindow() },
+    { label: "代码工作台", click: () => openCodeWindow() },
+    { label: "设置", click: () => openSettingsWindow() },
+    { type: "separator" },
+    {
+      label: "开机自动启动",
+      type: "checkbox",
+      checked: isAutoLaunchEnabled(),
+      click: (menuItem) => setAutoLaunchEnabled(menuItem.checked)
+    },
+    { type: "separator" },
+    {
+      label: "退出 V-Manager",
+      click: () => {
+        app.isQuiting = true;
+        app.quit();
+      }
+    }
+  ]);
+}
+
+function refreshTrayMenu() {
+  if (tray && !tray.isDestroyed()) tray.setContextMenu(buildTrayContextMenu());
+}
+
+function createSystemTray() {
+  if (tray && !tray.isDestroyed()) return tray;
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip("Vivi · V-Manager");
+  tray.setContextMenu(buildTrayContextMenu());
+  tray.on("click", () => showPetWindow());
+  tray.on("double-click", () => openChatWindow());
+  return tray;
 }
 
 function openCodeWindow() {
@@ -902,6 +1254,37 @@ function broadcastMoodUpdate(payload) {
   chatWindow?.webContents.send("agent:mood-updated", payload);
 }
 
+function broadcastSpeechSignal(signal) {
+  const payload = {
+    active: Boolean(signal?.active),
+    level: Math.max(0, Math.min(1, Number(signal?.level) || 0))
+  };
+  petWindow?.webContents.send("agent:speech-signal-updated", payload);
+  chatWindow?.webContents.send("agent:speech-signal-updated", payload);
+}
+
+async function resolveLocationLabel(location) {
+  try {
+    const latitude = Number(location?.latitude);
+    const longitude = Number(location?.longitude);
+    const endpoint = new URL("https://api.bigdatacloud.net/data/reverse-geocode-client");
+    endpoint.searchParams.set("latitude", String(latitude));
+    endpoint.searchParams.set("longitude", String(longitude));
+    endpoint.searchParams.set("localityLanguage", "zh");
+    const response = await net.fetch(endpoint.toString(), { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return {};
+    const result = await response.json();
+    return {
+      city: result.city || result.locality || result.principalSubdivision || "",
+      region: result.principalSubdivision || "",
+      country: result.countryName || ""
+    };
+  } catch (error) {
+    console.warn("[interest-sandbox] reverse geocoding failed:", error);
+    return {};
+  }
+}
+
 function broadcastConfigUpdated(config) {
   for (const win of [petWindow, settingsWindow, scaleWindow, composerWindow, chatWindow, bubbleWindow, expressionWindow, codeWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:config-updated", config);
@@ -912,6 +1295,352 @@ function broadcastRelationshipProfile(profile) {
   for (const win of [petWindow, settingsWindow, composerWindow, chatWindow, bubbleWindow, codeWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:relationship-updated", profile);
   }
+}
+
+function broadcastLifeState(state) {
+  for (const win of [petWindow, settingsWindow, chatWindow, bubbleWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:life-state-updated", state);
+  }
+}
+
+async function broadcastSchedules() {
+  const items = await listSchedules(app.getPath("userData"));
+  for (const win of [settingsWindow, chatWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:schedules-updated", items);
+  }
+  return items;
+}
+
+async function syncWindowsScheduleTasks() {
+  if (process.platform !== "win32") return [];
+  const baseDir = app.getPath("userData");
+  const items = await listSchedules(baseDir, { includeHistory: true });
+  const launchSpecFor = (id) => buildScheduledLaunchSpec({
+    executablePath: process.execPath,
+    appPath: app.getAppPath(),
+    isPackaged: app.isPackaged,
+    scheduleId: id
+  });
+  const results = [];
+
+  for (const item of items) {
+    const windowsState = item.integration?.windows || {};
+    const shouldRegister = item.status === "scheduled" && new Date(item.dueAt) > new Date();
+    if (shouldRegister) {
+      if (windowsState.status === "registered" && windowsState.dueAt === item.dueAt) continue;
+      const result = await registerWindowsScheduleTask(item, launchSpecFor(item.id));
+      await updateScheduleIntegration(baseDir, item.id, {
+        windows: {
+          status: result.ok ? "registered" : "failed",
+          taskName: result.taskName || "",
+          dueAt: item.dueAt,
+          error: result.error || ""
+        }
+      });
+      results.push({ id: item.id, ...result });
+      continue;
+    }
+
+    if (windowsState.status === "registered") {
+      const result = await unregisterWindowsScheduleTask(item.id);
+      await updateScheduleIntegration(baseDir, item.id, {
+        windows: { ...windowsState, status: result.ok ? "removed" : "remove_failed", error: result.error || "" }
+      });
+      results.push({ id: item.id, ...result });
+    }
+  }
+  return results;
+}
+
+async function syncScheduleIntegrations() {
+  return syncWindowsScheduleTasks();
+}
+
+function publishProactiveEvent(event) {
+  chatState = {
+    ...chatState,
+    messages: [...chatState.messages, { role: "assistant", content: event.message }].slice(-80),
+    lastReplyMeta: {
+      responseMode: "local_tool",
+      usedKnowledge: false,
+      knowledgeCount: 0,
+      knowledgeFiles: [],
+      fallbackReason: "",
+      localTool: `proactive_${event.kind}`,
+      model: "local-life-engine",
+      sourceLabel: "Vivi 主动陪伴"
+    }
+  };
+  broadcastChatState();
+  broadcastMoodUpdate({ phase: "final", mood: event.mood, reply: event.message });
+
+  if (petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
+    wakeBubbleWindow();
+  }
+
+  if (currentAgentConfig.proactive?.systemNotifications !== false && Notification.isSupported()) {
+    const notification = new Notification({
+      title: currentAgentConfig.personaName || "Vivi",
+      body: event.message,
+      silent: false
+    });
+    notification.on("click", () => showPetWindow());
+    notification.show();
+  }
+}
+
+async function publishTodayAgendaOnStartup() {
+  const items = (await listSchedulesForDay(app.getPath("userData")))
+    .filter((item) => item.status === "scheduled")
+    .sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
+  if (!items.length) return;
+  const lines = items.slice(0, 5).map((item) => {
+    const time = new Date(item.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+    return `${time} ${item.title}`;
+  });
+  const remaining = items.length > 5 ? `，另外还有 ${items.length - 5} 项` : "";
+  publishProactiveEvent({
+    kind: "today_agenda",
+    message: `今天有 ${items.length} 项安排：${lines.join("；")}${remaining}。我会按时通过 Windows 通知提醒你。`,
+    mood: "happy"
+  });
+}
+
+async function tickProactiveLife() {
+  if (proactiveTickRunning || !app.isReady()) return;
+  proactiveTickRunning = true;
+  try {
+    const now = new Date();
+    const previous = currentLifeState ?? await loadLifeState(app.getPath("userData"), now);
+    const companion = await getFollowUpCandidate(app.getPath("userData"), now);
+    const relationship = await loadRelationshipProfile(app.getPath("userData"));
+    const result = evaluateLifeTick(previous, currentAgentConfig.proactive, {
+      now,
+      idleSeconds: powerMonitor.getSystemIdleTime(),
+      interruptionScore: companion.store.feedback.interruptionScore,
+      followUpCandidate: companion.candidate,
+      relationshipStage: relationship.affection.stage
+    });
+    currentLifeState = await saveLifeState(app.getPath("userData"), result.state);
+    broadcastLifeState(currentLifeState);
+    for (const event of result.events) {
+      publishProactiveEvent(event);
+      if (event.kind === "commitment_followup" && companion.candidate) {
+        await markCommitmentFollowedUp(app.getPath("userData"), companion.candidate.id, now);
+      }
+    }
+  } catch (error) {
+    console.error("[proactive] life tick failed:", error);
+  } finally {
+    proactiveTickRunning = false;
+  }
+}
+
+function startProactiveLifeEngine() {
+  if (proactiveTimer) return;
+  void tickProactiveLife();
+  proactiveTimer = setInterval(() => { void tickProactiveLife(); }, 30_000);
+}
+
+function stopProactiveLifeEngine() {
+  if (proactiveTimer) clearInterval(proactiveTimer);
+  proactiveTimer = null;
+}
+
+async function tickSchedules() {
+  if (scheduleTickRunning || !app.isReady()) return;
+  scheduleTickRunning = true;
+  try {
+    const due = await processDueSchedules(app.getPath("userData"));
+    for (const item of due) {
+      if (item.type === "reminder") {
+        publishProactiveEvent({
+          kind: "reminder",
+          message: `提醒时间到了：${item.message}`,
+          mood: "surprised"
+        });
+        continue;
+      }
+
+      try {
+        await executeWindowsPowerAction(item.action);
+        publishProactiveEvent({
+          kind: `power_${item.action}`,
+          message: `定时${item.action === "restart" ? "重启" : "关机"}将在 60 秒后执行。需要取消的话，请马上说“取消定时${item.action === "restart" ? "重启" : "关机"}”。`,
+          mood: "surprised"
+        });
+        setTimeout(() => { void markPowerResult(app.getPath("userData"), item.id, true).then(broadcastSchedules); }, 65_000);
+      } catch (error) {
+        await markPowerResult(app.getPath("userData"), item.id, false, error.message);
+        publishProactiveEvent({ kind: "power_failed", message: `定时电源操作没有执行成功：${error.message}`, mood: "sad" });
+      }
+    }
+    if (due.length) {
+      await syncScheduleIntegrations();
+      await broadcastSchedules();
+    }
+  } catch (error) {
+    console.error("[schedule] tick failed:", error);
+  } finally {
+    scheduleTickRunning = false;
+  }
+}
+
+function startScheduleEngine() {
+  if (scheduleTimer) return;
+  scheduleTimer = setInterval(() => { void tickSchedules(); }, 10_000);
+}
+
+function stopScheduleEngine() {
+  if (scheduleTimer) clearInterval(scheduleTimer);
+  scheduleTimer = null;
+}
+
+async function tickInterestSandbox() {
+  if (interestTickRunning || currentInterestActivity || agentTaskRunning || scheduleTickRunning || proactiveTickRunning || !app.isReady()) return;
+  interestTickRunning = true;
+  try {
+    const settings = normalizeInterestConfig(currentAgentConfig.interests);
+    if (!settings.enabled) return;
+    const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"));
+    const diaryDue = Boolean(snapshot.session?.diaryDueAt)
+      && new Date(snapshot.session.diaryDueAt).getTime() <= Date.now()
+      && !snapshot.today.diaryWritten;
+    const idleEnough = powerMonitor.getSystemIdleTime() >= settings.idleMinutes * 60;
+    if (!diaryDue && !idleEnough) return;
+    const completedAfterLaunch = Boolean(snapshot.session?.lastTaskCompletedAt)
+      && new Date(snapshot.session.lastTaskCompletedAt) >= new Date(snapshot.session.launchedAt);
+    const pendingType = !diaryDue && idleEnough ? snapshot.session?.pendingActivity : null;
+    const decision = selectInterestActivity(settings, snapshot, new Date(), {
+      manualType: pendingType || undefined,
+      automaticDiaryDue: diaryDue,
+      hasCompletedOwnerTask: completedAfterLaunch
+    });
+    if (!decision.allowed) return;
+    await executeInterestActivity(decision.type, {
+      manual: Boolean(pendingType),
+      automaticDiaryDue: diaryDue,
+      hasCompletedOwnerTask: completedAfterLaunch,
+      localOnly: decision.localOnly
+    });
+  } catch (error) {
+    console.error("[interest-sandbox] tick failed:", error);
+  } finally {
+    interestTickRunning = false;
+  }
+}
+
+function interestStatusLabel(type) {
+  return type === "diary" ? "整理今天的日记" : type === "drawing" ? "在笔记本上写写画画" : "制作并试玩离线小游戏";
+}
+
+function publishInterestInteraction(message, mood = "thinking", userText = "") {
+  const interactionMessages = userText ? [{ role: "user", content: userText }, { role: "assistant", content: message }] : [{ role: "assistant", content: message }];
+  chatState = {
+    ...chatState,
+    messages: [...chatState.messages, ...interactionMessages],
+    lastReplyMeta: {
+      responseMode: "local_tool", usedKnowledge: false, knowledgeCount: 0, knowledgeFiles: [],
+      fallbackReason: "", model: "local-interest-state", detectedMood: mood, sourceLabel: "私密空间创作状态"
+    }
+  };
+  broadcastChatState();
+  wakeBubbleWindow();
+  broadcastMoodUpdate({ phase: "final", mood, reply: message });
+  if (currentInterestActivity) setInterestExpression(currentInterestActivity.type);
+  return chatState;
+}
+
+function broadcastInterestState() {
+  const payload = currentInterestActivity
+    ? { status: "working", type: currentInterestActivity.type, label: interestStatusLabel(currentInterestActivity.type), startedAt: currentInterestActivity.startedAt }
+    : { status: "idle", type: null, label: "当前没有进行创作", startedAt: null };
+  for (const win of [petWindow, settingsWindow, composerWindow, chatWindow, bubbleWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send("agent:interest-state-updated", payload);
+  }
+  return payload;
+}
+
+function setInterestExpression(type) {
+  activeInterestExpressions = type === "mini_game"
+    ? new Set(["expression27"])
+    : type === "diary" || type === "drawing"
+      ? new Set(["expression25", "expression26"])
+      : new Set();
+  broadcastActiveExpressions();
+}
+
+async function executeInterestActivity(type, options = {}) {
+  if (agentTaskRunning || scheduleTickRunning) throw new Error("当前还有主人交代的任务正在执行，请稍后再开始创作。");
+  if (currentInterestActivity) throw new Error("Vivi 正在进行另一项创作。");
+  const controller = new AbortController();
+  currentInterestActivity = { type, startedAt: new Date().toISOString(), controller };
+  broadcastInterestState();
+  broadcastMoodUpdate({ phase: "final", mood: "thinking", reply: `我正在${interestStatusLabel(type)}。` });
+  setInterestExpression(type);
+  try {
+    const result = await runInterestActivity(app.getPath("userData"), currentAgentConfig, type, {
+      ...options,
+      signal: controller.signal
+    });
+    await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
+    if (type !== "diary") {
+      publishProactiveEvent({
+        kind: "interest_creation",
+        message: `${currentAgentConfig.personaName || "Vivi"} 在私密空间里${result.activity.action === "updated" ? "更新" : "完成"}了《${result.activity.title}》。你有空时可以去活动记录里看看。`,
+        mood: "happy"
+      });
+    }
+    const settings = normalizeInterestConfig(currentAgentConfig.interests);
+    if (type !== "diary" && settings.permissionLevel === "preview" && settings.autoOpenPreview && isSafeInterestArtifact(app.getPath("userData"), result.activity.artifactPath)) {
+      await shell.openPath(result.activity.artifactPath);
+    }
+    return result;
+  } catch (error) {
+    if (controller.signal.aborted || error?.name === "AbortError") {
+      await updateInterestSession(app.getPath("userData"), { pendingActivity: type });
+    }
+    throw error;
+  } finally {
+    currentInterestActivity = null;
+    setInterestExpression(null);
+    broadcastInterestState();
+  }
+}
+
+async function tryHandleDiaryChat(message) {
+  const intent = classifyDiaryRequest(message);
+  if (!intent) return null;
+  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"));
+  const profile = await loadRelationshipProfile(app.getPath("userData"));
+  const diary = snapshot.activities.find((item) => item.type === "diary" && item.day === snapshot.today.date && item.status === "completed" && item.artifactPath);
+  const written = Boolean(diary || snapshot.today.diaryWritten);
+
+  if (intent === "status") {
+    return publishInterestInteraction(diaryStatusReply({
+      written,
+      profile,
+      personaName: currentAgentConfig.personaName || "Vivi"
+    }), profile.emotion.suggestedMood || "idle", message);
+  }
+
+  const decision = diaryOpenReply({ written, profile });
+  if (decision.allowed && diary && isSafeInterestArtifact(app.getPath("userData"), diary.artifactPath)) {
+    const error = await shell.openPath(path.resolve(diary.artifactPath));
+    if (error) return publishInterestInteraction(`我想打开，但 Windows 没有成功：${error}`, "sad", message);
+  }
+  return publishInterestInteraction(decision.reply, profile.emotion.suggestedMood || "idle", message);
+}
+
+function startInterestSandbox() {
+  if (interestTimer) return;
+  void initializeInterestSession(app.getPath("userData"));
+  interestTimer = setInterval(() => { void tickInterestSandbox(); }, 5 * 60_000);
+}
+
+function stopInterestSandbox() {
+  if (interestTimer) clearInterval(interestTimer);
+  interestTimer = null;
 }
 
 function broadcastLive2DModels() {
@@ -935,13 +1664,30 @@ function deliverCursorPosition(win, point) {
 }
 
 function startGlobalCursorTracking() {
-  if (cursorTrackingTimer) return;
+  if (cursorTrackingTimer || !shouldTrackGlobalCursor()) return;
   cursorTrackingTimer = setInterval(() => {
-    if (currentAgentConfig.appearance?.mouseFollow === false) return;
+    if (!shouldTrackGlobalCursor()) {
+      syncGlobalCursorTracking();
+      return;
+    }
     const point = screen.getCursorScreenPoint();
     deliverCursorPosition(petWindow, point);
     deliverCursorPosition(chatWindow, point);
   }, 33);
+}
+
+function isVisibleTrackingSurface(win) {
+  return Boolean(win && !win.isDestroyed() && win.isVisible() && !win.isMinimized());
+}
+
+function shouldTrackGlobalCursor() {
+  return currentAgentConfig.appearance?.mouseFollow !== false
+    && (isVisibleTrackingSurface(petWindow) || isVisibleTrackingSurface(chatWindow));
+}
+
+function syncGlobalCursorTracking() {
+  if (shouldTrackGlobalCursor()) startGlobalCursorTracking();
+  else stopGlobalCursorTracking();
 }
 
 function stopGlobalCursorTracking() {
@@ -967,15 +1713,20 @@ async function updateMouseFollow(enabled) {
     appearance: { ...currentAgentConfig.appearance, mouseFollow: Boolean(enabled) }
   });
   cursorDeliveryState.clear();
+  syncGlobalCursorTracking();
   await saveConfig(app.getPath("userData"), currentAgentConfig);
   broadcastConfigUpdated(currentAgentConfig);
   return currentAgentConfig.appearance.mouseFollow;
 }
 
 function broadcastActiveExpressions() {
-  const expressions = [...activeManualExpressions];
+  const expressions = getActiveExpressions();
   petWindow?.webContents.send("agent:expressions-updated", expressions);
   expressionWindow?.webContents.send("agent:expressions-updated", expressions);
+}
+
+function getActiveExpressions() {
+  return [...new Set([...activeManualExpressions, ...activeInterestExpressions])];
 }
 
 function updateBubbleWindowLayout() {
@@ -1059,33 +1810,7 @@ function buildPetContextMenu() {
     },
     {
       label: "设置",
-      submenu: [
-        {
-          label: "鼠标注视跟随",
-          type: "checkbox",
-          checked: currentAgentConfig.appearance?.mouseFollow !== false,
-          click: (menuItem) => { void updateMouseFollow(menuItem.checked); }
-        },
-        { type: "separator" },
-        {
-          label: "人设与模型",
-          click: () => {
-            openSettingsWindow();
-            settingsWindow?.webContents.send("agent:menu-action", "open-settings-general");
-          }
-        },
-        {
-          label: "DeepSeek 与记忆",
-          click: () => {
-            openSettingsWindow();
-            settingsWindow?.webContents.send("agent:menu-action", "open-settings-llm");
-          }
-        },
-        {
-          label: "DeepSeek 平台",
-          click: () => shell.openExternal("https://platform.deepseek.com/")
-        }
-      ]
+      click: () => openSettingsWindow()
     },
     {
       label: "窗口",
@@ -1114,15 +1839,15 @@ function buildPetContextMenu() {
         {
           label: "重置位置",
           click: () => petWindow?.center()
-        },
-        {
-          label: "打开设置窗口",
-          click: () => openSettingsWindow()
         }
       ]
     },
     {
       type: "separator"
+    },
+    {
+      label: "隐藏桌宠",
+      click: () => hidePetWindow()
     },
     {
       label: "退出",
@@ -1135,17 +1860,69 @@ function buildPetContextMenu() {
 }
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
   await ensureDataFiles(app.getPath("userData"));
   session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
+    if (permission === "geolocation") {
+      return currentAgentConfig.interests?.enabled === true
+        && currentAgentConfig.interests?.autoLocation !== false
+        && currentAgentConfig.interests?.networkAccess !== "off";
+    }
     return permission === "media" && details.mediaType !== "video";
   });
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission === "geolocation") {
+      callback(currentAgentConfig.interests?.enabled === true
+        && currentAgentConfig.interests?.autoLocation !== false
+        && currentAgentConfig.interests?.networkAccess !== "off");
+      return;
+    }
     const audioOnly = permission === "media" && !details.mediaTypes?.includes("video");
     callback(audioOnly);
   });
   const startupConfig = await loadConfig(app.getPath("userData"));
   currentAgentConfig = mergeAgentConfig(startupConfig);
+  await saveConfig(app.getPath("userData"), currentAgentConfig);
+  await fs.rm(path.join(app.getPath("userData"), "agent-data", "outlook-token.bin"), { force: true }).catch(() => null);
   currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
+
+  createStartupWindow();
+  publishStartupStatus({ phase: "booting", progress: 12, title: "正在读取配置", detail: "人物设定与本地权限已载入。" });
+  if (!isBackgroundScheduleLaunch && currentAgentConfig.voice?.enabled && currentAgentConfig.voice?.provider === "gpt_sovits" && currentAgentConfig.voice?.gptSovitsAutoStart !== false) {
+    publishStartupStatus({ phase: "voice", progress: 22, title: "正在准备声音", detail: "启动 GPT-SoVITS 本地语音服务，首次加载可能需要一会儿。" });
+    try {
+      const voiceRuntime = await ensureGptSovitsService(currentAgentConfig.voice.gptSovitsBaseUrl);
+      publishStartupStatus({
+        phase: "voice",
+        progress: 50,
+        title: "声音已经准备好",
+        detail: voiceRuntime.started ? "本地语音服务已同步启动。" : "本地语音服务正在运行。"
+      });
+    } catch (error) {
+      const warning = error instanceof Error ? error.message : String(error);
+      publishStartupStatus({
+        phase: "warning",
+        progress: 50,
+        title: "语音暂时不可用",
+        detail: "将先以文字模式启动，稍后使用语音时会再次尝试恢复。",
+        warning
+      });
+    }
+  } else {
+    const manualGptSovits = currentAgentConfig.voice?.enabled
+      && currentAgentConfig.voice?.provider === "gpt_sovits"
+      && currentAgentConfig.voice?.gptSovitsAutoStart === false;
+    publishStartupStatus({
+      phase: "voice",
+      progress: 50,
+      title: "语音配置已确认",
+      detail: manualGptSovits
+        ? "GPT-SoVITS 设置为手动启动，本次跳过模型加载。"
+        : currentAgentConfig.voice?.enabled ? "当前语音方案不需要启动本地服务。" : "自动朗读目前未开启。"
+    });
+  }
+
+  publishStartupStatus({ phase: "models", progress: 58, title: "正在检查形象资源", detail: "扫描 Live2D 模型与表情配置…" });
   await refreshLive2DModels({ broadcast: false });
   protocol.handle("vivi-asset", async (request) => {
     try {
@@ -1186,11 +1963,25 @@ app.whenReady().then(async () => {
     }
   });
   startLive2DModelWatcher();
+  publishStartupStatus({ phase: "data", progress: 72, title: "正在整理本地状态", detail: "恢复工作区、日程与陪伴记忆…" });
   await restoreCodeWorkspace();
   createPetWindow();
   createBubbleWindow();
+  createSystemTray();
   updateBubbleWindowLayout();
-  startGlobalCursorTracking();
+  syncGlobalCursorTracking();
+  currentLifeState = await loadLifeState(app.getPath("userData"));
+  startProactiveLifeEngine();
+  await syncScheduleIntegrations();
+  await tickSchedules();
+  if (!isBackgroundScheduleLaunch) await publishTodayAgendaOnStartup();
+  startScheduleEngine();
+  startInterestSandbox();
+  if (!isBackgroundScheduleLaunch) {
+    publishStartupStatus({ phase: "renderer", progress: 90, title: "正在加载 Vivi", detail: "等待 Live2D 模型完成渲染…" });
+    if (startupRendererModelStatus) releaseStartupToApplication(startupRendererModelStatus);
+    else startupReleaseTimer = setTimeout(() => releaseStartupToApplication("error"), 45_000);
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1202,19 +1993,34 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
+  // The tray keeps the desktop companion available in the background.
+});
+
+app.on("second-instance", (_event, argv) => {
+  if (!app.isReady()) return;
+  if (argv.includes("--vivi-background-schedule")) {
+    void tickSchedules();
+    return;
   }
+  showPetWindow();
 });
 
 ipcMain.handle("agent:get-bootstrap", async () => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  const baseDir = app.getPath("userData");
+  const storedConfig = mergeAgentConfig(await loadConfig(baseDir));
+  const activePersonaCard = await getActivePersonaCard(baseDir, storedConfig);
+  const config = applyPersonaCardToConfig(storedConfig, activePersonaCard);
   currentAgentConfig = config;
-  const knowledgeFiles = await listKnowledgeFiles(app.getPath("userData"));
-  const relationshipProfile = await loadRelationshipProfile(app.getPath("userData"));
+  const knowledgeFiles = await listKnowledgeFiles(baseDir);
+  const relationshipProfile = await loadRelationshipProfile(baseDir);
+  const personaCards = await listPersonaCards(baseDir);
+  const memoryDatabase = await getMemoryDatabaseStats(baseDir);
 
   return {
     config,
+    activePersonaCard,
+    personaCards,
+    memoryDatabase,
     relationshipProfile,
     live2dModels: live2dModelOptions,
     knowledgeFiles,
@@ -1225,13 +2031,15 @@ ipcMain.handle("agent:get-bootstrap", async () => {
     abilities: [
       { id: "chat", name: "自然对话", status: "ready", detail: "已接入人格设定和本地知识检索。" },
       { id: "relationship", name: "情绪与好感", status: "ready", detail: "本地计算情绪变化和关系阶段，并持续影响回复语气与 Live2D 神态。" },
+      { id: "proactive", name: "主动陪伴", status: "ready", detail: "根据连续工作、空闲状态、安静时段和每日上限提供本地健康关怀，并管理 Vivi 的休息节奏。" },
+      { id: "schedules", name: "提醒与电源计划", status: "ready", detail: "支持本地提醒，以及经二次确认的定时关机和重启；所有计划均可查看和取消。" },
       { id: "memory", name: "本地记忆/RAG", status: "ready", detail: "从本地知识库检索相关片段参与回答。" },
       { id: "resource", name: "资源查看", status: "ready", detail: "可查看 CPU、内存、运行进程和当前前台应用数量。" },
       { id: "launcher", name: "应用启动", status: "ready", detail: "已接入本地执行层，可直接启动常见应用，也支持传入本地 exe 路径。" },
       { id: "code-agent", name: "代码代理", status: "ready", detail: "可在当前工作区搜索和读取代码；文件修改与开发命令必须经用户明确确认后执行。" },
       { id: "browser", name: "浏览器搜索", status: "ready", detail: "可在系统默认浏览器中打开网址，并使用 Bing、Google 或百度搜索。" },
       { id: "vscode", name: "VS Code 适配", status: "ready", detail: "可用 VS Code 打开本地文件或工作区，并定位到指定文件行。" },
-      { id: "filesystem", name: "文件管理", status: "ready", detail: "当前支持打开文件/文件夹、列目录、读取文本、创建文件夹/文本文件、追加内容与显式删除。" },
+      { id: "filesystem", name: "安全文件管家", status: "ready", detail: "支持只读扫描、整理预览、按类型/日期归档、隔离、操作日志与撤销；删除仅进入 Windows 回收站。" },
       {
         id: "messenger",
         name: "消息联动",
@@ -1242,18 +2050,66 @@ ipcMain.handle("agent:get-bootstrap", async () => {
   };
 });
 
+ipcMain.handle("agent:get-startup-status", async () => startupStatus);
+
+ipcMain.on("agent:renderer-ready", (_event, payload) => {
+  if (payload?.view !== "pet") return;
+  startupRendererModelStatus = payload?.modelStatus === "error" ? "error" : "ready";
+  if (startupStatus.phase === "renderer") releaseStartupToApplication(startupRendererModelStatus);
+});
+
 ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   const merged = mergeAgentConfig(nextConfig);
   await saveConfig(app.getPath("userData"), merged);
   if (currentAgentConfig.appearance?.mouseFollow !== merged.appearance?.mouseFollow) {
     cursorDeliveryState.clear();
   }
-  currentAgentConfig = merged;
-  currentAppearanceTheme = merged.appearance?.theme === "dark" ? "dark" : "light";
+  const activePersonaCard = await getActivePersonaCard(app.getPath("userData"), merged);
+  currentAgentConfig = applyPersonaCardToConfig(merged, activePersonaCard);
+  syncGlobalCursorTracking();
+  currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
   updateTitleBarOverlays();
-  broadcastConfigUpdated(merged);
-  return merged;
+  broadcastConfigUpdated(currentAgentConfig);
+  await syncScheduleIntegrations();
+  await broadcastSchedules();
+  return currentAgentConfig;
 });
+
+async function refreshRuntimePersona(card = null) {
+  const baseDir = app.getPath("userData");
+  const activeCard = card || await getActivePersonaCard(baseDir, currentAgentConfig);
+  currentAgentConfig = applyPersonaCardToConfig(mergeAgentConfig(await loadConfig(baseDir)), activeCard);
+  broadcastConfigUpdated(currentAgentConfig);
+  return {
+    card: activeCard,
+    cards: await listPersonaCards(baseDir),
+    config: currentAgentConfig
+  };
+}
+
+ipcMain.handle("agent:list-persona-cards", async () => listPersonaCards(app.getPath("userData")));
+ipcMain.handle("agent:create-persona-card", async (_event, input) => {
+  const card = await createPersonaCard(app.getPath("userData"), input);
+  return { card, cards: await listPersonaCards(app.getPath("userData")) };
+});
+ipcMain.handle("agent:update-persona-card", async (_event, cardId, input) => {
+  const card = await updatePersonaCard(app.getPath("userData"), cardId, input);
+  const active = (await listPersonaCards(app.getPath("userData"))).find((item) => item.id === cardId)?.isActive;
+  return active ? refreshRuntimePersona(card) : { card, cards: await listPersonaCards(app.getPath("userData")) };
+});
+ipcMain.handle("agent:activate-persona-card", async (_event, cardId) => {
+  const card = await activatePersonaCard(app.getPath("userData"), cardId);
+  return refreshRuntimePersona(card);
+});
+ipcMain.handle("agent:archive-persona-card", async (_event, cardId) => {
+  await archivePersonaCard(app.getPath("userData"), cardId);
+  return listPersonaCards(app.getPath("userData"));
+});
+ipcMain.handle("agent:restore-persona-card", async (_event, cardId) => {
+  await restorePersonaCard(app.getPath("userData"), cardId);
+  return listPersonaCards(app.getPath("userData"));
+});
+ipcMain.handle("agent:get-memory-database-stats", async () => getMemoryDatabaseStats(app.getPath("userData")));
 
 ipcMain.handle("agent:test-astrbot", async (_event, astrbotOverride) => {
   const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
@@ -1306,9 +2162,52 @@ ipcMain.handle("agent:list-elevenlabs-voices", async (_event, voiceOverride) => 
 });
 
 ipcMain.handle("agent:synthesize-speech", async (_event, payload) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
+  const baseDir = app.getPath("userData");
+  const config = mergeAgentConfig(await loadConfig(baseDir));
+  const activePersonaCard = await getActivePersonaCard(baseDir, config);
   const voiceConfig = { ...config.voice, ...(payload?.voiceConfig ?? {}) };
+  if (voiceConfig.provider === "local" && activePersonaCard?.payload?.voicePackId) {
+    const [packId, speakerId] = activePersonaCard.payload.voicePackId.split(":");
+    voiceConfig.localPackId = packId || voiceConfig.localPackId;
+    if (speakerId !== undefined && Number.isFinite(Number(speakerId))) voiceConfig.localSpeakerId = Number(speakerId);
+  }
+  if (voiceConfig.provider === "gpt_sovits" && activePersonaCard?.payload?.voicePackId?.startsWith("gpt-sovits:")) {
+    voiceConfig.gptSovitsProfileId = activePersonaCard.payload.voicePackId.slice("gpt-sovits:".length) || voiceConfig.gptSovitsProfileId;
+  }
   return synthesizeSpeechWithCache(voiceConfig, payload?.text, Boolean(payload?.asmr));
+});
+
+ipcMain.on("agent:speech-signal", (_event, signal) => {
+  broadcastSpeechSignal(signal);
+});
+
+ipcMain.handle("agent:list-local-tts-packs", async () => listLocalTtsPacks(app.getPath("userData")));
+ipcMain.handle("agent:install-local-tts-pack", async (_event, packId) => installLocalTtsPack(
+  app.getPath("userData"),
+  packId,
+  (progress) => broadcastLocalTtsProgress(progress)
+));
+ipcMain.handle("agent:open-local-tts-folder", async () => {
+  const target = path.join(app.getPath("userData"), "agent-data", "tts-models");
+  await fs.mkdir(target, { recursive: true });
+  await shell.openPath(target);
+  return target;
+});
+ipcMain.handle("agent:list-gpt-sovits-profiles", async () => listGptSovitsProfiles(app.getPath("userData")));
+ipcMain.handle("agent:install-gpt-sovits-profile", async (_event, profileId) => installGptSovitsProfile(
+  app.getPath("userData"), profileId, (progress) => broadcastGptSovitsProgress(progress)
+));
+
+ipcMain.handle("agent:get-gpt-sovits-runtime-status", async (_event, baseUrl) => ({
+  ready: await isGptSovitsServiceReady(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl)
+}));
+
+ipcMain.handle("agent:start-gpt-sovits-runtime", async (_event, baseUrl) => {
+  return ensureGptSovitsService(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl);
+});
+
+ipcMain.handle("agent:stop-gpt-sovits-runtime", async (_event, baseUrl) => {
+  return stopGptSovitsService(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl);
 });
 
 ipcMain.handle("agent:get-local-stt-status", async (_event, modelId) => {
@@ -1337,6 +2236,24 @@ ipcMain.handle("agent:open-local-stt-folder", async () => {
 });
 
 ipcMain.handle("agent:chat", async (_event, payload) => {
+  if (currentInterestActivity) {
+    const text = String(payload?.message || "").trim();
+    if (/^(?:终止|停止|取消)(?:创作|当前创作|这个任务|吧)?$/.test(text)) {
+      const label = interestStatusLabel(currentInterestActivity.type);
+      currentInterestActivity.controller.abort(new Error("用户终止创作"));
+      return publishInterestInteraction(`好，我先停下${label}。这项内容会保留为待继续，等你没有其他事务且电脑再次空闲后，我会重新接着完成。`, "idle", text);
+    }
+    if (/^(?:等待|继续|等你完成|你继续|继续完成)(?:吧)?$/.test(text)) {
+      return publishInterestInteraction(`好，我继续${interestStatusLabel(currentInterestActivity.type)}，完成后再告诉你。`, "thinking", text);
+    }
+    return publishInterestInteraction(`我现在正在${interestStatusLabel(currentInterestActivity.type)}。你希望我“终止创作”，还是“等你完成”？`, "thinking", text);
+  }
+  const diaryReply = await tryHandleDiaryChat(payload.message);
+  if (diaryReply) return diaryReply;
+  if (String(chatState.lastReplyMeta?.localTool || "").startsWith("proactive_")) {
+    const feedback = detectProactiveFeedback(payload.message);
+    if (feedback) await recordProactiveFeedback(app.getPath("userData"), feedback);
+  }
   const userMessage = { role: "user", content: payload.message };
   const route = payload.codeContext ? { type: "workspace_code" } : resolveAgentRoute(payload.message);
   const isAction = route.type !== "chat";
@@ -1357,6 +2274,7 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
+  wakeBubbleWindow();
 
   // Stage 1: react locally before any network/LLM work starts. This gives the
   // character an immediate, deliberately subtle acknowledgement of the user.
@@ -1366,22 +2284,29 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     ...fastReaction
   });
 
-  const result = await buildAgentReply(app.getPath("userData"), {
-    ...payload,
-    stream: true,
-    onDelta: (partialReply) => {
-      const nextMessages = [...chatState.messages];
-      nextMessages[nextMessages.length - 1] = {
-        role: "assistant",
-        content: partialReply
-      };
-      chatState = {
-        ...chatState,
-        messages: nextMessages
-      };
-      broadcastChatState();
-    }
-  });
+  let result;
+  agentTaskRunning = true;
+  try {
+    result = await buildAgentReply(app.getPath("userData"), {
+      ...payload,
+      stream: true,
+      onDelta: (partialReply) => {
+        const nextMessages = [...chatState.messages];
+        nextMessages[nextMessages.length - 1] = {
+          role: "assistant",
+          content: partialReply
+        };
+        chatState = {
+          ...chatState,
+          messages: nextMessages
+        };
+        broadcastChatState();
+      }
+    });
+    await updateInterestSession(app.getPath("userData"), { lastTaskCompletedAt: new Date().toISOString() });
+  } finally {
+    agentTaskRunning = false;
+  }
 
   chatState = {
     messages: [
@@ -1395,6 +2320,10 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
+  if (route.type === "schedule") {
+    await syncScheduleIntegrations();
+    await broadcastSchedules();
+  }
 
   if (result.meta?.relationship) {
     broadcastRelationshipProfile(result.meta.relationship);
@@ -1418,6 +2347,15 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
 });
 
 ipcMain.handle("agent:pet-touch", async () => {
+  if (currentInterestActivity) {
+    return {
+      ok: true,
+      busy: true,
+      interestBusy: true,
+      reply: publishInterestInteraction(`我正在${interestStatusLabel(currentInterestActivity.type)}。要我“终止创作”，还是等我完成？`, "thinking").messages.at(-1).content,
+      mood: "thinking"
+    };
+  }
   if (/^(生成中|正在执行|正在查询)/.test(chatState.lastReplyMeta?.sourceLabel || "")) {
     return { ok: false, busy: true };
   }
@@ -1463,10 +2401,85 @@ ipcMain.handle("agent:pet-touch", async () => {
   return { ok: true, ...reaction };
 });
 
-app.on("before-quit", () => {
-  stopGlobalCursorTracking();
-  modelDirectoryWatcher?.close();
-  modelDirectoryWatcher = null;
+app.on("before-quit", (event) => {
+  app.isQuiting = true;
+  if (!shutdownCleanupDone) {
+    shutdownCleanupDone = true;
+    stopProactiveLifeEngine();
+    stopScheduleEngine();
+    stopInterestSandbox();
+    stopGlobalCursorTracking();
+    modelDirectoryWatcher?.close();
+    modelDirectoryWatcher = null;
+    tray?.destroy();
+    tray = null;
+  }
+  if (gptSovitsShutdownStarted) return;
+  event.preventDefault();
+  gptSovitsShutdownStarted = true;
+  void stopGptSovitsService(currentAgentConfig.voice?.gptSovitsBaseUrl)
+    .catch((error) => console.warn("[voice] GPT-SoVITS shutdown failed:", error))
+    .finally(() => app.quit());
+});
+
+ipcMain.handle("agent:get-auto-launch", () => isAutoLaunchEnabled());
+
+ipcMain.handle("agent:set-auto-launch", (_event, enabled) => setAutoLaunchEnabled(enabled));
+
+ipcMain.handle("agent:get-life-state", async () => {
+  currentLifeState = currentLifeState ?? await loadLifeState(app.getPath("userData"));
+  return currentLifeState;
+});
+
+ipcMain.handle("agent:get-companion-memory", async () => loadCompanionMemory(app.getPath("userData")));
+
+ipcMain.handle("agent:get-interest-sandbox", async () => getInterestSandboxSnapshot(app.getPath("userData")));
+
+ipcMain.handle("agent:run-interest-activity", async (_event, type) => {
+  return executeInterestActivity(type, { manual: true });
+});
+
+ipcMain.handle("agent:get-interest-state", async () => broadcastInterestState());
+
+ipcMain.handle("agent:update-interest-location", async (_event, location) => {
+  const label = await resolveLocationLabel(location);
+  await saveInterestLocation(app.getPath("userData"), { ...location, ...label });
+  return getInterestSandboxSnapshot(app.getPath("userData"));
+});
+
+ipcMain.handle("agent:open-interest-sandbox", async () => {
+  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"));
+  await shell.openPath(snapshot.root);
+  return snapshot.root;
+});
+
+ipcMain.handle("agent:open-interest-artifact", async (_event, artifactPath) => {
+  if (!isSafeInterestArtifact(app.getPath("userData"), artifactPath)) throw new Error("只能打开兴趣沙盒内的作品。");
+  const error = await shell.openPath(path.resolve(artifactPath));
+  if (error) throw new Error(error);
+  return true;
+});
+
+ipcMain.handle("agent:pause-proactive-today", async () => {
+  currentLifeState = await pauseProactiveForToday(app.getPath("userData"));
+  broadcastLifeState(currentLifeState);
+  return currentLifeState;
+});
+
+ipcMain.handle("agent:reset-work-session", async () => {
+  currentLifeState = await resetWorkSession(app.getPath("userData"));
+  broadcastLifeState(currentLifeState);
+  return currentLifeState;
+});
+
+ipcMain.handle("agent:list-schedules", async () => listSchedules(app.getPath("userData")));
+
+ipcMain.handle("agent:cancel-schedule", async (_event, id) => {
+  const item = await cancelSchedule(app.getPath("userData"), id);
+  if (item.wasExecuting) await abortWindowsPowerAction();
+  await syncScheduleIntegrations();
+  await broadcastSchedules();
+  return item;
 });
 
 ipcMain.handle("agent:search-files", async (_event, query) => {
@@ -1501,6 +2514,16 @@ ipcMain.handle("agent:get-file-manager-snapshot", async () => {
   return getFileManagerSnapshot();
 });
 
+ipcMain.handle("agent:scan-managed-directory", async (_event, target) => scanManagedDirectory(target));
+ipcMain.handle("agent:preview-file-organization", async (_event, target, mode, quarantine) => {
+  return createOrganizationPreview(app.getPath("userData"), target, { mode, quarantine: Boolean(quarantine) });
+});
+ipcMain.handle("agent:execute-file-organization", async (_event, previewId) => {
+  return executeOrganizationPreview(app.getPath("userData"), previewId);
+});
+ipcMain.handle("agent:list-file-operations", async () => listFileOperations(app.getPath("userData")));
+ipcMain.handle("agent:undo-file-operation", async (_event, operationId) => undoFileOperation(app.getPath("userData"), operationId));
+
 ipcMain.handle("agent:open-external", async (_event, url) => {
   await shell.openExternal(url);
   return true;
@@ -1512,6 +2535,7 @@ ipcMain.handle("agent:test-deepseek", async () => {
 
 ipcMain.handle("agent:clear-memory", async () => {
   await clearConversationHistory(app.getPath("userData"));
+  await clearCompanionMemory(app.getPath("userData"));
   chatState = {
     messages: [
       {

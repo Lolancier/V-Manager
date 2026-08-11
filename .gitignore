@@ -3,6 +3,8 @@ dist
 release/
 release-fixed/
 downloads/
+third_party/GPT-SoVITS/
+references/AkaneCompanionLab/
 .DS_Store
 Thumbs.db
 .idea/

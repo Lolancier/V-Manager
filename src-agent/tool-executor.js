@@ -27,6 +27,21 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { openBrowserUrl, openInVscode, searchWeb } from "./executors/ui-automation-executor.js";
 import { requestWeChatMessage } from "./executors/wechat-executor.js";
+import {
+  createOrganizationPreview,
+  executeOrganizationPreview,
+  listFileOperations,
+  scanManagedDirectory,
+  undoFileOperation
+} from "./safe-file-manager.js";
+import {
+  cancelSchedule,
+  confirmLatestPowerDraft,
+  createPowerDraft,
+  createReminder,
+  listSchedules,
+  updateReminder
+} from "./schedule-engine.js";
 
 /**
  * Execute a tool by name and return a structured result.
@@ -91,6 +106,34 @@ export async function executeTool(name, args = {}, context = {}) {
         return await openInVscode(args.path, args.line);
       case "send_wechat_message":
         return await requestWeChatMessage(args, context);
+
+      // ---- Schedules ----
+      case "create_reminder": {
+        const item = await createReminder(baseDir, { dueAt: args.due_at, message: args.message });
+        return { ok: true, item };
+      }
+      case "list_schedules":
+        return { ok: true, items: await listSchedules(baseDir) };
+      case "update_reminder": {
+        const item = await updateReminder(baseDir, args.id, { dueAt: args.due_at, message: args.message });
+        return { ok: true, item };
+      }
+      case "cancel_schedule": {
+        const item = await cancelSchedule(baseDir, args.id);
+        return { ok: true, item };
+      }
+      case "create_power_action_draft": {
+        const item = await createPowerDraft(baseDir, { action: args.action, dueAt: args.due_at, message: args.message });
+        return { ok: true, requiresConfirmation: true, item };
+      }
+      case "confirm_power_action": {
+        const expectedText = args.action === "restart" ? "确认定时重启" : "确认定时关机";
+        if (String(context.currentUserMessage || "").trim().replace(/[！!。.]$/, "") !== expectedText) {
+          return { ok: false, requiresConfirmation: true, error: `只有用户当前消息单独为“${expectedText}”时才能确认。` };
+        }
+        const item = await confirmLatestPowerDraft(baseDir, args.action);
+        return { ok: true, item };
+      }
 
       // ---- File ----
       case "list_directory":
@@ -158,6 +201,22 @@ export async function executeTool(name, args = {}, context = {}) {
         );
         return { ok: true, reply: result?.reply || "" };
       }
+      case "scan_managed_directory":
+        return { ok: true, ...(await scanManagedDirectory(args.path, { limit: args.limit })) };
+      case "preview_file_organization": {
+        const preview = await createOrganizationPreview(baseDir, args.path, { mode: args.mode, quarantine: args.quarantine });
+        return { ok: true, preview, requiresConfirmation: true };
+      }
+      case "execute_file_organization": {
+        if (String(context.currentUserMessage || "").trim() !== "确认执行文件整理") {
+          return { ok: false, requiresConfirmation: true, error: "只有用户当前消息单独为“确认执行文件整理”时才能执行。" };
+        }
+        return { ok: true, operation: await executeOrganizationPreview(baseDir, args.preview_id) };
+      }
+      case "list_file_operations":
+        return { ok: true, operations: await listFileOperations(baseDir, args.limit) };
+      case "undo_file_operation":
+        return { ok: true, operation: await undoFileOperation(baseDir, args.operation_id) };
       case "switch_workspace": {
         const result = await executeWorkspaceIntent(
           { type: "workspace_switch", targetPath: args.path || "" },

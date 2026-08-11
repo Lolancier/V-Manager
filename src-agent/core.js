@@ -20,11 +20,24 @@ import { getSystemResourceSnapshot } from "./executors/system-executor.js";
 import { ALL_TOOLS } from "./tools.js";
 import { executeTool } from "./tool-executor.js";
 import { maybeCompressAndTrim } from "./memory-compressor.js";
+import { buildCompanionMemoryPrompt, recordConversationMemory } from "./companion-memory.js";
 import {
   buildRelationshipPrompt,
   loadRelationshipProfile,
   recordRelationshipInteraction
 } from "./relationship-engine.js";
+import { DEFAULT_INTEREST_CONFIG, normalizeInterestConfig } from "./interest-sandbox.js";
+import { deriveConversationStyle } from "./conversation-style.js";
+import {
+  appendRawConversationTurn,
+  clearRawConversationMemory,
+  initializeLocalDatabase
+} from "./local-database.js";
+import {
+  applyPersonaCardToConfig,
+  ensureDefaultPersonaCard,
+  getActivePersonaCard
+} from "./persona-cards.js";
 
 // ---- Default config ----
 
@@ -36,8 +49,8 @@ export const defaultConfig = {
   deepseek: {
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
-    model: "deepseek-chat",
-    chatModel: "deepseek-chat"
+    model: "deepseek-v4-pro",
+    chatModel: "deepseek-v4-flash"
   },
   embedding: {
     apiKey: "",
@@ -47,11 +60,21 @@ export const defaultConfig = {
   appearance: {
     theme: "light",
     live2dModel: "qianqian",
-    mouseFollow: true
+    mouseFollow: true,
+    renderFps: 30,
+    powerSaving: true
   },
   voice: {
     enabled: false,
-    provider: "elevenlabs",
+    provider: "local",
+    localPackId: "sherpa-zh-ll",
+    localSpeakerId: 0,
+    localSpeed: 1,
+    localSilenceScale: 0.2,
+    gptSovitsBaseUrl: "http://127.0.0.1:9880",
+    gptSovitsProfileId: "dania-v2-pro-plus",
+    gptSovitsSpeed: 1,
+    gptSovitsAutoStart: true,
     baseUrl: "https://api.elevenlabs.io/v1",
     apiKey: "",
     model: "eleven_v3",
@@ -81,6 +104,21 @@ export const defaultConfig = {
     enabled: true,
     showProgress: true
   },
+  proactive: {
+    enabled: true,
+    healthReminders: true,
+    lateNightCare: true,
+    systemNotifications: true,
+    workMinutes: 60,
+    reminderCooldownMinutes: 90,
+    dailyLimit: 4,
+    idleResetMinutes: 10,
+    viviRestAfterMinutes: 120,
+    lateNightHour: 23,
+    quietStart: "00:00",
+    quietEnd: "08:00"
+  },
+  interests: DEFAULT_INTEREST_CONFIG,
   memory: {
     maxMessages: 40,
     knowledgeTopK: 3
@@ -98,13 +136,27 @@ export function setActiveWorkspaceDir(nextPath) {
   return activeWorkspaceDir;
 }
 
+const LEGACY_DEEPSEEK_MODELS = {
+  "deepseek-chat": "deepseek-v4-flash",
+  "deepseek-reasoner": "deepseek-v4-pro"
+};
+
+export function normalizeDeepSeekModel(model, fallback) {
+  const value = String(model || "").trim() || fallback;
+  return LEGACY_DEEPSEEK_MODELS[value] || value;
+}
+
 function mergeConfig(rawConfig = {}) {
+  const { calendar: _removedCalendar, ...supportedConfig } = rawConfig;
+  const rawDeepSeek = rawConfig.deepseek ?? {};
   return {
     ...defaultConfig,
-    ...rawConfig,
+    ...supportedConfig,
     deepseek: {
       ...defaultConfig.deepseek,
-      ...(rawConfig.deepseek ?? {})
+      ...rawDeepSeek,
+      model: normalizeDeepSeekModel(rawDeepSeek.model, defaultConfig.deepseek.model),
+      chatModel: normalizeDeepSeekModel(rawDeepSeek.chatModel, defaultConfig.deepseek.chatModel)
     },
     embedding: {
       ...defaultConfig.embedding,
@@ -134,6 +186,11 @@ function mergeConfig(rawConfig = {}) {
       ...defaultConfig.relationship,
       ...(rawConfig.relationship ?? {})
     },
+    proactive: {
+      ...defaultConfig.proactive,
+      ...(rawConfig.proactive ?? {})
+    },
+    interests: normalizeInterestConfig(rawConfig.interests),
     memory: {
       ...defaultConfig.memory,
       ...(rawConfig.memory ?? {})
@@ -292,12 +349,21 @@ export async function ensureDataFiles(baseDir) {
   await ensureAppRegistry(baseDir);
   await ensureRagFiles(baseDir);
   await loadRelationshipProfile(baseDir);
+  await initializeLocalDatabase(baseDir);
+  await ensureDefaultPersonaCard(baseDir, await loadConfig(baseDir));
 }
 
 export async function loadConfig(baseDir) {
   const { configPath } = getPaths(baseDir);
   const raw = await fs.readFile(configPath, "utf-8");
-  return mergeConfig(JSON.parse(raw));
+  const parsed = JSON.parse(raw);
+  const merged = mergeConfig(parsed);
+  const hadLegacyModel = Object.hasOwn(LEGACY_DEEPSEEK_MODELS, parsed.deepseek?.model)
+    || Object.hasOwn(LEGACY_DEEPSEEK_MODELS, parsed.deepseek?.chatModel);
+  if (hadLegacyModel) {
+    await fs.writeFile(configPath, JSON.stringify(merged, null, 2), "utf-8");
+  }
+  return merged;
 }
 
 export async function saveConfig(baseDir, config) {
@@ -341,13 +407,17 @@ async function appendHistory(baseDir, item) {
   };
   if (item.toolCalls) record.toolCalls = item.toolCalls;
   if (item.toolResults) record.toolResults = item.toolResults;
+  if (item.personaCardId) record.personaCardId = item.personaCardId;
+  if (item.personaVersion) record.personaVersion = item.personaVersion;
   await fs.appendFile(memoryPath, `${JSON.stringify(record)}\n`, "utf-8");
+  await appendRawConversationTurn(baseDir, record);
 }
 
 export async function clearConversationHistory(baseDir) {
   const { memoryPath } = getPaths(baseDir);
   await fs.mkdir(path.dirname(memoryPath), { recursive: true });
   await fs.writeFile(memoryPath, "", "utf-8");
+  await clearRawConversationMemory(baseDir);
   return true;
 }
 
@@ -396,7 +466,8 @@ async function requestDeepSeek(config, messages) {
     body: JSON.stringify({
       model: config.deepseek.model,
       messages,
-      temperature: 0.7
+      temperature: 0.7,
+      ...(config.deepseek.maxResponseTokens ? { max_tokens: config.deepseek.maxResponseTokens } : {})
     })
   });
 
@@ -433,7 +504,8 @@ async function callDeepSeekWithTools(config, messages, tools) {
   const body = {
     model: config.deepseek.model,
     messages,
-    temperature: 0.7
+    temperature: 0.7,
+    ...(config.deepseek.maxResponseTokens ? { max_tokens: config.deepseek.maxResponseTokens } : {})
   };
   if (tools && tools.length > 0) {
     body.tools = tools;
@@ -470,6 +542,7 @@ async function requestDeepSeekStream(config, messages, onDelta) {
       model: config.deepseek.model,
       messages,
       temperature: 0.7,
+      ...(config.deepseek.maxResponseTokens ? { max_tokens: config.deepseek.maxResponseTokens } : {}),
       stream: true
     })
   });
@@ -654,7 +727,7 @@ function buildSystemPromptV2(config, knowledge) {
     `当前本地时间为：${currentTimeText}。`,
     "你需要基于本地知识库和近期上下文回答，避免凭空编造权限和操作结果。",
     "如果用户询问当前时间、日期、星期，优先使用上面的当前本地时间直接回答，不要自行编造。",
-    "当用户明确要求启动应用、打开文件或文件夹、列出目录、读取文本文件、创建文件夹或文本文件、追加文本、删除路径时，优先走本地执行层；如果当前能力做不到，要直接说明限制。",
+    "当用户明确要求启动应用、打开文件或文件夹、列出目录、读取文本文件、创建文件夹或文本文件、追加文本、整理文件或将路径移入回收站时，优先走本地执行层；如果当前能力做不到，要直接说明限制。",
     "",
     knowledgeBlock
   ].join("\n");
@@ -667,6 +740,51 @@ function normalizeCodeContext(codeContext) {
   const mode = CODE_AGENT_MODES.has(codeContext.mode) ? codeContext.mode : "auto";
   const activeFile = String(codeContext.activeFile || "").trim();
   return { mode, activeFile };
+}
+
+export function buildRecentHistoryMessages(history, maxMessages = 40, includeToolHistory = true) {
+  const seenToolCallIds = new Set();
+  const recentHistory = [];
+  const limit = Math.max(2, Number(maxMessages) || 40);
+
+  for (const item of [...history].reverse()) {
+    const entries = [{ role: "user", content: String(item.user || "") }];
+    if (includeToolHistory && Array.isArray(item.toolCalls) && Array.isArray(item.toolResults)) {
+      const resultsById = new Map(
+        item.toolResults
+          .filter((result) => result?.id)
+          .map((result) => [result.id, result.result])
+      );
+      const completeCalls = item.toolCalls.filter((call) =>
+        call?.id && !seenToolCallIds.has(call.id) && resultsById.has(call.id)
+      );
+      if (completeCalls.length) {
+        entries.push({ role: "assistant", content: null, tool_calls: completeCalls });
+        for (const call of completeCalls) {
+          entries.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify(resultsById.get(call.id) ?? null)
+          });
+        }
+      }
+      for (const call of item.toolCalls) {
+        if (call?.id) seenToolCallIds.add(call.id);
+      }
+    }
+    entries.push({ role: "assistant", content: String(item.assistant || "") });
+
+    // A tool-call round is atomic. Truncating from its tail can leave an orphaned
+    // `tool` message, which OpenAI-compatible APIs correctly reject with HTTP 400.
+    if (recentHistory.length + entries.length > limit) {
+      if (recentHistory.length === 0) {
+        recentHistory.unshift(entries[0], entries.at(-1));
+      }
+      break;
+    }
+    recentHistory.unshift(...entries);
+  }
+  return recentHistory;
 }
 
 function buildCodeModePrompt(codeContext) {
@@ -686,7 +804,7 @@ function buildCodeModePrompt(codeContext) {
   ].join("\n");
 }
 
-function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnabled = true, codeContext = null) {
+function buildSystemPromptV3(config, knowledge, relationshipProfile, companionMemory, toolsEnabled = true, codeContext = null, conversationStyle = null) {
   const now = new Date();
   const currentTimeText = now.toLocaleString("zh-CN", { hour12: false });
   const knowledgeBlock = knowledge.length
@@ -697,13 +815,14 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnable
       "你是一个桌面 Agent，你可以通过调用工具获取真实系统信息、操作文件和启动应用。",
       "重要规则：",
       "1. 系统状态和电脑操作必须调用对应工具，不要编造数据或执行结果。",
-      "2. kill_process 和 delete_file_or_folder 属于破坏性操作，执行前必须说明目标并等待用户明确确认。",
+      "2. kill_process 和 delete_file_or_folder 执行前必须说明目标并等待用户明确确认；文件删除只能移入 Windows 回收站，禁止永久删除。文件整理必须先生成预览，只有用户单独回复“确认执行文件整理”后才能执行，并保留日志与撤销。",
       "3. 没有对应工具时，诚实说明目前没有这个能力。根据工具返回的 JSON 如实回复成功或失败。",
       "4. 表情控制必须通过 set_mood 工具完成，绝不在对话文本中写参数名或 JSON。豆豆眼 Param52 仅用于惊讶、吃惊或困惑，并且 mood 必须设为 surprised；普通思考、提问、开心、害羞等情绪禁止使用。",
       codeContext?.mode === "agent"
         ? "5. 处理代码工作区时先读取真实代码。当前为用户主动选择的 Agent 执行模式，可连续完成工作区内的安全编辑与验证；删除、大范围覆盖和越界操作仍需另行确认。"
         : "5. 处理代码工作区时先读取真实代码。写文件、修改文件或运行非只读命令前，必须展示具体内容并等待用户明确回复确认执行。",
-      "6. send_wechat_message 会真实对外发送消息。只有用户当前消息同时包含精确联系人、完整消息内容和明确发送要求时才能调用；不得根据历史消息补齐联系人或内容。工具返回 pending 时表示仅启动了微信，必须询问用户并等待下一条明确的继续确认。"
+      "6. send_wechat_message 会真实对外发送消息。只有用户当前消息同时包含精确联系人、完整消息内容和明确发送要求时才能调用；不得根据历史消息补齐联系人或内容。工具返回 pending 时表示仅启动了微信，必须询问用户并等待下一条明确的继续确认。",
+      "7. 定时关机和重启必须先调用 create_power_action_draft 创建草稿并说明未保存内容风险。只有用户下一条消息单独明确回复“确认定时关机”或“确认定时重启”时，才能调用 confirm_power_action。不得把普通的“确认”当作授权。"
     ]
     : [
       "当前是快速日常对话。直接自然地回应用户，不要声称执行了任何电脑操作。",
@@ -717,7 +836,9 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, toolsEnable
     "",
     `当前本地时间为：${currentTimeText}。`,
     config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
+    buildCompanionMemoryPrompt(companionMemory),
     buildCodeModePrompt(codeContext),
+    conversationStyle?.instruction || "",
     "",
     ...behaviorRules,
     "",
@@ -916,8 +1037,9 @@ function getToolsForRoute(routeType, codeContext = null) {
     app_status: ["check_process_running", "list_running_apps", "find_application", "set_mood"],
     app_lookup: ["find_application", "refresh_app_registry", "set_mood"],
     system_status: ["get_system_resources", "get_disk_space", "check_process_running", "list_running_apps", "set_mood"],
-    file_system: ["list_directory", "read_text_file", "open_file_or_folder", "create_folder", "create_text_file", "append_to_file", "delete_file_or_folder", "search_files", "set_mood"],
-    rag_control: ["search_knowledge_base", "get_rag_status", "rebuild_rag_index", "set_mood"]
+    file_system: ["list_directory", "read_text_file", "open_file_or_folder", "create_folder", "create_text_file", "append_to_file", "delete_file_or_folder", "search_files", "scan_managed_directory", "preview_file_organization", "execute_file_organization", "list_file_operations", "undo_file_operation", "set_mood"],
+    rag_control: ["search_knowledge_base", "get_rag_status", "rebuild_rag_index", "set_mood"],
+    schedule: ["create_reminder", "list_schedules", "update_reminder", "cancel_schedule", "create_power_action_draft", "confirm_power_action", "set_mood"]
   };
   const workspaceReadTools = ["list_workspace", "search_workspace_code", "read_workspace_code", "run_workspace_command", "set_mood"];
   const workspaceTools = ["list_workspace", "switch_workspace", "search_workspace_code", "read_workspace_code", "apply_workspace_patch", "create_workspace_file", "write_workspace_code", "run_workspace_command", "set_mood"];
@@ -934,7 +1056,10 @@ function getToolsForRoute(routeType, codeContext = null) {
 // ---- Main agent pipeline ----
 
 export async function buildAgentReply(baseDir, payload) {
-  const config = await loadConfig(baseDir);
+  const storedConfig = await loadConfig(baseDir);
+  const activePersonaCard = await getActivePersonaCard(baseDir, storedConfig);
+  const config = applyPersonaCardToConfig(storedConfig, activePersonaCard);
+  const { store: companionMemory } = await recordConversationMemory(baseDir, payload.message);
   const relationshipProfile = config.relationship?.enabled
     ? await recordRelationshipInteraction(baseDir, payload.message)
     : await loadRelationshipProfile(baseDir);
@@ -946,6 +1071,11 @@ export async function buildAgentReply(baseDir, payload) {
   const effectiveMessage = commandResolution.expandedMessage || payload.message;
   const codeContext = normalizeCodeContext(payload.codeContext);
   const route = codeContext ? { type: "workspace_code" } : resolveAgentRoute(effectiveMessage);
+  const conversationStyle = deriveConversationStyle(payload.message, relationshipProfile, config.personaPrompt);
+  const responseConfig = {
+    ...config,
+    deepseek: { ...config.deepseek, maxResponseTokens: conversationStyle.maxTokens }
+  };
 
   // --- Local executor dispatch (formerly tryHandleLocalDesktopQuery) ---
   const executorContext = {
@@ -953,7 +1083,8 @@ export async function buildAgentReply(baseDir, payload) {
     history: normalizedHistory,
     config,
     workspaceDir: activeWorkspaceDir,
-    codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message)
+    codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message),
+    currentUserMessage: payload.message
   };
 
   const clarificationReply = commandResolution.clarificationQuestion
@@ -991,7 +1122,9 @@ export async function buildAgentReply(baseDir, payload) {
     await appendHistory(baseDir, {
       timestamp: new Date().toISOString(),
       user: payload.message,
-      assistant: localToolReply.reply
+      assistant: localToolReply.reply,
+      personaCardId: activePersonaCard?.id,
+      personaVersion: activePersonaCard?.version
     });
 
     return {
@@ -1016,62 +1149,14 @@ export async function buildAgentReply(baseDir, payload) {
       (query, topK) => retrieveKnowledge(baseDir, query, topK)
     );
   const knowledge = ragResult.items;
-  // Build recent messages from history, limited by maxMessages count.
-  // Track seen tool_call_ids to deduplicate — corrupted history may contain
-  // the same tool_call_id across multiple entries.
-  const seenToolCallIds = new Set();
   const maxMsgs = config.memory.maxMessages || 40;
-  const recentHistory = [];
   const includeToolHistory = route.type !== "chat";
-  const reversed = [...normalizedHistory].reverse();
-  for (const item of reversed) {
-    const entries = [];
-    entries.push({ role: "user", content: item.user });
-    if (includeToolHistory && item.toolCalls && Array.isArray(item.toolCalls)) {
-      // Deduplicate tool_calls: only include calls with a fresh id
-      const freshCalls = item.toolCalls.filter((tc) => !seenToolCallIds.has(tc.id));
-      if (freshCalls.length > 0) {
-        entries.push({
-          role: "assistant",
-          content: null,
-          tool_calls: freshCalls
-        });
-        if (item.toolResults && Array.isArray(item.toolResults)) {
-          for (const tr of item.toolResults) {
-            if (seenToolCallIds.has(tr.id)) continue;
-            seenToolCallIds.add(tr.id);
-            entries.push({
-              role: "tool",
-              tool_call_id: tr.id,
-              content: JSON.stringify(tr.result)
-            });
-          }
-        }
-      }
-      // Mark all calls as seen (even if filtered out, prevent future dupes)
-      for (const tc of item.toolCalls) {
-        seenToolCallIds.add(tc.id);
-      }
-    }
-    entries.push({ role: "assistant", content: item.assistant });
-
-    // Prepend entries (we're iterating newest-first)
-    if (recentHistory.length + entries.length <= maxMsgs) {
-      recentHistory.unshift(...entries);
-    } else {
-      // Partial: fit what we can from newest rounds
-      const remaining = maxMsgs - recentHistory.length;
-      if (remaining > 0) {
-        recentHistory.unshift(...entries.slice(-remaining));
-      }
-      break;
-    }
-  }
+  const recentHistory = buildRecentHistoryMessages(normalizedHistory, maxMsgs, includeToolHistory);
 
   const messages = [
     {
       role: "system",
-      content: buildSystemPromptV3(config, knowledge, relationshipProfile, route.type !== "chat", codeContext)
+      content: buildSystemPromptV3(config, knowledge, relationshipProfile, companionMemory, route.type !== "chat", codeContext, conversationStyle)
     },
     ...recentHistory,
     {
@@ -1108,10 +1193,10 @@ export async function buildAgentReply(baseDir, payload) {
 
   if (config.deepseek.apiKey && route.type === "chat") {
     const fastConfig = {
-      ...config,
+      ...responseConfig,
       deepseek: {
-        ...config.deepseek,
-        model: config.deepseek.chatModel || "deepseek-chat"
+        ...responseConfig.deepseek,
+        model: config.deepseek.chatModel || "deepseek-v4-flash"
       }
     };
     try {
@@ -1139,7 +1224,7 @@ export async function buildAgentReply(baseDir, payload) {
     try {
       // Function calling loop: up to 5 rounds of tool calls
       const routeTools = getToolsForRoute(route.type, codeContext);
-      let response = await callDeepSeekWithTools(config, messages, routeTools);
+      let response = await callDeepSeekWithTools(responseConfig, messages, routeTools);
       let round = 0;
       const maxRounds = codeContext?.mode === "agent" ? 12 : 6;
 
@@ -1212,7 +1297,7 @@ export async function buildAgentReply(baseDir, payload) {
         }
 
         // Next round
-        response = await callDeepSeekWithTools(config, messages, round < maxRounds - 1 ? routeTools : null);
+        response = await callDeepSeekWithTools(responseConfig, messages, round < maxRounds - 1 ? routeTools : null);
       }
 
       // Final reply
@@ -1220,7 +1305,7 @@ export async function buildAgentReply(baseDir, payload) {
         // LLM only called set_mood without text — use mood as reply hint
         reply = {happy:"嗯嗯~", sad:"呜呜…", surprised:"诶？！", angry:"哼！", blush:"诶嘿~", thinking:"嗯…"}[interceptedMood] || "好的~";
       } else if (payload.stream && toolUseCount === 0) {
-        reply = await requestDeepSeekStream(config, messages, payload.onDelta);
+        reply = await requestDeepSeekStream(responseConfig, messages, payload.onDelta);
       } else {
         reply = response.content || "模型没有返回有效内容。";
         if (payload.stream && payload.onDelta) {
@@ -1302,6 +1387,8 @@ export async function buildAgentReply(baseDir, payload) {
     timestamp: new Date().toISOString(),
     user: payload.message,
     assistant: reply,
+    personaCardId: activePersonaCard?.id,
+    personaVersion: activePersonaCard?.version,
     toolCalls: historyToolCalls.length > 0 ? historyToolCalls : undefined,
     toolResults: historyToolResults.length > 0 ? historyToolResults : undefined
   });

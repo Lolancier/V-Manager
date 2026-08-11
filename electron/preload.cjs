@@ -2,7 +2,16 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("agentDesktop", {
   getBootstrap: () => ipcRenderer.invoke("agent:get-bootstrap"),
+  getStartupStatus: () => ipcRenderer.invoke("agent:get-startup-status"),
+  notifyRendererReady: (payload) => ipcRenderer.send("agent:renderer-ready", payload),
   saveConfig: (config) => ipcRenderer.invoke("agent:save-config", config),
+  listPersonaCards: () => ipcRenderer.invoke("agent:list-persona-cards"),
+  createPersonaCard: (input) => ipcRenderer.invoke("agent:create-persona-card", input),
+  updatePersonaCard: (cardId, input) => ipcRenderer.invoke("agent:update-persona-card", cardId, input),
+  activatePersonaCard: (cardId) => ipcRenderer.invoke("agent:activate-persona-card", cardId),
+  archivePersonaCard: (cardId) => ipcRenderer.invoke("agent:archive-persona-card", cardId),
+  restorePersonaCard: (cardId) => ipcRenderer.invoke("agent:restore-persona-card", cardId),
+  getMemoryDatabaseStats: () => ipcRenderer.invoke("agent:get-memory-database-stats"),
   getLive2DModels: () => ipcRenderer.invoke("agent:get-live2d-models"),
   refreshLive2DModels: () => ipcRenderer.invoke("agent:refresh-live2d-models"),
   openLive2DModelsFolder: () => ipcRenderer.invoke("agent:open-live2d-models-folder"),
@@ -10,6 +19,15 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   generateAsmrScript: (mode, prompt) => ipcRenderer.invoke("agent:generate-asmr-script", { mode, prompt }),
   listElevenLabsVoices: (voiceConfig) => ipcRenderer.invoke("agent:list-elevenlabs-voices", voiceConfig),
   synthesizeSpeech: (text, asmr, voiceConfig) => ipcRenderer.invoke("agent:synthesize-speech", { text, asmr, voiceConfig }),
+  reportSpeechSignal: (signal) => ipcRenderer.send("agent:speech-signal", signal),
+  listLocalTtsPacks: () => ipcRenderer.invoke("agent:list-local-tts-packs"),
+  installLocalTtsPack: (packId) => ipcRenderer.invoke("agent:install-local-tts-pack", packId),
+  openLocalTtsFolder: () => ipcRenderer.invoke("agent:open-local-tts-folder"),
+  listGptSovitsProfiles: () => ipcRenderer.invoke("agent:list-gpt-sovits-profiles"),
+  installGptSovitsProfile: (profileId) => ipcRenderer.invoke("agent:install-gpt-sovits-profile", profileId),
+  getGptSovitsRuntimeStatus: (baseUrl) => ipcRenderer.invoke("agent:get-gpt-sovits-runtime-status", baseUrl),
+  startGptSovitsRuntime: (baseUrl) => ipcRenderer.invoke("agent:start-gpt-sovits-runtime", baseUrl),
+  stopGptSovitsRuntime: (baseUrl) => ipcRenderer.invoke("agent:stop-gpt-sovits-runtime", baseUrl),
   getLocalSttStatus: (modelId) => ipcRenderer.invoke("agent:get-local-stt-status", modelId),
   installLocalStt: (modelId) => ipcRenderer.invoke("agent:install-local-stt", modelId),
   transcribeLocalSpeech: (audioBytes) => ipcRenderer.invoke("agent:transcribe-local-speech", audioBytes),
@@ -26,6 +44,11 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   testEmbedding: () => ipcRenderer.invoke("agent:test-embedding"),
   getSystemResourceSnapshot: () => ipcRenderer.invoke("agent:get-system-resource-snapshot"),
   getFileManagerSnapshot: () => ipcRenderer.invoke("agent:get-file-manager-snapshot"),
+  scanManagedDirectory: (target) => ipcRenderer.invoke("agent:scan-managed-directory", target),
+  previewFileOrganization: (target, mode, quarantine) => ipcRenderer.invoke("agent:preview-file-organization", target, mode, quarantine),
+  executeFileOrganization: (previewId) => ipcRenderer.invoke("agent:execute-file-organization", previewId),
+  listFileOperations: () => ipcRenderer.invoke("agent:list-file-operations"),
+  undoFileOperation: (operationId) => ipcRenderer.invoke("agent:undo-file-operation", operationId),
   openExternal: (url) => ipcRenderer.invoke("agent:open-external", url),
   testDeepSeek: () => ipcRenderer.invoke("agent:test-deepseek"),
   testAstrBot: (astrbotConfig) => ipcRenderer.invoke("agent:test-astrbot", astrbotConfig),
@@ -35,6 +58,20 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openComposerWindow: () => ipcRenderer.invoke("agent:open-composer-window"),
   openChatWindow: () => ipcRenderer.invoke("agent:open-chat-window"),
   openCodeWindow: () => ipcRenderer.invoke("agent:open-code-window"),
+  getAutoLaunch: () => ipcRenderer.invoke("agent:get-auto-launch"),
+  setAutoLaunch: (enabled) => ipcRenderer.invoke("agent:set-auto-launch", Boolean(enabled)),
+  getLifeState: () => ipcRenderer.invoke("agent:get-life-state"),
+  getCompanionMemory: () => ipcRenderer.invoke("agent:get-companion-memory"),
+  getInterestSandbox: () => ipcRenderer.invoke("agent:get-interest-sandbox"),
+  getInterestState: () => ipcRenderer.invoke("agent:get-interest-state"),
+  updateInterestLocation: (location) => ipcRenderer.invoke("agent:update-interest-location", location),
+  runInterestActivity: (type) => ipcRenderer.invoke("agent:run-interest-activity", type),
+  openInterestSandbox: () => ipcRenderer.invoke("agent:open-interest-sandbox"),
+  openInterestArtifact: (artifactPath) => ipcRenderer.invoke("agent:open-interest-artifact", artifactPath),
+  pauseProactiveToday: () => ipcRenderer.invoke("agent:pause-proactive-today"),
+  resetWorkSession: () => ipcRenderer.invoke("agent:reset-work-session"),
+  listSchedules: () => ipcRenderer.invoke("agent:list-schedules"),
+  cancelSchedule: (id) => ipcRenderer.invoke("agent:cancel-schedule", id),
   openScaleWindow: () => ipcRenderer.invoke("agent:open-scale-window"),
   openExpressionWindow: () => ipcRenderer.invoke("agent:open-expression-window"),
   triggerExpression: (name) => ipcRenderer.invoke("agent:trigger-expression", name),
@@ -109,6 +146,36 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     ipcRenderer.on("agent:expressions-updated", listener);
     return () => ipcRenderer.removeListener("agent:expressions-updated", listener);
   },
+  onStartupProgress: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on("agent:startup-progress", listener);
+    return () => ipcRenderer.removeListener("agent:startup-progress", listener);
+  },
+  onLocalTtsProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("agent:local-tts-progress", listener);
+    return () => ipcRenderer.removeListener("agent:local-tts-progress", listener);
+  },
+  onGptSovitsProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("agent:gpt-sovits-progress", listener);
+    return () => ipcRenderer.removeListener("agent:gpt-sovits-progress", listener);
+  },
+  onAutoLaunchUpdated: (callback) => {
+    const listener = (_event, enabled) => callback(Boolean(enabled));
+    ipcRenderer.on("agent:auto-launch-updated", listener);
+    return () => ipcRenderer.removeListener("agent:auto-launch-updated", listener);
+  },
+  onLifeStateUpdated: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("agent:life-state-updated", listener);
+    return () => ipcRenderer.removeListener("agent:life-state-updated", listener);
+  },
+  onSchedulesUpdated: (callback) => {
+    const listener = (_event, items) => callback(items);
+    ipcRenderer.on("agent:schedules-updated", listener);
+    return () => ipcRenderer.removeListener("agent:schedules-updated", listener);
+  },
   onCursorScreenPosition: (callback) => {
     const listener = (_event, position) => callback(position);
     ipcRenderer.on("agent:cursor-screen-position", listener);
@@ -119,9 +186,19 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     ipcRenderer.on("agent:mood-updated", listener);
     return () => ipcRenderer.removeListener("agent:mood-updated", listener);
   },
+  onSpeechSignalUpdated: (callback) => {
+    const listener = (_event, signal) => callback(signal);
+    ipcRenderer.on("agent:speech-signal-updated", listener);
+    return () => ipcRenderer.removeListener("agent:speech-signal-updated", listener);
+  },
   onRelationshipUpdated: (callback) => {
     const listener = (_event, profile) => callback(profile);
     ipcRenderer.on("agent:relationship-updated", listener);
     return () => ipcRenderer.removeListener("agent:relationship-updated", listener);
+  },
+  onInterestStateUpdated: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("agent:interest-state-updated", listener);
+    return () => ipcRenderer.removeListener("agent:interest-state-updated", listener);
   }
 });
