@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { GPT_SOVITS_PROFILES, getGptSovitsProfileStatus, synthesizeGptSovitsSpeech } from "../src-agent/gpt-sovits.js";
+import { GPT_SOVITS_PROFILES, getGptSovitsProfileStatus, importGptSovitsProfile, listGptSovitsProfiles, synthesizeGptSovitsSpeech } from "../src-agent/gpt-sovits.js";
 
 async function createSparseProfile(baseDir) {
   const profile = GPT_SOVITS_PROFILES[0];
@@ -22,6 +22,40 @@ test("Dania profile contains both weights and the documented reference audio", a
   assert.equal(profile.version, "v2ProPlus");
   assert.deepEqual(profile.files.map((file) => file.role), ["gpt", "sovits", "reference"]);
   assert.match(profile.promptText, /限制器或者炸弹/);
+});
+
+test("Shorekeeper is a downloadable v2ProPlus profile with source and verified parts", () => {
+  const profile = GPT_SOVITS_PROFILES.find((item) => item.id === "shorekeeper-zh-v2-pro-plus");
+  assert.equal(profile.version, "v2ProPlus");
+  assert.match(profile.promptText, /你其实可以拒绝/);
+  assert.match(profile.sourceUrl, /Richopera\/Shorekeeper/);
+  assert.deepEqual(profile.files.map((file) => file.role), ["gpt", "sovits", "reference"]);
+  assert.equal(profile.files.every((file) => /^[a-f0-9]{64}$/.test(file.sha256)), true);
+});
+
+test("a local GPT-SoVITS triplet can be imported and selected from the shared library", async (t) => {
+  const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "vivi-gsv-import-"));
+  t.after(() => fs.rm(baseDir, { recursive: true, force: true }));
+  const source = path.join(baseDir, "source");
+  await fs.mkdir(source, { recursive: true });
+  const files = [path.join(source, "voice.ckpt"), path.join(source, "voice.pth"), path.join(source, "reference.wav")];
+  for (const [index, file] of files.entries()) {
+    const handle = await fs.open(file, "w");
+    await handle.truncate(index < 2 ? 1024 * 1024 : 64);
+    await handle.close();
+  }
+  const imported = await importGptSovitsProfile(baseDir, {
+    id: "custom-mashiro",
+    name: "自定义真白",
+    sourceUrl: "https://example.com/model",
+    promptText: "你好呀",
+    promptLang: "zh",
+    textLang: "zh"
+  }, files);
+  assert.equal(imported.installed, true);
+  assert.equal(imported.imported, true);
+  assert.equal(imported.downloadable, false);
+  assert.equal((await listGptSovitsProfiles(baseDir)).some((item) => item.id === "custom-mashiro"), true);
 });
 
 test("GPT-SoVITS connector only accepts a loopback service", async () => {

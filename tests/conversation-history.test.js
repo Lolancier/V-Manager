@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildRecentHistoryMessages } from "../src-agent/core.js";
+import { buildRecentHistoryMessages, filterHistoryForPersona } from "../src-agent/core.js";
 
 const toolCall = (id) => ({ id, type: "function", function: { name: "list_schedules", arguments: "{}" } });
 
@@ -38,4 +38,25 @@ test("complete tool history follows assistant tool_calls with the matching tool 
   }], 40, true);
   assert.deepEqual(messages.map((message) => message.role), ["user", "assistant", "tool", "assistant"]);
   assert.equal(messages[2].tool_call_id, "call-ok");
+});
+
+test("invalid empty-model turns are excluded from future model context", () => {
+  const messages = buildRecentHistoryMessages([
+    { user: "你是谁", assistant: "模型没有返回有效内容。" },
+    { user: "能听见吗", assistant: "刚刚的话没有生成完整，再和我说一次好吗？" },
+    { user: "再说一次", assistant: "我是九条真白喵。" }
+  ], 40, false);
+  assert.deepEqual(messages.map((message) => message.content), ["再说一次", "我是九条真白喵。"]);
+});
+
+test("persona history keeps continuity without leaking replies from another card", () => {
+  const history = [
+    { user: "旧问题", assistant: "旧人格回答", personaCardId: "vivi", personaVersion: 2 },
+    { user: "新问题", assistant: "新人格回答", personaCardId: "mashiro", personaVersion: 1 },
+    { user: "新问题二", assistant: "新人格回答二", personaCardId: "mashiro", personaVersion: 1 }
+  ];
+  assert.deepEqual(
+    filterHistoryForPersona(history, { id: "mashiro", version: 1 }),
+    history.slice(1)
+  );
 });

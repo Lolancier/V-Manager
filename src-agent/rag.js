@@ -475,6 +475,29 @@ export async function getRagSnapshot(baseDir) {
   };
 }
 
+export async function ensureRagIndexFresh(baseDir) {
+  const snapshot = await getRagSnapshot(baseDir);
+  const { knowledgeDir } = getAgentPaths(baseDir);
+  const entries = await fs.readdir(knowledgeDir, { withFileTypes: true }).catch(() => []);
+  const updatedAt = snapshot.status.updatedAt ? new Date(snapshot.status.updatedAt).getTime() : 0;
+  let newestKnowledge = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const stat = await fs.stat(path.join(knowledgeDir, entry.name)).catch(() => null);
+    newestKnowledge = Math.max(newestKnowledge, stat?.mtimeMs || 0);
+  }
+  const stale = snapshot.status.indexedFileCount === 0 || newestKnowledge > updatedAt;
+  if (!stale) return { rebuilt: false, ...snapshot.status };
+  const index = await rebuildRagIndex(baseDir);
+  return {
+    rebuilt: true,
+    indexedFileCount: index.files.length,
+    indexedChunkCount: index.chunks.length,
+    embeddedChunkCount: index.embeddedCount,
+    updatedAt: index.updatedAt
+  };
+}
+
 export async function retrieveRagContext(baseDir, query, topK, fallbackRetriever) {
   const ragConfig = await loadRagConfig(baseDir);
   const ragIndex = await loadRagIndex(baseDir);

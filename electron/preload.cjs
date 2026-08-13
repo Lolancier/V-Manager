@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   saveConfig: (config) => ipcRenderer.invoke("agent:save-config", config),
   listPersonaCards: () => ipcRenderer.invoke("agent:list-persona-cards"),
   createPersonaCard: (input) => ipcRenderer.invoke("agent:create-persona-card", input),
+  generatePersonaCardDraft: (input) => ipcRenderer.invoke("agent:generate-persona-card-draft", input),
   updatePersonaCard: (cardId, input) => ipcRenderer.invoke("agent:update-persona-card", cardId, input),
   activatePersonaCard: (cardId) => ipcRenderer.invoke("agent:activate-persona-card", cardId),
   archivePersonaCard: (cardId) => ipcRenderer.invoke("agent:archive-persona-card", cardId),
@@ -25,6 +26,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openLocalTtsFolder: () => ipcRenderer.invoke("agent:open-local-tts-folder"),
   listGptSovitsProfiles: () => ipcRenderer.invoke("agent:list-gpt-sovits-profiles"),
   installGptSovitsProfile: (profileId) => ipcRenderer.invoke("agent:install-gpt-sovits-profile", profileId),
+  importGptSovitsProfile: (input) => ipcRenderer.invoke("agent:import-gpt-sovits-profile", input),
   getGptSovitsRuntimeStatus: (baseUrl) => ipcRenderer.invoke("agent:get-gpt-sovits-runtime-status", baseUrl),
   startGptSovitsRuntime: (baseUrl) => ipcRenderer.invoke("agent:start-gpt-sovits-runtime", baseUrl),
   stopGptSovitsRuntime: (baseUrl) => ipcRenderer.invoke("agent:stop-gpt-sovits-runtime", baseUrl),
@@ -64,9 +66,13 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   getCompanionMemory: () => ipcRenderer.invoke("agent:get-companion-memory"),
   getInterestSandbox: () => ipcRenderer.invoke("agent:get-interest-sandbox"),
   getInterestState: () => ipcRenderer.invoke("agent:get-interest-state"),
+  cleanupInterestSandbox: (mode) => ipcRenderer.invoke("agent:cleanup-interest-sandbox", mode),
   updateInterestLocation: (location) => ipcRenderer.invoke("agent:update-interest-location", location),
   runInterestActivity: (type) => ipcRenderer.invoke("agent:run-interest-activity", type),
+  playInterestGame: (activityId) => ipcRenderer.invoke("agent:play-interest-game", activityId),
+  interruptInterestActivity: () => ipcRenderer.invoke("agent:interrupt-interest-activity"),
   openInterestSandbox: () => ipcRenderer.invoke("agent:open-interest-sandbox"),
+  openInterestCategory: (category) => ipcRenderer.invoke("agent:open-interest-category", category),
   openInterestArtifact: (artifactPath) => ipcRenderer.invoke("agent:open-interest-artifact", artifactPath),
   pauseProactiveToday: () => ipcRenderer.invoke("agent:pause-proactive-today"),
   resetWorkSession: () => ipcRenderer.invoke("agent:reset-work-session"),
@@ -91,6 +97,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   updateBubbleWindowSize: (width, height) => ipcRenderer.invoke("agent:update-bubble-window-size", { width, height }),
   getDataPath: () => ipcRenderer.invoke("agent:get-data-path"),
   openDataFolder: () => ipcRenderer.invoke("agent:open-data-folder"),
+  openPersonaFolder: () => ipcRenderer.invoke("agent:open-persona-folder"),
   onMenuAction: (callback) => {
     const listener = (_event, action) => callback(action);
     ipcRenderer.on("agent:menu-action", listener);

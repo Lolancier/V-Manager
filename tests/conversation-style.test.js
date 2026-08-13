@@ -7,6 +7,8 @@ test("daily replies stay compact and low mood becomes quieter", () => {
   const low = deriveConversationStyle("今天怎么样", { emotion: { valence: -0.6, label: "低落" } }, "自然说话");
   assert.ok(calm.maxChars <= 120);
   assert.ok(low.maxChars < calm.maxChars);
+  assert.ok(calm.maxTokens >= 768);
+  assert.ok(low.maxTokens >= 768);
 });
 
 test("persona and explicit detail requests alter the response budget", () => {

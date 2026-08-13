@@ -13,6 +13,8 @@ import {
   listPersonaCards,
   updatePersonaCard
 } from "../src-agent/persona-cards.js";
+import { executeTool } from "../src-agent/tool-executor.js";
+import { resolveAgentRoute } from "../src-agent/router.js";
 
 test("persona cards version, switch and archive without deleting history", async () => {
   const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "vivi-persona-"));
@@ -29,7 +31,10 @@ test("persona cards version, switch and archive without deleting history", async
     payload: { ...created.payload, userAddress: "搭档" }
   });
   assert.equal(updated.version, 2);
-  assert.match(buildPersonaCardPrompt(updated), /不得把虚构内容写成用户的现实事实/);
+  const prompt = buildPersonaCardPrompt(updated);
+  assert.match(prompt, /不得把虚构内容写成用户的现实事实/);
+  assert.match(prompt, /当前唯一角色身份/);
+  assert.match(prompt, /不要退回成泛化的“桌面 Agent”介绍/);
 
   await activatePersonaCard(baseDir, created.id);
   let cards = await listPersonaCards(baseDir);
@@ -38,4 +43,49 @@ test("persona cards version, switch and archive without deleting history", async
   cards = await listPersonaCards(baseDir);
   assert.equal(cards.find((card) => card.id === original.id)?.status, "archived");
   assert.equal(cards.find((card) => card.id === created.id)?.version, 2);
+});
+
+test("explicit chat commands can update the active persona while vague requests cannot", async (t) => {
+  const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "vivi-persona-tool-"));
+  t.after(() => fs.rm(baseDir, { recursive: true, force: true }));
+  await initializeLocalDatabase(baseDir);
+  await ensureDefaultPersonaCard(baseDir, { personaName: "Vivi" });
+
+  assert.equal(resolveAgentRoute("把你的名字改成九条真白，并更新人物卡").type, "persona_control");
+  const rejected = await executeTool("update_active_persona_card", {
+    patch: { identityName: "九条真白" }, reason: "想换名字"
+  }, { baseDir, currentUserMessage: "你觉得这个名字怎么样" });
+  assert.equal(rejected.ok, false);
+
+  const accepted = await executeTool("update_active_persona_card", {
+    patch: { identityName: "九条真白", selfReference: "真白" }, reason: "按用户要求改名"
+  }, { baseDir, currentUserMessage: "把你的名字改成九条真白，并更新人物卡" });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.card.version, 2);
+  assert.equal(accepted.card.payload.identityName, "九条真白");
+});
+
+test("explicit chat commands can create a new persona card from flat DSML-style arguments", async (t) => {
+  const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "vivi-persona-create-tool-"));
+  t.after(() => fs.rm(baseDir, { recursive: true, force: true }));
+  await initializeLocalDatabase(baseDir);
+  await ensureDefaultPersonaCard(baseDir, { personaName: "九条真白" });
+
+  const rejected = await executeTool("create_persona_card", { name: "守岸人", identity_name: "守岸人" }, {
+    baseDir,
+    currentUserMessage: "你觉得守岸人怎么样"
+  });
+  assert.equal(rejected.ok, false);
+
+  const accepted = await executeTool("create_persona_card", {
+    name: "守岸人",
+    identity_name: "守岸人",
+    identity: "黑海岸的守护者",
+    personality_traits: ["温柔", "坚定"],
+    example_lines: ["漂泊者，你来了。"]
+  }, { baseDir, currentUserMessage: "帮我生成一个鸣潮守岸人的人物卡" });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.activated, false);
+  assert.equal(accepted.card.payload.identityName, "守岸人");
+  assert.deepEqual(accepted.card.payload.personalityTraits, ["温柔", "坚定"]);
 });

@@ -73,6 +73,13 @@ function detectRagIntent(message) {
   return null;
 }
 
+function detectPersonaIntent(message) {
+  const normalized = normalizeText(message).toLowerCase();
+  if (/(?:人物卡|人格卡|人设|角色设定)/.test(normalized)) return { type: "persona_control" };
+  if (/(?:给自己|把你|你把).{0,20}(?:改名|改成|名字|自称|称呼|性格|背景|口癖)/.test(normalized)) return { type: "persona_control" };
+  return null;
+}
+
 function detectSystemIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
   if (/cpu|内存|磁盘|运行中的应用|进程列表|系统资源|电脑状态/.test(normalized)) {
@@ -89,6 +96,7 @@ export function resolveAgentRoute(message) {
     || detectUiAutomationIntent(message)
     || detectAppIntent(message)
     || detectFileIntent(message)
+    || detectPersonaIntent(message)
     || detectRagIntent(message)
     || detectSystemIntent(message)
     || { type: "chat" }

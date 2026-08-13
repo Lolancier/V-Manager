@@ -4,10 +4,12 @@ import { createLifeState, evaluateLifeTick, isInQuietHours } from "../src-agent/
 
 const baseConfig = {
   enabled: true,
+  socialCheckins: true,
   healthReminders: true,
   lateNightCare: true,
   workMinutes: 60,
   reminderCooldownMinutes: 90,
+  minimumIntervalMinutes: 120,
   dailyLimit: 4,
   idleResetMinutes: 10,
   viviRestAfterMinutes: 120,
@@ -67,4 +69,17 @@ test("an earlier commitment produces a varied follow-up event", () => {
   });
   const followUp = result.events.find((event) => event.kind === "commitment_followup");
   assert.match(followUp.message, /提交测试报告/);
+});
+
+test("social check-ins use a minimum time interval instead of a daily count", () => {
+  const state = createLifeState(new Date("2026-08-08T09:00:00"));
+  const config = { ...baseConfig, workMinutes: 240, viviRestAfterMinutes: 360, minimumIntervalMinutes: 60 };
+  const first = evaluateLifeTick(state, config, { now: new Date("2026-08-08T10:01:00"), idleSeconds: 0, interruptionScore: 0.1 });
+  assert.equal(first.events.some((event) => event.kind === "social_checkin"), true);
+
+  const tooSoon = evaluateLifeTick(first.state, config, { now: new Date("2026-08-08T10:45:00"), idleSeconds: 0, interruptionScore: 0.1 });
+  assert.equal(tooSoon.events.length, 0);
+
+  const later = evaluateLifeTick(tooSoon.state, config, { now: new Date("2026-08-08T11:02:00"), idleSeconds: 0, interruptionScore: 0.1 });
+  assert.equal(later.events.some((event) => event.kind === "social_checkin"), true);
 });

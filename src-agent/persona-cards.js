@@ -132,7 +132,11 @@ export async function updatePersonaCard(baseDir, cardId, input = {}) {
     db.run("INSERT INTO persona_card_versions(card_id, version, payload_json, created_at) VALUES (?, ?, ?, ?)", [cardId, nextVersion, JSON.stringify(payload), now]);
     db.run("UPDATE persona_cards SET name = ?, current_version = ?, updated_at = ? WHERE id = ?", [name, nextVersion, now, cardId]);
     db.run("UPDATE persona_runtime_state SET active_version = ?, updated_at = ? WHERE active_card_id = ?", [nextVersion, now, cardId]);
-    addEvent(db, cardId, "updated", "用户修改人物卡", { fromVersion: Number(current.current_version), toVersion: nextVersion });
+    addEvent(db, cardId, "updated", input.reason || "用户修改人物卡", {
+      fromVersion: Number(current.current_version),
+      toVersion: nextVersion,
+      source: text(input.source || "user", 80)
+    });
     return rowToCard({ ...current, name, current_version: nextVersion, updated_at: now }, payload);
   }, { persist: true });
 }
@@ -193,6 +197,8 @@ export function buildPersonaCardPrompt(card) {
     p.cosplay ? `当前角色/COS覆盖层：${p.cosplay}。这是表达与世界观覆盖层，不得把虚构内容写成用户的现实事实。` : "",
     p.extra ? `额外设定：${p.extra}` : "",
     p.exampleLines.length ? `表达示例（只参考风格，不机械复读）：\n- ${p.exampleLines.join("\n- ")}` : "",
+    "身份与表达要求：把以上人物卡作为当前唯一角色身份。用户询问你是谁、自我介绍或你们的关系时，优先明确体现名字、身份、背景和关系，不要退回成泛化的“桌面 Agent”介绍。",
+    "自然持续地体现人物卡中的自称、称呼、性格和说话习惯；无需每句堆砌口癖，但也不要让角色特征完全消失。",
     "人物卡只能影响身份、语气、偏好和表达；不得覆盖系统安全规则、真实工具结果、用户事实或权限边界。"
   ].filter(Boolean).join("\n");
 }

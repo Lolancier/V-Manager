@@ -18,6 +18,7 @@ import { resolveCommandWithContext } from "./executors/app-executor.js";
 import { searchLocalFiles, getFileManagerSnapshot } from "./executors/file-executor.js";
 import { getSystemResourceSnapshot } from "./executors/system-executor.js";
 import { ALL_TOOLS } from "./tools.js";
+import { normalizeToolCallMessage } from "./tool-call-parser.js";
 import { executeTool } from "./tool-executor.js";
 import { maybeCompressAndTrim } from "./memory-compressor.js";
 import { buildCompanionMemoryPrompt, recordConversationMemory } from "./companion-memory.js";
@@ -106,11 +107,13 @@ export const defaultConfig = {
   },
   proactive: {
     enabled: true,
+    socialCheckins: true,
     healthReminders: true,
     lateNightCare: true,
     systemNotifications: true,
     workMinutes: 60,
     reminderCooldownMinutes: 90,
+    minimumIntervalMinutes: 120,
     dailyLimit: 4,
     idleResetMinutes: 10,
     viviRestAfterMinutes: 120,
@@ -355,8 +358,23 @@ export async function ensureDataFiles(baseDir) {
 
 export async function loadConfig(baseDir) {
   const { configPath } = getPaths(baseDir);
-  const raw = await fs.readFile(configPath, "utf-8");
-  const parsed = JSON.parse(raw);
+  const raw = await fs.readFile(configPath, "utf-8").catch(() => "");
+  let parsed;
+  try {
+    if (!raw.trim()) throw new Error("配置文件为空");
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("配置根节点不是对象");
+  } catch (error) {
+    if (raw.trim()) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      await fs.writeFile(`${configPath}.corrupt-${stamp}.bak`, raw, "utf-8").catch(() => null);
+    }
+    const recovered = mergeConfig(defaultConfig);
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify(recovered, null, 2), "utf-8");
+    console.warn(`[config] invalid config recovered with safe defaults: ${error.message}`);
+    return recovered;
+  }
   const merged = mergeConfig(parsed);
   const hadLegacyModel = Object.hasOwn(LEGACY_DEEPSEEK_MODELS, parsed.deepseek?.model)
     || Object.hasOwn(LEGACY_DEEPSEEK_MODELS, parsed.deepseek?.chatModel);
@@ -455,6 +473,18 @@ async function retrieveKnowledge(baseDir, query, topK) {
 
 // ---- DeepSeek API ----
 
+const EMPTY_MODEL_REPLY = "模型没有返回有效内容。";
+const INCOMPLETE_MODEL_REPLY = "刚刚的话没有生成完整，再和我说一次好吗？";
+
+function normalizeModelContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (typeof part === "string") return part;
+    return typeof part?.text === "string" ? part.text : "";
+  }).join("");
+}
+
 async function requestDeepSeek(config, messages) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const response = await fetch(endpoint, {
@@ -477,7 +507,7 @@ async function requestDeepSeek(config, messages) {
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content ?? "模型没有返回有效内容。";
+  return normalizeModelContent(data.choices?.[0]?.message?.content).trim() || EMPTY_MODEL_REPLY;
 }
 
 export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}) {
@@ -527,10 +557,10 @@ async function callDeepSeekWithTools(config, messages, tools) {
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message ?? { content: "模型没有返回有效内容。" };
+  return normalizeToolCallMessage(data.choices?.[0]?.message ?? { content: "模型没有返回有效内容。" }, tools || []);
 }
 
-async function requestDeepSeekStream(config, messages, onDelta) {
+export async function requestDeepSeekStream(config, messages, onDelta, allowRetry = true) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const response = await fetch(endpoint, {
     method: "POST",
@@ -560,6 +590,20 @@ async function requestDeepSeekStream(config, messages, onDelta) {
   const reader = response.body.getReader();
   let buffer = "";
   let reply = "";
+  let finishReason = "";
+  let receivedReasoning = false;
+
+  const consumePayload = (payload) => {
+    if (!payload || payload === "[DONE]") return;
+    const data = JSON.parse(payload);
+    const choice = data.choices?.[0];
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+    if (normalizeModelContent(choice?.delta?.reasoning_content)) receivedReasoning = true;
+    const delta = normalizeModelContent(choice?.delta?.content ?? choice?.message?.content);
+    if (!delta) return;
+    reply += delta;
+    onDelta?.(reply);
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -568,7 +612,7 @@ async function requestDeepSeekStream(config, messages, onDelta) {
     }
 
     buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
+    const events = buffer.split(/\r?\n\r?\n/);
     buffer = events.pop() ?? "";
 
     for (const event of events) {
@@ -582,19 +626,7 @@ async function requestDeepSeekStream(config, messages, onDelta) {
           continue;
         }
 
-        const payload = line.slice(5).trim();
-        if (!payload || payload === "[DONE]") {
-          continue;
-        }
-
-        const data = JSON.parse(payload);
-        const delta = data.choices?.[0]?.delta?.content ?? "";
-        if (!delta) {
-          continue;
-        }
-
-        reply += delta;
-        onDelta?.(reply);
+        consumePayload(line.slice(5).trim());
       }
     }
   }
@@ -609,21 +641,29 @@ async function requestDeepSeekStream(config, messages, onDelta) {
       if (!line.startsWith("data:")) {
         continue;
       }
-      const payload = line.slice(5).trim();
-      if (!payload || payload === "[DONE]") {
-        continue;
-      }
-      const data = JSON.parse(payload);
-      const delta = data.choices?.[0]?.delta?.content ?? "";
-      if (!delta) {
-        continue;
-      }
-      reply += delta;
-      onDelta?.(reply);
+      consumePayload(line.slice(5).trim());
     }
   }
 
-  return reply || "模型没有返回有效内容。";
+  const shouldRetry = allowRetry && (!reply.trim() || finishReason === "length");
+  if (shouldRetry) {
+    const currentBudget = Number(config.deepseek.maxResponseTokens || 0);
+    const retryConfig = {
+      ...config,
+      deepseek: {
+        ...config.deepseek,
+        maxResponseTokens: Math.max(1536, currentBudget * 2)
+      }
+    };
+    console.warn("[core] retrying incomplete chat stream", {
+      finishReason: finishReason || "missing_content",
+      receivedReasoning,
+      firstReplyLength: reply.length
+    });
+    return requestDeepSeekStream(retryConfig, messages, onDelta, false);
+  }
+
+  return reply.trim() || INCOMPLETE_MODEL_REPLY;
 }
 
 export async function testDeepSeekConnection(baseDir) {
@@ -748,6 +788,10 @@ export function buildRecentHistoryMessages(history, maxMessages = 40, includeToo
   const limit = Math.max(2, Number(maxMessages) || 40);
 
   for (const item of [...history].reverse()) {
+    const assistantText = String(item.assistant || "").trim();
+    if (!assistantText || assistantText === EMPTY_MODEL_REPLY || assistantText === INCOMPLETE_MODEL_REPLY) {
+      continue;
+    }
     const entries = [{ role: "user", content: String(item.user || "") }];
     if (includeToolHistory && Array.isArray(item.toolCalls) && Array.isArray(item.toolResults)) {
       const resultsById = new Map(
@@ -785,6 +829,11 @@ export function buildRecentHistoryMessages(history, maxMessages = 40, includeToo
     recentHistory.unshift(...entries);
   }
   return recentHistory;
+}
+
+export function filterHistoryForPersona(history, activePersonaCard) {
+  if (!activePersonaCard?.id) return history;
+  return history.filter((item) => item.personaCardId === activePersonaCard.id);
 }
 
 function buildCodeModePrompt(codeContext) {
@@ -835,6 +884,7 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, companionMe
     config.personaPrompt,
     "",
     `当前本地时间为：${currentTimeText}。`,
+    "身份设定优先级：当前启用的人物卡是名字、自称、用户称呼、关系和表达风格的唯一主设定。知识库中的 persona.md 与其他知识片段只补充背景、经历和偏好；若与人物卡冲突，必须以人物卡为准，不得让知识片段改写当前身份。",
     config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
     buildCompanionMemoryPrompt(companionMemory),
     buildCodeModePrompt(codeContext),
@@ -1039,6 +1089,7 @@ function getToolsForRoute(routeType, codeContext = null) {
     system_status: ["get_system_resources", "get_disk_space", "check_process_running", "list_running_apps", "set_mood"],
     file_system: ["list_directory", "read_text_file", "open_file_or_folder", "create_folder", "create_text_file", "append_to_file", "delete_file_or_folder", "search_files", "scan_managed_directory", "preview_file_organization", "execute_file_organization", "list_file_operations", "undo_file_operation", "set_mood"],
     rag_control: ["search_knowledge_base", "get_rag_status", "rebuild_rag_index", "set_mood"],
+    persona_control: ["get_active_persona_card", "create_persona_card", "update_active_persona_card", "set_mood"],
     schedule: ["create_reminder", "list_schedules", "update_reminder", "cancel_schedule", "create_power_action_draft", "confirm_power_action", "set_mood"]
   };
   const workspaceReadTools = ["list_workspace", "search_workspace_code", "read_workspace_code", "run_workspace_command", "set_mood"];
@@ -1067,7 +1118,8 @@ export async function buildAgentReply(baseDir, payload) {
   const normalizedHistory = config.deepseek.apiKey
     ? history.filter((item) => !isStaleLocalModeReply(item.assistant))
     : history;
-  const commandResolution = resolveCommandWithContext(payload.message, normalizedHistory);
+  const personaHistory = filterHistoryForPersona(normalizedHistory, activePersonaCard);
+  const commandResolution = resolveCommandWithContext(payload.message, personaHistory);
   const effectiveMessage = commandResolution.expandedMessage || payload.message;
   const codeContext = normalizeCodeContext(payload.codeContext);
   const route = codeContext ? { type: "workspace_code" } : resolveAgentRoute(effectiveMessage);
@@ -1080,7 +1132,7 @@ export async function buildAgentReply(baseDir, payload) {
   // --- Local executor dispatch (formerly tryHandleLocalDesktopQuery) ---
   const executorContext = {
     baseDir,
-    history: normalizedHistory,
+    history: personaHistory,
     config,
     workspaceDir: activeWorkspaceDir,
     codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message),
@@ -1151,7 +1203,7 @@ export async function buildAgentReply(baseDir, payload) {
   const knowledge = ragResult.items;
   const maxMsgs = config.memory.maxMessages || 40;
   const includeToolHistory = route.type !== "chat";
-  const recentHistory = buildRecentHistoryMessages(normalizedHistory, maxMsgs, includeToolHistory);
+  const recentHistory = buildRecentHistoryMessages(personaHistory, maxMsgs, includeToolHistory);
 
   const messages = [
     {
@@ -1172,6 +1224,7 @@ export async function buildAgentReply(baseDir, payload) {
   let responseMode = "fallback_local";
   let fallbackReason = "";
   let toolUseCount = 0;
+  let personaChanged = false;
   let meta = {
     responseMode,
     usedKnowledge: knowledge.length > 0,
@@ -1288,6 +1341,7 @@ export async function buildAgentReply(baseDir, payload) {
           }
 
           const result = await executeTool(tc.function.name, args, executorContext);
+          if (result?.changed && ["create_persona_card", "update_active_persona_card"].includes(tc.function.name)) personaChanged = true;
           messages.push({
             role: "tool",
             tool_call_id: tc.id,
@@ -1343,6 +1397,7 @@ export async function buildAgentReply(baseDir, payload) {
         ...meta,
         responseMode,
         toolUseCount,
+        personaChanged,
         detectedMood: detectedMood || relationshipProfile.emotion.suggestedMood,
         faceParams: faceParams || undefined,
       };
@@ -1410,4 +1465,4 @@ export async function buildAgentReply(baseDir, payload) {
 export { getSystemResourceSnapshot } from "./executors/system-executor.js";
 export { searchLocalFiles, getFileManagerSnapshot } from "./executors/file-executor.js";
 export { loadAppRegistry as getAppRegistrySnapshot, refreshAppRegistry as rebuildAppRegistry } from "./app-registry.js";
-export { getRagSnapshot as getRagStatus, rebuildRagIndex as rebuildKnowledgeIndex, testEmbeddingConnection } from "./rag.js";
+export { ensureRagIndexFresh, getRagSnapshot as getRagStatus, rebuildRagIndex as rebuildKnowledgeIndex, testEmbeddingConnection } from "./rag.js";

@@ -30,7 +30,11 @@ export function deriveConversationStyle(message, relationshipProfile, personaTex
     sentenceRange = "用户明确要求详细说明，可以分段或列点，但仍避免重复铺陈";
   }
   maxChars = Math.round(clamp(maxChars, 35, 650));
-  const maxTokens = Math.round(clamp(maxChars * 1.65, 96, 1100));
+  // Reasoning-capable chat models spend completion tokens before visible text is
+  // emitted. A tiny budget can therefore produce an empty answer even when the
+  // requested reply is short. Keep the visible-length instruction compact, but
+  // reserve enough completion budget for reasoning and a complete final answer.
+  const maxTokens = Math.round(clamp(maxChars * 1.65 + 512, 768, 2048));
 
   return {
     maxChars,

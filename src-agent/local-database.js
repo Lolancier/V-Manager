@@ -236,6 +236,22 @@ export async function getMemoryDatabaseStats(baseDir) {
   };
 }
 
+export async function getRecentConversationMessages(baseDir, options = {}) {
+  const state = await getState(baseDir);
+  const limit = Math.max(0, Math.min(200, Number(options.limit) || 40));
+  const personaCardId = String(options.personaCardId || "");
+  const rows = personaCardId
+    ? queryAll(state.db, "SELECT role, content, timestamp, persona_card_id, persona_version FROM raw_messages WHERE persona_card_id = ? ORDER BY seq_no DESC LIMIT ?", [personaCardId, limit])
+    : queryAll(state.db, "SELECT role, content, timestamp, persona_card_id, persona_version FROM raw_messages ORDER BY seq_no DESC LIMIT ?", [limit]);
+  return rows.reverse().map((row) => ({
+    role: row.role,
+    content: row.content,
+    timestamp: row.timestamp,
+    personaCardId: row.persona_card_id,
+    personaVersion: Number(row.persona_version || 0)
+  })).filter((item) => ["user", "assistant"].includes(item.role) && item.content);
+}
+
 export async function withLocalDatabase(baseDir, operation, { persist = false } = {}) {
   const state = await getState(baseDir);
   const result = await operation({ db: state.db, queryAll, queryOne, fromJson, toJson });

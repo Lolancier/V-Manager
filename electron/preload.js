@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   saveConfig: (config) => ipcRenderer.invoke("agent:save-config", config),
   listPersonaCards: () => ipcRenderer.invoke("agent:list-persona-cards"),
   createPersonaCard: (input) => ipcRenderer.invoke("agent:create-persona-card", input),
+  generatePersonaCardDraft: (input) => ipcRenderer.invoke("agent:generate-persona-card-draft", input),
   updatePersonaCard: (cardId, input) => ipcRenderer.invoke("agent:update-persona-card", cardId, input),
   activatePersonaCard: (cardId) => ipcRenderer.invoke("agent:activate-persona-card", cardId),
   archivePersonaCard: (cardId) => ipcRenderer.invoke("agent:archive-persona-card", cardId),
@@ -24,8 +25,12 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   openExternal: (url) => ipcRenderer.invoke("agent:open-external", url),
   getInterestSandbox: () => ipcRenderer.invoke("agent:get-interest-sandbox"),
   getInterestState: () => ipcRenderer.invoke("agent:get-interest-state"),
+  cleanupInterestSandbox: (mode) => ipcRenderer.invoke("agent:cleanup-interest-sandbox", mode),
   updateInterestLocation: (location) => ipcRenderer.invoke("agent:update-interest-location", location),
   runInterestActivity: (type) => ipcRenderer.invoke("agent:run-interest-activity", type),
+  playInterestGame: (activityId) => ipcRenderer.invoke("agent:play-interest-game", activityId),
+  interruptInterestActivity: () => ipcRenderer.invoke("agent:interrupt-interest-activity"),
   openInterestSandbox: () => ipcRenderer.invoke("agent:open-interest-sandbox"),
+  openInterestCategory: (category) => ipcRenderer.invoke("agent:open-interest-category", category),
   openInterestArtifact: (artifactPath) => ipcRenderer.invoke("agent:open-interest-artifact", artifactPath)
 });

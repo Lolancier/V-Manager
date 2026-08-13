@@ -1,0 +1,6 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';"><style>body{font:20px sans-serif;background:#10252a;color:white}button{padding:12px}canvas{display:block;background:#16383e}</style></head><body><button id="start">开始</button><p id="score">分数：0</p><canvas width="320" height="180"></canvas><script>
+let score=0; let status='ready';
+document.querySelector('#start').onclick=()=>{status='playing';score=1;document.querySelector('#score').textContent='分数：'+score};
+document.addEventListener('keydown',(event)=>{if(status==='playing'&&event.key.startsWith('Arrow')){score+=5;document.querySelector('#score').textContent='分数：'+score;if(score>=16)status='won'}});
+window.__VIVI_GAME__={getState(){return{status,score,highestScore:score,message:status==='won'?'胜利':'接住光点',recommendedActions:['ArrowLeft','ArrowRight']}}};
+</script></body></html>

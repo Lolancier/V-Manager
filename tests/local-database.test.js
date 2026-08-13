@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   appendRawConversationTurn,
+  getRecentConversationMessages,
   getMemoryDatabaseStats,
   initializeLocalDatabase,
   withLocalDatabase
@@ -35,4 +36,7 @@ test("imports legacy JSONL once and keeps new raw turns in SQLite", async () => 
   assert.deepEqual(rows.at(-1), {
     role: "assistant", content: "好。", persona_card_id: "persona-1", persona_version: 3
   });
+  const restored = await getRecentConversationMessages(baseDir, { personaCardId: "persona-1", limit: 20 });
+  assert.deepEqual(restored.map((item) => item.role), ["user", "assistant"]);
+  assert.equal(restored[0].personaCardId, "persona-1");
 });

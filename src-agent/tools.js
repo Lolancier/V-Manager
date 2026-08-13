@@ -660,6 +660,87 @@ const confirm_power_action = {
   }
 };
 
+// ---- Active persona card ----
+
+const get_active_persona_card = {
+  type: "function",
+  function: {
+    name: "get_active_persona_card",
+    description: "读取当前正在使用的人物卡及版本。用户询问当前人设或要求修改人物卡时先调用。",
+    parameters: { type: "object", properties: {} }
+  }
+};
+
+const create_persona_card = {
+  type: "function",
+  function: {
+    name: "create_persona_card",
+    description: "根据用户当前消息明确提出的新角色要求，创建一张独立人物卡。只在用户明确要求创建、生成或新建人物卡时调用；默认只创建不启用。",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "人物卡列表中的卡面名称" },
+        activate: { type: "boolean", description: "仅当用户同时明确要求立即启用/切换时才为 true" },
+        payload: {
+          type: "object",
+          properties: {
+            identityName: { type: "string" },
+            identity: { type: "string" },
+            selfReference: { type: "string" },
+            userAddress: { type: "string" },
+            relationship: { type: "string" },
+            values: { type: "array", items: { type: "string" } },
+            personalityTraits: { type: "array", items: { type: "string" } },
+            speechStyle: { type: "string" },
+            habits: { type: "string" },
+            boundaries: { type: "string" },
+            background: { type: "string" },
+            cosplay: { type: "string" },
+            extra: { type: "string" },
+            exampleLines: { type: "array", items: { type: "string" } },
+            live2dModelId: { type: "string" }
+          },
+          required: ["identityName", "identity", "speechStyle"]
+        }
+      },
+      required: ["name", "payload"]
+    }
+  }
+};
+
+const update_active_persona_card = {
+  type: "function",
+  function: {
+    name: "update_active_persona_card",
+    description: "修改自己当前启用的人物卡并生成可追溯的新版本。只有用户在当前消息明确要求改名、改变自称/称呼、性格、人设或人物卡内容时调用；不得根据历史中的旧授权自行改动。未提供的字段保持原值。",
+    parameters: {
+      type: "object",
+      properties: {
+        card_name: { type: "string", description: "可选，人物卡列表中的卡面名称" },
+        reason: { type: "string", description: "本次修改原因的简短说明" },
+        patch: {
+          type: "object",
+          properties: {
+            identityName: { type: "string", description: "角色名字" },
+            identity: { type: "string", description: "身份定位" },
+            selfReference: { type: "string", description: "角色的自称" },
+            userAddress: { type: "string", description: "对用户的称呼" },
+            relationship: { type: "string", description: "与用户的关系" },
+            personalityTraits: { type: "array", items: { type: "string" } },
+            speechStyle: { type: "string" },
+            habits: { type: "string" },
+            background: { type: "string" },
+            cosplay: { type: "string" },
+            extra: { type: "string" },
+            exampleLines: { type: "array", items: { type: "string" } }
+          }
+        }
+      },
+      required: ["patch", "reason"]
+    }
+  }
+};
+
 // ---- Mood tool (LLM must call this each turn) ----
 
 const set_mood = {
@@ -737,6 +818,10 @@ export const ALL_TOOLS = [
   cancel_schedule,
   create_power_action_draft,
   confirm_power_action,
+  // Persona
+  get_active_persona_card,
+  create_persona_card,
+  update_active_persona_card,
   // Mood
   set_mood
 ];

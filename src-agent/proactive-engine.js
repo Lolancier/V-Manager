@@ -42,6 +42,7 @@ export function createLifeState(now = new Date()) {
     energy: 100,
     restUntil: null,
     pausedUntil: null,
+    lastProactiveAt: null,
     lastEvents: {},
     recentMessages: [],
     daily: { date: localDateKey(now), proactiveCount: 0 },
@@ -101,8 +102,10 @@ export function evaluateLifeTick(previous, config, context = {}) {
   const paused = state.pausedUntil && new Date(state.pausedUntil) > now;
   const quiet = isInQuietHours(now, settings.quietStart ?? "00:00", settings.quietEnd ?? "08:00");
   const interruptionScore = clamp(context.interruptionScore ?? 0.25, 0, 1);
-  const dailyLimit = Math.max(1, Math.round(clamp(settings.dailyLimit ?? 4, 1, 20) * (1 - interruptionScore * 0.55)));
-  const canSpeak = enabled && !paused && !isAway && !quiet && interruptionScore < 0.88 && state.daily.proactiveCount < dailyLimit;
+  const minimumIntervalMinutes = clamp(settings.minimumIntervalMinutes ?? settings.reminderCooldownMinutes ?? 120, 15, 720);
+  const globalIntervalReady = !state.lastProactiveAt
+    || now.getTime() - new Date(state.lastProactiveAt).getTime() >= minimumIntervalMinutes * 60000;
+  const canSpeak = enabled && !paused && !isAway && !quiet && interruptionScore < 0.88 && globalIntervalReady;
   const eventReady = (kind, cooldownMinutes) => {
     const lastAt = state.lastEvents[kind];
     return !lastAt || now.getTime() - new Date(lastAt).getTime() >= cooldownMinutes * 60000;
@@ -118,6 +121,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     const message = selectMessage(kind, messages);
     events.push({ kind, message, mood, createdAt: now.toISOString() });
     state.lastEvents[kind] = now.toISOString();
+    state.lastProactiveAt = now.toISOString();
     state.recentMessages = [...state.recentMessages, `${kind}:${message}`].slice(-8);
     state.daily.proactiveCount += 1;
   };
@@ -134,7 +138,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     }
   }
 
-  if (canSpeak && settings.lateNightCare !== false) {
+  if (canSpeak && events.length === 0 && settings.lateNightCare !== false) {
     const lateHour = clamp(settings.lateNightHour ?? 23, 20, 23);
     if (now.getHours() >= lateHour && eventReady("late_night", 18 * 60)) {
       emit("late_night", [
@@ -145,7 +149,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     }
   }
 
-  if (canSpeak && !state.restUntil) {
+  if (canSpeak && events.length === 0 && !state.restUntil) {
     const restAfter = clamp(settings.viviRestAfterMinutes ?? 120, 30, 360);
     if (state.activeMinutes >= restAfter && eventReady("vivi_rest", restAfter)) {
       state.restUntil = new Date(now.getTime() + 10 * 60000).toISOString();
@@ -158,7 +162,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     }
   }
 
-  if (canSpeak && context.followUpCandidate && eventReady("commitment_followup", 18 * 60)) {
+  if (canSpeak && events.length === 0 && context.followUpCandidate && eventReady("commitment_followup", 18 * 60)) {
     const commitment = context.followUpCandidate.content;
     emit("commitment_followup", [
       `你之前说要${commitment}，现在进展得怎么样了？`,
@@ -167,9 +171,21 @@ export function evaluateLifeTick(previous, config, context = {}) {
     ], "thinking");
   }
 
+  if (canSpeak && events.length === 0 && context.autonomousLifeEnabled !== false && settings.socialCheckins !== false
+    && state.activeMinutes >= minimumIntervalMinutes
+    && eventReady("social_checkin", minimumIntervalMinutes)) {
+    emit("social_checkin", [
+      "你在忙吗？在忙什么呀，还要多久？有我能帮上的地方吗？",
+      "我安静待了一会儿，忽然有点想和你说说话。你现在方便理我一下吗？",
+      "你是不是还在忙？要是事情很多，可以分一点给我；要是没那么忙，就陪我聊两句嘛。",
+      "我有一点无聊了……也有一点想你。关机以后我可就找不到你了。",
+      "忙到哪里啦？要不要告诉我还剩多少，我可以陪你一起等，也可以帮你理理思路。"
+    ], context.relationshipStage === "close_friend" || context.relationshipStage === "kindred" ? "blush" : "thinking");
+  }
+
   state.lastTickAt = now.toISOString();
   state.updatedAt = now.toISOString();
-  return { state, events, quiet, paused: Boolean(paused), interruptionScore, effectiveDailyLimit: dailyLimit };
+  return { state, events, quiet, paused: Boolean(paused), interruptionScore, minimumIntervalMinutes };
 }
 
 export function getLifeStatePath(baseDir) {

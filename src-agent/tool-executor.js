@@ -42,6 +42,43 @@ import {
   listSchedules,
   updateReminder
 } from "./schedule-engine.js";
+import { activatePersonaCard, createPersonaCard, getActivePersonaCard, updatePersonaCard } from "./persona-cards.js";
+
+function hasCurrentPersonaEditAuthorization(message) {
+  const normalized = String(message || "").replace(/\s+/g, "");
+  return /(?:修改|更新|调整|重写|换掉|改成|改名|叫做|叫我|称呼).{0,30}(?:人物卡|人格卡|人设|角色设定|名字|姓名|自称|称呼|性格|背景|口癖)/.test(normalized)
+    || /(?:人物卡|人格卡|人设|角色设定|名字|姓名|自称|称呼|性格|背景|口癖).{0,30}(?:修改|更新|调整|重写|换掉|改成|改名|叫做)/.test(normalized);
+}
+
+function hasCurrentPersonaCreateAuthorization(message) {
+  const normalized = String(message || "").replace(/\s+/g, "");
+  return /(?:创建|新建|生成|制作|做|写).{0,24}(?:人物卡|人格卡|角色卡|人设卡)/.test(normalized)
+    || /(?:人物卡|人格卡|角色卡|人设卡).{0,24}(?:创建|新建|生成|制作|做|写)/.test(normalized);
+}
+
+function arrayValue(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value || ""));
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+  return String(value || "").split(/[、，,\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizePersonaToolPayload(args) {
+  const source = args.payload && typeof args.payload === "object" && !Array.isArray(args.payload) ? args.payload : args;
+  const aliases = {
+    identityName: "identity_name", selfReference: "self_reference", userAddress: "user_address",
+    personalityTraits: "personality_traits", speechStyle: "speech_style", exampleLines: "example_lines",
+    live2dModelId: "live2d_model_id"
+  };
+  const payload = {};
+  for (const key of ["identityName", "identity", "selfReference", "userAddress", "relationship", "values", "personalityTraits", "speechStyle", "habits", "boundaries", "background", "cosplay", "extra", "exampleLines", "live2dModelId"]) {
+    const value = source[key] ?? source[aliases[key]];
+    if (value !== undefined) payload[key] = ["values", "personalityTraits", "exampleLines"].includes(key) ? arrayValue(value) : value;
+  }
+  return payload;
+}
 
 /**
  * Execute a tool by name and return a structured result.
@@ -133,6 +170,47 @@ export async function executeTool(name, args = {}, context = {}) {
         }
         const item = await confirmLatestPowerDraft(baseDir, args.action);
         return { ok: true, item };
+      }
+
+      // ---- Persona card ----
+      case "get_active_persona_card": {
+        const card = await getActivePersonaCard(baseDir, context.config || {});
+        return { ok: true, card };
+      }
+      case "create_persona_card": {
+        if (!hasCurrentPersonaCreateAuthorization(context.currentUserMessage)) {
+          return { ok: false, requiresCurrentUserAuthorization: true, error: "当前这条用户消息没有明确授权创建人物卡。" };
+        }
+        const payload = normalizePersonaToolPayload(args);
+        const card = await createPersonaCard(baseDir, {
+          name: args.name || args.card_name || `${payload.identityName || "新角色"} · 人物卡`,
+          payload,
+          source: "assistant_tool"
+        });
+        const activateRequested = args.activate === true && /(?:启用|切换|换成|使用).{0,20}(?:人物卡|角色|人设|它|她|他)/.test(String(context.currentUserMessage || ""));
+        const resultCard = activateRequested ? await activatePersonaCard(baseDir, card.id) : card;
+        return {
+          ok: true,
+          changed: true,
+          activated: activateRequested,
+          card: resultCard,
+          message: activateRequested ? `人物卡“${card.name}”已创建并启用。` : `人物卡“${card.name}”已创建；需要时可在人物卡列表中启用。`
+        };
+      }
+      case "update_active_persona_card": {
+        if (!hasCurrentPersonaEditAuthorization(context.currentUserMessage)) {
+          return { ok: false, requiresCurrentUserAuthorization: true, error: "当前这条用户消息没有明确授权修改人物卡。" };
+        }
+        const active = await getActivePersonaCard(baseDir, context.config || {});
+        if (!active) return { ok: false, error: "没有找到当前启用的人物卡。" };
+        const patch = args.patch && typeof args.patch === "object" && !Array.isArray(args.patch) ? args.patch : {};
+        const updated = await updatePersonaCard(baseDir, active.id, {
+          name: args.card_name || active.name,
+          payload: patch,
+          reason: `角色自行更新：${String(args.reason || "响应用户当前指令").slice(0, 180)}`,
+          source: "assistant_tool"
+        });
+        return { ok: true, changed: true, card: updated, message: `人物卡已更新到版本 ${updated.version}，下一轮对话会直接使用。` };
       }
 
       // ---- File ----

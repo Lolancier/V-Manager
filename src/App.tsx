@@ -53,7 +53,7 @@ const settingsSections: Array<{ id: SettingsSection; label: string; description:
 const starterMessages: ChatMessage[] = [
   {
     role: "assistant",
-    content: "你好，我是你的桌面 Agent。右键模型可以打开设置窗口。"
+    content: "你来啦。今天想从哪里开始聊？"
   }
 ];
 
@@ -122,11 +122,13 @@ const previewConfig: AgentConfig = {
   },
   proactive: {
     enabled: true,
+    socialCheckins: true,
     healthReminders: true,
     lateNightCare: true,
     systemNotifications: true,
     workMinutes: 60,
     reminderCooldownMinutes: 90,
+    minimumIntervalMinutes: 120,
     dailyLimit: 4,
     idleResetMinutes: 10,
     viviRestAfterMinutes: 120,
@@ -147,7 +149,21 @@ const previewConfig: AgentConfig = {
     activeStart: "09:00",
     activeEnd: "22:00",
     diaryHour: 21,
+    diaryTime: "21:00",
     autoOpenPreview: false,
+    selfPlayGames: true,
+    selfPlayMaxSeconds: 20,
+    selfPlayMaxActions: 40,
+    selfRepairAttempts: 1,
+    autonomousLifeEnabled: true,
+    virtualScheduleEnabled: true,
+    autonomousRoutineLimit: 9,
+    entertainmentDailyLimit: 2,
+    autonomousActivities: {
+      collectDiaryMaterials: true, browseInformation: true, organizeMemory: true,
+      playExistingGame: true, improveExistingGame: true, reviewDrawing: true,
+      planCreation: true, rest: true, prepareChatTopics: true
+    },
     networkAccess: "off",
     autoLocation: true,
     weatherLocation: "",
@@ -200,7 +216,6 @@ const emptyPersonaPayload: PersonaPayload = {
   cosplay: "",
   extra: "",
   exampleLines: [],
-  voicePackId: "",
   live2dModelId: ""
 };
 
@@ -210,6 +225,40 @@ function personaDraftFromCard(card?: PersonaCard | null): PersonaDraft {
   return card
     ? { id: card.id, name: card.name, status: card.status, payload: { ...card.payload } }
     : { id: "", name: "新人物卡", status: "active", payload: { ...emptyPersonaPayload } };
+}
+
+function formatStorageBytes(value: number | undefined) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 2 : 1)} MB`;
+}
+
+function interestActivityLabel(type: InterestActivityType) {
+  const labels: Record<InterestActivityType, string> = {
+    diary: "整理日记", drawing: "自由绘画", mini_game: "制作并试玩小游戏",
+    collect_diary_materials: "收集日记素材", browse_information: "看看天气和资讯",
+    organize_memory: "整理记忆和话题", play_existing_game: "玩已有游戏",
+    improve_existing_game: "改进以前的游戏", review_drawing: "回顾自己的画作",
+    plan_creation: "规划下一次创作", rest: "休息和发呆", prepare_chat_topics: "准备聊天话题"
+  };
+  return labels[type] || type;
+}
+
+function interestCategoryLabel(category?: string) {
+  return category === "creative" ? "创作" : category === "entertainment" ? "娱乐" : category === "companion" ? "陪伴准备" : "轻量日常";
+}
+
+function formatDiarySchedule(dueAt: string | undefined, nowMs: number) {
+  if (!dueAt) return "保存设置后安排";
+  const due = new Date(dueAt);
+  const clock = due.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const remainingMinutes = Math.ceil((due.getTime() - nowMs) / 60000);
+  if (remainingMinutes <= 0) return `计划 ${clock} · 等待电脑空闲`;
+  if (remainingMinutes < 60) return `计划 ${clock} · 还有 ${remainingMinutes} 分钟`;
+  const hours = Math.floor(remainingMinutes / 60);
+  const minutes = remainingMinutes % 60;
+  return `计划 ${clock} · 还有 ${hours} 小时${minutes ? ` ${minutes} 分钟` : ""}`;
 }
 
 const deepSeekModelPresets = [
@@ -482,6 +531,12 @@ function App() {
   const [personaDraft, setPersonaDraft] = useState<PersonaDraft>(() => personaDraftFromCard());
   const [personaMessage, setPersonaMessage] = useState("");
   const [savingPersona, setSavingPersona] = useState(false);
+  const [personaAiPrompt, setPersonaAiPrompt] = useState("");
+  const [personaAiUseWeb, setPersonaAiUseWeb] = useState(true);
+  const [personaAiGenerating, setPersonaAiGenerating] = useState(false);
+  const [personaAiSources, setPersonaAiSources] = useState<PersonaGenerationSource[]>([]);
+  const [personaSearch, setPersonaSearch] = useState("");
+  const [personaListFilter, setPersonaListFilter] = useState<"all" | "active" | "archived">("all");
   const [relationshipProfile, setRelationshipProfile] = useState<RelationshipProfile>(previewBootstrap.relationshipProfile);
   const [resettingRelationship, setResettingRelationship] = useState(false);
   const [live2dModels, setLive2dModels] = useState<Live2DModelOption[]>(
@@ -515,8 +570,13 @@ function App() {
   const [companionMemory, setCompanionMemory] = useState<CompanionMemoryStore | null>(null);
   const [interestSnapshot, setInterestSnapshot] = useState<InterestSandboxSnapshot | null>(null);
   const [interestRuntimeState, setInterestRuntimeState] = useState<InterestRuntimeState>({ status: "idle", type: null, label: "当前没有进行创作", startedAt: null });
+  const [interestScheduleClock, setInterestScheduleClock] = useState(Date.now());
   const [interestMessage, setInterestMessage] = useState("");
   const [interestRunning, setInterestRunning] = useState<InterestActivityType | null>(null);
+  const [interestLogStatus, setInterestLogStatus] = useState<"all" | "completed" | "failed">("all");
+  const [interestLogPersona, setInterestLogPersona] = useState("all");
+  const [interestLogPage, setInterestLogPage] = useState(1);
+  const [cleaningInterest, setCleaningInterest] = useState(false);
   const [locationRetryNonce, setLocationRetryNonce] = useState(0);
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
   const [codeFileLoading, setCodeFileLoading] = useState(false);
@@ -535,7 +595,13 @@ function App() {
   const [testingAstrBot, setTestingAstrBot] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
   const [clearingMemory, setClearingMemory] = useState(false);
-  const [dataPathInfo, setDataPathInfo] = useState<{ baseDir: string; dataDir: string } | null>(null);
+  const [dataPathInfo, setDataPathInfo] = useState<{
+    baseDir: string;
+    dataDir: string;
+    knowledgeDir?: string;
+    personaKnowledgePath?: string;
+    personaDatabasePath?: string;
+  } | null>(null);
   const [loadingSystemSnapshot, setLoadingSystemSnapshot] = useState(false);
   const [loadingFileSnapshot, setLoadingFileSnapshot] = useState(false);
   const [ragStatus, setRagStatus] = useState<RagStatusSnapshot | null>(null);
@@ -551,6 +617,7 @@ function App() {
   const [bubbleFading, setBubbleFading] = useState(false);
   const [bubblePlacement, setBubblePlacement] = useState<"left" | "right">("right");
   const [bubbleSegmentText, setBubbleSegmentText] = useState("");
+  const [bubbleSegmentReady, setBubbleSegmentReady] = useState(false);
   const [asmrMode, setAsmrMode] = useState<AsmrMode>("sleep");
   const [asmrPrompt, setAsmrPrompt] = useState("");
   const [asmrScript, setAsmrScript] = useState("");
@@ -570,6 +637,19 @@ function App() {
   const [installingGptSovits, setInstallingGptSovits] = useState(false);
   const [gptSovitsProgress, setGptSovitsProgress] = useState(0);
   const [gptSovitsMessage, setGptSovitsMessage] = useState("");
+  const [showGptSovitsImport, setShowGptSovitsImport] = useState(false);
+  const [importingGptSovits, setImportingGptSovits] = useState(false);
+  const [gptSovitsImportDraft, setGptSovitsImportDraft] = useState({
+    name: "",
+    author: "",
+    version: "v2ProPlus",
+    sourceUrl: "",
+    license: "请以来源网页标注为准",
+    promptText: "",
+    promptLang: "zh",
+    textLang: "zh",
+    description: ""
+  });
   const [gptSovitsRuntimeStatus, setGptSovitsRuntimeStatus] = useState<GptSovitsRuntimeStatus>({ ready: false });
   const [gptSovitsRuntimeBusy, setGptSovitsRuntimeBusy] = useState<"start" | "stop" | null>(null);
   const [installingLocalStt, setInstallingLocalStt] = useState(false);
@@ -595,6 +675,8 @@ function App() {
   const bubbleSegmentTextRef = useRef("");
   const bubbleSegmentTimerRef = useRef<number | null>(null);
   const bubbleAudioRef = useRef<HTMLAudioElement | null>(null);
+  const chatAutomaticAudioRef = useRef<HTMLAudioElement | null>(null);
+  const chatAutomaticVoiceTokenRef = useRef(0);
   const voicePreviewAudioRef = useRef<HTMLAudioElement | null>(null);
   const voicePreviewTokenRef = useRef(0);
   const messageVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -619,6 +701,11 @@ function App() {
   const speakingTimerRef = useRef<number | null>(null);
   const speechSignalRef = useRef({ active: false, level: 0 });
   const speechAnalysisCleanupRef = useRef<(() => void) | null>(null);
+  const pendingSpeechPerformanceRef = useRef<{
+    reply: string;
+    mood: PetMood;
+    faceParams: Record<string, number> | null;
+  } | null>(null);
   const rendererReadyReportedRef = useRef(false);
   const moodBeatTimersRef = useRef<number[]>([]);
   const dragStateRef = useRef<{
@@ -796,6 +883,112 @@ function App() {
       }, beat.atMs);
       moodBeatTimersRef.current.push(timer);
     }
+  }
+
+  function hasAutomaticVoice() {
+    if (!configDraft?.voice.enabled) return false;
+    return configDraft.voice.provider === "local"
+      || configDraft.voice.provider === "gpt_sovits"
+      || Boolean(configDraft.voice.apiKey && configDraft.voice.voice && configDraft.voice.model);
+  }
+
+  function playChatAutomaticReply(
+    replyText: string,
+    mood: PetMood,
+    requestedFaceParams: Record<string, number> | null
+  ) {
+    const token = ++chatAutomaticVoiceTokenRef.current;
+    chatAutomaticAudioRef.current?.pause();
+    chatAutomaticAudioRef.current = null;
+    stopSpeechLipSync();
+    pendingSpeechPerformanceRef.current = { reply: replyText, mood, faceParams: requestedFaceParams };
+
+    bridge?.synthesizeSpeech(replyText, Boolean(configDraft?.voice.asmrEnabled))
+      .then((result) => {
+        if (token !== chatAutomaticVoiceTokenRef.current || viewMode !== "chat") return;
+        const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
+        chatAutomaticAudioRef.current = audio;
+        let stopLipSync = () => {};
+        const finish = () => {
+          stopLipSync();
+          if (token !== chatAutomaticVoiceTokenRef.current) return;
+          chatAutomaticAudioRef.current = null;
+          pendingSpeechPerformanceRef.current = null;
+          finishReplyPerformance();
+        };
+        audio.onended = finish;
+        audio.onerror = () => {
+          stopLipSync();
+          if (token !== chatAutomaticVoiceTokenRef.current) return;
+          chatAutomaticAudioRef.current = null;
+          pendingSpeechPerformanceRef.current = null;
+          startReplyPerformance(replyText, mood, requestedFaceParams, estimateSpeechDurationMs(replyText), true);
+        };
+        return audio.play().then(() => {
+          if (token !== chatAutomaticVoiceTokenRef.current) {
+            audio.pause();
+            return;
+          }
+          stopLipSync = startSpeechLipSync(audio);
+          startReplyPerformance(
+            replyText,
+            mood,
+            requestedFaceParams,
+            Number.isFinite(audio.duration) && audio.duration > 0 ? Math.round(audio.duration * 1000) : estimateSpeechDurationMs(replyText),
+            false
+          );
+          setPetSpeaking(true);
+        });
+      })
+      .catch((error) => {
+        if (token !== chatAutomaticVoiceTokenRef.current) return;
+        console.warn("[voice] chat automatic playback failed; using estimated lip sync:", error);
+        pendingSpeechPerformanceRef.current = null;
+        startReplyPerformance(replyText, mood, requestedFaceParams, estimateSpeechDurationMs(replyText), true);
+      });
+  }
+
+  function startReplyPerformance(
+    replyText: string,
+    mood: PetMood,
+    requestedFaceParams: Record<string, number> | null,
+    durationMs = estimateSpeechDurationMs(replyText),
+    useEstimatedMouth = true
+  ) {
+    const speechMs = Math.max(600, durationMs);
+    const expressionMs = Math.max(estimateExpressionDurationMs(replyText), speechMs);
+    clearTimer(talkingHoldRef);
+    clearTimer(moodTimerRef);
+    clearTimer(faceTimerRef);
+    setActiveExpressionSet(retainPersistentShapes);
+    playMoodBeats(replyText, mood, speechMs);
+    if (useEstimatedMouth) holdSpeaking(speechMs);
+
+    const safeFaceParams = requestedFaceParams ? { ...requestedFaceParams } : null;
+    if (safeFaceParams && mood !== "surprised") delete safeFaceParams.Param52;
+    setFaceParams(safeFaceParams && Object.keys(safeFaceParams).length ? safeFaceParams : null);
+    moodTimerRef.current = window.setTimeout(() => {
+      moodTimerRef.current = null;
+      clearMoodBeatTimers();
+      setPetMood(streamingRef.current ? "thinking" : "idle");
+    }, expressionMs);
+    if (safeFaceParams && Object.keys(safeFaceParams).length) {
+      faceTimerRef.current = window.setTimeout(() => {
+        faceTimerRef.current = null;
+        setFaceParams(null);
+      }, expressionMs);
+    }
+  }
+
+  function finishReplyPerformance() {
+    clearTimer(talkingHoldRef);
+    clearTimer(speakingTimerRef);
+    clearTimer(moodTimerRef);
+    clearTimer(faceTimerRef);
+    clearMoodBeatTimers();
+    setPetSpeaking(false);
+    setPetMood(streamingRef.current ? "thinking" : "idle");
+    setFaceParams(null);
   }
 
   function showBubble(autoHide = true) {
@@ -1038,32 +1231,18 @@ function App() {
           return;
         }
         const replyContent = payload.reply ?? [...messages].reverse().find((message) => message.role === "assistant")?.content ?? "";
-        const speechMs = estimateSpeechDurationMs(replyContent);
-        const expressionMs = estimateExpressionDurationMs(replyContent);
-        clearTimer(talkingHoldRef);
-        clearTimer(moodTimerRef);
-        clearTimer(faceTimerRef);
-        setActiveExpressionSet(retainPersistentShapes);
-        playMoodBeats(replyContent, llmMood, speechMs);
-        holdSpeaking(speechMs);
-        moodTimerRef.current = window.setTimeout(() => {
-          moodTimerRef.current = null;
-          clearMoodBeatTimers();
-          setPetMood(prev => {
-            return streamingRef.current ? "thinking" : "idle";
-          });
-        }, expressionMs);
-        // Param52 (豆豆眼) is reserved for surprise/shock/confusion.
-        const safeFaceParams = payload.faceParams ? { ...payload.faceParams } : null;
-        if (safeFaceParams && llmMood !== "surprised") {
-          delete safeFaceParams.Param52;
-        }
-        setFaceParams(safeFaceParams && Object.keys(safeFaceParams).length ? safeFaceParams : null);
-        if (safeFaceParams && Object.keys(safeFaceParams).length) {
-          faceTimerRef.current = window.setTimeout(() => {
-            faceTimerRef.current = null;
-            setFaceParams(null);
-          }, expressionMs);
+        if (hasAutomaticVoice() && viewMode === "chat") {
+          playChatAutomaticReply(replyContent, llmMood, payload.faceParams ? { ...payload.faceParams } : null);
+        } else if (hasAutomaticVoice()) {
+          pendingSpeechPerformanceRef.current = {
+            reply: replyContent,
+            mood: llmMood,
+            faceParams: payload.faceParams ? { ...payload.faceParams } : null
+          };
+          if (!speechSignalRef.current.active) finishReplyPerformance();
+        } else {
+          pendingSpeechPerformanceRef.current = null;
+          startReplyPerformance(replyContent, llmMood, payload.faceParams ? { ...payload.faceParams } : null);
         }
       }
     });
@@ -1071,6 +1250,38 @@ function App() {
     const offSpeechSignal = bridge.onSpeechSignalUpdated?.((signal) => {
       speechSignalRef.current.active = Boolean(signal?.active);
       speechSignalRef.current.level = Math.max(0, Math.min(1, Number(signal?.level) || 0));
+      if (signal?.phase === "start") {
+        const pending = pendingSpeechPerformanceRef.current;
+        const text = signal.text || pending?.reply || "";
+        const mood = (signal.mood as PetMood) || pending?.mood || "happy";
+        startReplyPerformance(
+          text,
+          mood,
+          signal.faceParams || pending?.faceParams || null,
+          signal.durationMs || estimateSpeechDurationMs(text),
+          false
+        );
+        setPetSpeaking(true);
+        return;
+      }
+      if (signal?.phase === "fallback") {
+        const pending = pendingSpeechPerformanceRef.current;
+        const text = signal.text || pending?.reply || "";
+        startReplyPerformance(
+          text,
+          (signal.mood as PetMood) || pending?.mood || "happy",
+          signal.faceParams || pending?.faceParams || null,
+          signal.durationMs || estimateSpeechDurationMs(text),
+          true
+        );
+        pendingSpeechPerformanceRef.current = null;
+        return;
+      }
+      if (signal?.phase === "end") {
+        if (signal.finalSegment) pendingSpeechPerformanceRef.current = null;
+        finishReplyPerformance();
+        return;
+      }
       if (signal?.active) setPetSpeaking(true);
       else if (!streamingRef.current) setPetSpeaking(false);
     });
@@ -1175,6 +1386,62 @@ function App() {
     return [...messages].reverse().find((message) => message.role === "assistant") ?? starterMessages[0];
   }, [messages]);
 
+  const visiblePersonaCards = useMemo(() => {
+    const query = personaSearch.trim().toLocaleLowerCase();
+    return personaCards.filter((card) => {
+      if (personaListFilter === "active" && card.status === "archived") return false;
+      if (personaListFilter === "archived" && card.status !== "archived") return false;
+      if (!query) return true;
+      const searchable = [
+        card.name,
+        card.payload.identityName,
+        card.payload.identity,
+        card.payload.personalityTraits.join(" ")
+      ].join(" ").toLocaleLowerCase();
+      return searchable.includes(query);
+    });
+  }, [personaCards, personaListFilter, personaSearch]);
+
+  const interestPersonaOptions = useMemo(() => {
+    const values = new Map<string, string>();
+    for (const activity of interestSnapshot?.activities ?? []) {
+      const id = activity.personaCardId || "legacy";
+      values.set(id, activity.personaName || (id === "legacy" ? "旧记录（未标注人格）" : id));
+    }
+    return [...values.entries()].map(([id, name]) => ({ id, name }));
+  }, [interestSnapshot]);
+
+  const filteredInterestActivities = useMemo(() => (interestSnapshot?.activities ?? []).filter((activity) => {
+    if (interestLogStatus === "completed" && activity.status !== "completed") return false;
+    if (interestLogStatus === "failed" && activity.status === "completed") return false;
+    if (interestLogPersona !== "all" && (activity.personaCardId || "legacy") !== interestLogPersona) return false;
+    return true;
+  }), [interestSnapshot, interestLogPersona, interestLogStatus]);
+  const interestLogPageCount = Math.max(1, Math.ceil(filteredInterestActivities.length / 6));
+  const safeInterestLogPage = Math.min(interestLogPage, interestLogPageCount);
+  const pagedInterestActivities = filteredInterestActivities.slice((safeInterestLogPage - 1) * 6, safeInterestLogPage * 6);
+  const todayDiaryActivity = interestSnapshot?.activities.find((item) => item.day === interestSnapshot.today.date && item.type === "diary" && item.status === "completed");
+  const nextInterestRoutine = interestSnapshot?.routine?.find((item) => item.status !== "completed");
+  const completedInterestRoutineCount = interestSnapshot?.routine?.filter((item) => item.status === "completed").length ?? 0;
+
+  useEffect(() => {
+    if (!bridge || viewMode !== "settings") return;
+    const refreshSchedule = () => {
+      setInterestScheduleClock(Date.now());
+      void bridge.getInterestSandbox().then(setInterestSnapshot).catch(() => {});
+    };
+    const timer = window.setInterval(refreshSchedule, 30_000);
+    return () => window.clearInterval(timer);
+  }, [bridge, viewMode]);
+
+  useEffect(() => {
+    if (!bridge || viewMode !== "settings" || interestRuntimeState.status !== "working") return;
+    const refresh = () => { void bridge.getInterestSandbox().then(setInterestSnapshot).catch(() => {}); };
+    refresh();
+    const timer = window.setInterval(refresh, 2500);
+    return () => window.clearInterval(timer);
+  }, [bridge, interestRuntimeState.status, viewMode]);
+
   useEffect(() => {
     if (viewMode !== "bubble") return;
     const source = sanitizeBubbleReply(lastAssistantMessage.content);
@@ -1211,7 +1478,7 @@ function App() {
       bubblePendingSentencesRef.current = [];
     }
 
-    if (!bubbleSegmentTextRef.current && bubbleSegmentQueueRef.current.length > 0) {
+    if (!isReplyStreaming && !bubbleSegmentTextRef.current && bubbleSegmentQueueRef.current.length > 0) {
       const next = bubbleSegmentQueueRef.current.shift() ?? "";
       bubbleSegmentTextRef.current = next;
       setBubbleSegmentText(next);
@@ -1244,6 +1511,7 @@ function App() {
       const duration = clampDuration(1400 + Array.from(bubbleSegmentText).length * 72, 2200, 6800);
       bubbleSegmentTimerRef.current = window.setTimeout(advance, duration);
     };
+    let fallbackStarted = false;
 
     const voiceBridge = bridge;
     const voiceReady = Boolean(
@@ -1253,6 +1521,22 @@ function App() {
       && (configDraft.voice.provider === "local" || configDraft.voice.provider === "gpt_sovits"
         || (configDraft.voice.apiKey && configDraft.voice.voice && configDraft.voice.model))
     );
+    setBubbleSegmentReady(!voiceReady);
+    const startTextFallback = () => {
+      if (fallbackStarted || cancelled) return;
+      fallbackStarted = true;
+      setBubbleSegmentReady(true);
+      voiceBridge?.reportSpeechSignal?.({
+        active: false,
+        level: 0,
+        phase: "fallback",
+        text: bubbleSegmentText,
+        durationMs: clampDuration(1400 + Array.from(bubbleSegmentText).length * 72, 2200, 6800),
+        mood: lastReplyMeta?.detectedMood,
+        faceParams: lastReplyMeta?.faceParams || null
+      });
+      scheduleTextFallback();
+    };
 
     if (voiceReady && voiceBridge) {
       voiceBridge.synthesizeSpeech(bubbleSegmentText, Boolean(configDraft?.voice.asmrEnabled))
@@ -1260,27 +1544,50 @@ function App() {
           if (cancelled) return;
           const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
           bubbleAudioRef.current = audio;
-          const stopLipSync = startSpeechLipSync(audio);
+          let stopLipSync = () => {};
           audio.onended = () => {
             stopLipSync();
+            voiceBridge.reportSpeechSignal?.({
+              active: false,
+              level: 0,
+              phase: "end",
+              text: bubbleSegmentText,
+              finalSegment: bubbleSegmentQueueRef.current.length === 0
+            });
             if (!cancelled) bubbleSegmentTimerRef.current = window.setTimeout(advance, 320);
           };
           audio.onerror = () => {
             stopLipSync();
-            if (!cancelled) scheduleTextFallback();
+            startTextFallback();
           };
-          return audio.play().catch((error) => {
-            stopLipSync();
-            throw error;
+          return audio.play().then(() => {
+            if (cancelled) {
+              audio.pause();
+              return;
+            }
+            setBubbleSegmentReady(true);
+            stopLipSync = startSpeechLipSync(audio);
+            voiceBridge.reportSpeechSignal?.({
+              active: true,
+              level: 0,
+              phase: "start",
+              text: bubbleSegmentText,
+              durationMs: Number.isFinite(audio.duration) && audio.duration > 0
+                ? Math.round(audio.duration * 1000)
+                : estimateSpeechDurationMs(bubbleSegmentText),
+              mood: lastReplyMeta?.detectedMood,
+              faceParams: lastReplyMeta?.faceParams || null
+            });
           });
         })
         .catch((error) => {
           if (cancelled) return;
           automaticVoiceBlockedUntilRef.current = Date.now() + 60_000;
           console.warn("[voice] automatic playback failed; pausing voice retries for 60 seconds:", error);
-          scheduleTextFallback();
+          startTextFallback();
         });
     } else {
+      setBubbleSegmentReady(true);
       scheduleTextFallback();
     }
 
@@ -1369,6 +1676,10 @@ function App() {
 
   useEffect(() => {
     return () => {
+      chatAutomaticVoiceTokenRef.current += 1;
+      chatAutomaticAudioRef.current?.pause();
+      chatAutomaticAudioRef.current = null;
+      stopSpeechLipSync();
       clearTimer(talkingHoldRef);
       clearTimer(moodTimerRef);
       clearTimer(faceTimerRef);
@@ -1790,7 +2101,7 @@ function App() {
     if (!bridge || !configDraft || installingGptSovits) return;
     setInstallingGptSovits(true);
     setGptSovitsProgress(0);
-    setGptSovitsMessage("正在从 ModelScope 下载角色权重、SoVITS 权重和参考音频，并执行 SHA-256 校验。");
+    setGptSovitsMessage("正在下载角色权重、SoVITS 权重和参考音频，并执行 SHA-256 校验。");
     try {
       const installed = await bridge.installGptSovitsProfile(configDraft.voice.gptSovitsProfileId);
       setGptSovitsProfiles(await bridge.listGptSovitsProfiles());
@@ -1799,6 +2110,70 @@ function App() {
       setGptSovitsMessage(`安装失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setInstallingGptSovits(false);
+    }
+  }
+
+  async function handleGeneratePersonaCard(createImmediately = false) {
+    if (!bridge || personaAiGenerating) return;
+    if (!personaAiPrompt.trim()) {
+      setPersonaMessage("先简单描述角色，例如“鸣潮守岸人，温柔神秘，称呼我为漂泊者”。");
+      return;
+    }
+    setPersonaAiGenerating(true);
+    setPersonaMessage("");
+    try {
+      const result = await bridge.generatePersonaCardDraft({
+        description: personaAiPrompt,
+        useWeb: personaAiUseWeb
+      });
+      setPersonaAiSources(result.sources);
+      const draft = personaDraftFromCard({
+        id: "",
+        status: "active",
+        version: 1,
+        createdAt: "",
+        updatedAt: "",
+        archivedAt: null,
+        name: result.draft.name,
+        payload: result.draft.payload
+      });
+      if (createImmediately) {
+        const created = await bridge.createPersonaCard({ name: draft.name, payload: draft.payload });
+        setPersonaCards(created.cards);
+        setPersonaDraft(personaDraftFromCard(created.card));
+        setPersonaMessage(`“${created.card.name}”已由 AI 生成并创建。需要点击“启用”才会切换人格。${result.searchWarning ? ` 联网提示：${result.searchWarning}` : ""}`);
+      } else {
+        setPersonaDraft(draft);
+        setPersonaMessage(`AI 已自动填写人物卡；确认后点击“创建人物卡”。${result.searchWarning ? ` 联网提示：${result.searchWarning}` : ""}`);
+      }
+    } catch (error) {
+      setPersonaMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPersonaAiGenerating(false);
+    }
+  }
+
+  async function handleImportGptSovitsProfile() {
+    if (!bridge || importingGptSovits) return;
+    setImportingGptSovits(true);
+    setGptSovitsMessage("请选择同一声线的一份 .ckpt、一份 .pth 和一份参考音频。");
+    try {
+      const imported = await bridge.importGptSovitsProfile(gptSovitsImportDraft);
+      if (!imported) {
+        setGptSovitsMessage("已取消导入。");
+        return;
+      }
+      const profiles = await bridge.listGptSovitsProfiles();
+      setGptSovitsProfiles(profiles);
+      if (configDraft) {
+        setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsProfileId: imported.id } });
+      }
+      setShowGptSovitsImport(false);
+      setGptSovitsMessage(`${imported.name} 已校验并加入语音库，保存“语音与 ASMR”设置后会作为当前回复声线。`);
+    } catch (error) {
+      setGptSovitsMessage(`导入失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setImportingGptSovits(false);
     }
   }
 
@@ -2243,11 +2618,60 @@ function App() {
       setConfigDraft(saved);
       const result = await bridge.runInterestActivity(type);
       setInterestSnapshot(result.snapshot);
-      setInterestMessage(`已完成《${result.activity.title}》，作品只保存在兴趣沙盒中。`);
+      setInterestMessage(result.playtest
+        ? `已完成《${result.activity.title}》并自主试玩。${result.playtest.reflection}`
+        : `已完成《${result.activity.title}》，作品只保存在兴趣沙盒中。`);
     } catch (error) {
       setInterestMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setInterestRunning(null);
+    }
+  }
+
+  async function handleCleanupInterest(mode: "failed_logs" | "all_content") {
+    if (!bridge || cleaningInterest) return;
+    if (mode === "all_content" && !window.confirm("确认清空私密空间中的全部日记、绘画、小游戏和活动记录？此操作不可撤销。")) return;
+    setCleaningInterest(true);
+    try {
+      const result = await bridge.cleanupInterestSandbox(mode);
+      setInterestSnapshot(result.snapshot);
+      setInterestLogPage(1);
+      setInterestMessage(mode === "failed_logs"
+        ? `已清理 ${result.result.removedLogs} 条失败或终止记录，完成作品保持不变。`
+        : `已清空私密空间，释放 ${(result.result.reclaimedBytes / 1024 / 1024).toFixed(1)} MB。`);
+    } catch (error) {
+      setInterestMessage(error instanceof Error ? error.message : String(error));
+      try { setInterestSnapshot(await bridge.getInterestSandbox()); } catch {}
+    } finally {
+      setCleaningInterest(false);
+    }
+  }
+
+  async function handlePlayInterestGame(activityId: string) {
+    if (!bridge || interestRunning || interestRuntimeState.status === "working") return;
+    setInterestRunning("mini_game");
+    setInterestMessage("正在隔离窗口里自主试玩，结束后会记录分数、截图和感想……");
+    try {
+      const result = await bridge.playInterestGame(activityId);
+      setInterestSnapshot(result.snapshot);
+      setInterestMessage(`${result.playtest.reflection}${result.playtest.repairAttempts ? ` 已自动修复并重试 ${result.playtest.repairAttempts} 次。` : ""}`);
+    } catch (error) {
+      setInterestMessage(error instanceof Error ? error.message : String(error));
+      try { setInterestSnapshot(await bridge.getInterestSandbox()); } catch {}
+    } finally {
+      setInterestRunning(null);
+    }
+  }
+
+  async function handleInterruptInterestActivity() {
+    if (!bridge || interestRuntimeState.status !== "working") return;
+    try {
+      const result = await bridge.interruptInterestActivity();
+      if (result.interrupted) {
+        setInterestMessage(`已请求停止${result.label || "当前沙盒活动"}，正在安全收尾……`);
+      }
+    } catch (error) {
+      setInterestMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -2568,15 +2992,66 @@ function App() {
                 <h2>身份、人设与表达习惯</h2>
                 <p>卡面独立保存并保留版本；启用后会稳定注入每一次模型对话。COS 与背景只作为表达层，不会污染现实记忆。</p>
               </div>
-              <button className="ghost-button compact" type="button" onClick={() => setPersonaDraft(personaDraftFromCard())}>新建人物卡</button>
+              <div className="persona-heading-actions">
+                <button className="ghost-button compact" type="button" onClick={() => void bridge?.openPersonaFolder()}>打开保存位置</button>
+                <button className="primary-button compact" type="button" onClick={() => {
+                  setPersonaDraft(personaDraftFromCard());
+                  setPersonaMessage("");
+                }}>新建人物卡</button>
+              </div>
+            </div>
+            <div className="persona-storage-info">
+              <strong>人物卡数据库</strong>
+              <code>{dataPathInfo?.personaDatabasePath ?? "%APPDATA%\\v-manager\\agent-data\\storage\\vivi.sqlite"}</code>
+              <span>人物卡保存在 SQLite 中，不是单独的文本文件；“打开保存位置”会在资源管理器中选中该数据库。</span>
+            </div>
+            <div className="persona-priority-note">
+              <strong>与知识库 persona.md 的关系</strong>
+              <span>当前启用的人物卡是身份、称呼和表达风格的主设定；知识库中的 persona.md 只在检索命中时补充背景与偏好。两者冲突时人物卡优先，不会反向改写彼此。</span>
+              <code>{dataPathInfo?.personaKnowledgePath ?? "%APPDATA%\\v-manager\\agent-data\\knowledge\\persona.md"}</code>
+            </div>
+            <div className="persona-ai-panel">
+              <div>
+                <strong>AI 生成人物卡</strong>
+                <span>用一句模糊描述即可。联网模式会搜索角色资料并列出来源，内容生成后仍可逐项修改。</span>
+              </div>
+              <textarea
+                rows={3}
+                value={personaAiPrompt}
+                placeholder="例如：鸣潮守岸人；温柔、克制而神秘，称呼我为漂泊者"
+                onChange={(event) => setPersonaAiPrompt(event.target.value)}
+              />
+              <div className="persona-ai-actions">
+                <label className="voice-switch"><input type="checkbox" checked={personaAiUseWeb} onChange={(event) => setPersonaAiUseWeb(event.target.checked)} />联网搜索补充设定</label>
+                <button className="ghost-button compact" type="button" disabled={personaAiGenerating} onClick={() => void handleGeneratePersonaCard(false)}>{personaAiGenerating ? "AI 正在整理…" : "AI 生成并填写"}</button>
+                <button className="primary-button compact" type="button" disabled={personaAiGenerating} onClick={() => void handleGeneratePersonaCard(true)}>{personaAiGenerating ? "生成中…" : "AI 一键创建"}</button>
+              </div>
+              {personaAiSources.length ? <div className="persona-ai-sources"><span>本次参考来源：</span>{personaAiSources.map((source) => <button className="link-button" type="button" key={source.url} title={source.snippet} onClick={() => void bridge?.openExternal(source.url)}>{source.title}</button>)}</div> : null}
+            </div>
+            <div className="persona-list-toolbar">
+              <input
+                value={personaSearch}
+                placeholder="搜索卡面、身份或性格…"
+                onChange={(event) => setPersonaSearch(event.target.value)}
+              />
+              <select value={personaListFilter} onChange={(event) => setPersonaListFilter(event.target.value as typeof personaListFilter)}>
+                <option value="all">全部人物卡</option>
+                <option value="active">可用人物卡</option>
+                <option value="archived">已归档</option>
+              </select>
+              <span>{visiblePersonaCards.length} / {personaCards.length}</span>
             </div>
             <div className="persona-card-picker">
-              {personaCards.map((card) => (
+              {visiblePersonaCards.map((card) => (
                 <button className={`${personaDraft.id === card.id ? "is-selected" : ""} ${card.status === "archived" ? "is-archived" : ""}`} type="button" key={card.id} onClick={() => selectPersonaCard(card)}>
-                  <strong>{card.name}</strong>
-                  <span>{card.isActive ? "当前启用" : card.status === "archived" ? "已归档" : `版本 ${card.version}`}</span>
+                  <span className="persona-list-main">
+                    <strong>{card.name}</strong>
+                    <small>{card.payload.identityName} · {card.payload.identity}</small>
+                  </span>
+                  <span className={`persona-list-status ${card.isActive ? "is-active" : ""}`}>{card.isActive ? "当前启用" : card.status === "archived" ? "已归档" : `版本 ${card.version}`}</span>
                 </button>
               ))}
+              {visiblePersonaCards.length === 0 ? <p className="persona-list-empty">没有符合条件的人物卡。</p> : null}
             </div>
             <div className="persona-form-grid">
               <label>卡面名称<input value={personaDraft.name} disabled={personaDraft.status === "archived"} onChange={(event) => setPersonaDraft({ ...personaDraft, name: event.target.value })} /></label>
@@ -2594,7 +3069,6 @@ function App() {
               <label className="persona-wide">角色 / COS 设定<textarea rows={3} value={personaDraft.payload.cosplay} disabled={personaDraft.status === "archived"} onChange={(event) => updatePersonaPayload("cosplay", event.target.value)} /></label>
               <label className="persona-wide">额外自定义信息<textarea rows={3} value={personaDraft.payload.extra} disabled={personaDraft.status === "archived"} onChange={(event) => updatePersonaPayload("extra", event.target.value)} /></label>
               <label className="persona-wide">示例台词（每行一条）<textarea rows={3} value={personaDraft.payload.exampleLines.join("\n")} disabled={personaDraft.status === "archived"} onChange={(event) => updatePersonaPayload("exampleLines", event.target.value.split("\n").map((item) => item.trim()).filter(Boolean))} /></label>
-              <label>绑定本地声线<input list="persona-local-voices" value={personaDraft.payload.voicePackId} disabled={personaDraft.status === "archived"} onChange={(event) => updatePersonaPayload("voicePackId", event.target.value)} placeholder="例如 sherpa-zh-ll:2" /><datalist id="persona-local-voices">{localTtsPacks.flatMap((pack) => pack.speakers.map((speaker) => <option value={`${pack.id}:${speaker.id}`} key={`${pack.id}:${speaker.id}`}>{pack.name} · {speaker.name}</option>))}{gptSovitsProfiles.map((profile) => <option value={`gpt-sovits:${profile.id}`} key={profile.id}>{profile.name}</option>)}</datalist></label>
               <label>绑定 Live2D 模型<select value={personaDraft.payload.live2dModelId} disabled={personaDraft.status === "archived"} onChange={(event) => updatePersonaPayload("live2dModelId", event.target.value)}><option value="">跟随全局设置</option>{live2dModels.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}</select></label>
             </div>
             <div className="persona-card-actions">
@@ -2674,6 +3148,16 @@ function App() {
 
           <section className="panel-block settings-panel-intelligence intelligence-model-panel">
             <p className="eyebrow">模型与记忆</p>
+            <div className="startup-diagnostics">
+              <span>启动自检</span>
+              <strong>{bootstrap.startupDiagnostics?.deepseek === "ready" ? "对话 API 正常" : bootstrap.startupDiagnostics?.deepseek === "not_configured" ? "对话 API 未配置" : bootstrap.startupDiagnostics?.deepseek === "unavailable" ? "对话 API 暂不可用" : "等待检测"}</strong>
+              <small>
+                已恢复 {bootstrap.startupDiagnostics?.historyRestored ?? 0} 条当前人物卡对话 ·
+                {bootstrap.startupDiagnostics?.rag && "error" in bootstrap.startupDiagnostics.rag
+                  ? " RAG 自检失败"
+                  : bootstrap.startupDiagnostics?.rag?.rebuilt ? " RAG 已自动更新" : " RAG 索引已是最新"}
+              </small>
+            </div>
             <label>
               DeepSeek API Key
               <input
@@ -3306,7 +3790,10 @@ function App() {
                 </span>
               </div>
               <div className="voice-config-grid">
-                <label>角色声线<select value={configDraft.voice.gptSovitsProfileId} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsProfileId: event.target.value } })}>
+                <label>角色声线<select value={configDraft.voice.gptSovitsProfileId} onChange={(event) => {
+                  const profile = gptSovitsProfiles.find((item) => item.id === event.target.value);
+                  setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsProfileId: event.target.value, gptSovitsSpeed: profile?.recommendedSpeed ?? configDraft.voice.gptSovitsSpeed } });
+                }}>
                   {gptSovitsProfiles.length ? gptSovitsProfiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name} · {profile.version}</option>) : <option value="dania-v2-pro-plus">达妮娅 · v2ProPlus</option>}
                 </select></label>
                 <label>本机 API 地址<input value={configDraft.voice.gptSovitsBaseUrl} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsBaseUrl: event.target.value } })} placeholder="http://127.0.0.1:9880" /></label>
@@ -3327,11 +3814,38 @@ function App() {
                 </div>
               </div>
               <div className="asmr-actions">
-                <button className="primary-button" type="button" disabled={installingGptSovits || gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.installed} onClick={() => void handleInstallGptSovitsProfile()}>
-                  {installingGptSovits ? `下载角色声线 ${gptSovitsProgress}%` : gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.installed ? "角色声线已安装" : "下载达妮娅声线（约 329 MB）"}
+                <button className="primary-button" type="button" disabled={installingGptSovits || gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.installed || gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.downloadable === false} onClick={() => void handleInstallGptSovitsProfile()}>
+                  {installingGptSovits ? `下载角色声线 ${gptSovitsProgress}%` : gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.installed ? "角色声线已安装" : `下载${gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.name || "角色声线"}`}
                 </button>
                 <button className="ghost-button compact" type="button" onClick={() => void bridge?.openLocalTtsFolder()}>打开声线目录</button>
+                <button className="ghost-button compact" type="button" disabled={!gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.sourceUrl} onClick={() => {
+                  const sourceUrl = gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)?.sourceUrl;
+                  if (sourceUrl) void bridge?.openExternal(sourceUrl);
+                }}>打开模型网页</button>
+                <button className="ghost-button compact" type="button" onClick={() => setShowGptSovitsImport((value) => !value)}>{showGptSovitsImport ? "收起导入" : "导入本地声线"}</button>
               </div>
+              {gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId) ? <div className="power-safety-note">
+                <strong>{gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)!.author}</strong>
+                <span>{gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)!.description}</span>
+                <small>{gptSovitsProfiles.find((profile) => profile.id === configDraft.voice.gptSovitsProfileId)!.license}</small>
+              </div> : null}
+              {showGptSovitsImport ? <div className="gpt-sovits-import-panel">
+                <div className="voice-config-grid">
+                  <label>声线名称<input value={gptSovitsImportDraft.name} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, name: event.target.value })} placeholder="例如：我的角色声线" /></label>
+                  <label>作者/来源<input value={gptSovitsImportDraft.author} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, author: event.target.value })} placeholder="模型作者" /></label>
+                  <label>模型版本<input value={gptSovitsImportDraft.version} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, version: event.target.value })} placeholder="v2ProPlus" /></label>
+                  <label>模型网页<input value={gptSovitsImportDraft.sourceUrl} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, sourceUrl: event.target.value })} placeholder="https://www.modelscope.cn/models/..." /></label>
+                  <label className="voice-config-wide">参考音频原文<input value={gptSovitsImportDraft.promptText} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, promptText: event.target.value })} placeholder="必须与参考音频逐字一致" /></label>
+                  <label>参考语言<select value={gptSovitsImportDraft.promptLang} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, promptLang: event.target.value })}><option value="zh">中文</option><option value="ja">日语</option><option value="en">英语</option><option value="ko">韩语</option><option value="yue">粤语</option></select></label>
+                  <label>输出语言<select value={gptSovitsImportDraft.textLang} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, textLang: event.target.value })}><option value="zh">中文</option><option value="ja">日语</option><option value="en">英语</option><option value="ko">韩语</option><option value="yue">粤语</option><option value="auto">自动</option></select></label>
+                  <label className="voice-config-wide">许可说明<input value={gptSovitsImportDraft.license} onChange={(event) => setGptSovitsImportDraft({ ...gptSovitsImportDraft, license: event.target.value })} /></label>
+                </div>
+                <div className="asmr-actions">
+                  <button className="primary-button" type="button" disabled={importingGptSovits || !gptSovitsImportDraft.name.trim() || !gptSovitsImportDraft.sourceUrl.trim() || !gptSovitsImportDraft.promptText.trim()} onClick={() => void handleImportGptSovitsProfile()}>{importingGptSovits ? "校验并导入中…" : "选择 3 个文件并导入"}</button>
+                  <button className="ghost-button compact" type="button" disabled={!gptSovitsImportDraft.sourceUrl.trim()} onClick={() => void bridge?.openExternal(gptSovitsImportDraft.sourceUrl)}>打开来源网页</button>
+                </div>
+                <p className="knowledge-hint">一次选择同一声线的 GPT .ckpt、SoVITS .pth 和参考音频。文件会复制进独立语音库并记录 SHA-256，不会从原位置直接加载。</p>
+              </div> : null}
               <p className="knowledge-hint">连接仅允许 127.0.0.1 / localhost。手动模式下，服务未启动时不会因为自动朗读而自行常驻。</p>
               <p className="knowledge-hint">模型页标注 Apache-2.0；角色声音仍建议仅限个人使用，不用于冒充、欺骗或未经授权的公开发布。</p>
               {gptSovitsMessage ? <p className="feedback-text">{gptSovitsMessage}</p> : null}
@@ -3631,12 +4145,16 @@ function App() {
                 <strong>{Math.round(lifeState?.energy ?? 100)}%</strong>
               </div>
               <div>
-                <span>今日主动次数</span>
-                <strong>{lifeState?.daily.proactiveCount ?? 0} / {configDraft.proactive.dailyLimit}</strong>
+                <span>上次主动问候</span>
+                <strong>{lifeState?.lastProactiveAt ? new Date(lifeState.lastProactiveAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }) : "今天还没有"}</strong>
               </div>
             </div>
 
-            <div className="companion-memory-summary">
+            <details className="settings-fold companion-memory-summary">
+              <summary>
+                <span>长期陪伴记忆</span>
+                <small>事实 {companionMemory?.facts.length ?? 0} · 经历 {companionMemory?.episodes.length ?? 0} · 习惯 {companionMemory?.habits.length ?? 0} · 待跟进 {companionMemory?.commitments.filter((item) => item.status === "open").length ?? 0}</small>
+              </summary>
               <div className="section-header-row">
                 <div>
                   <strong>深层陪伴记忆</strong>
@@ -3650,11 +4168,24 @@ function App() {
                 <article className="stat-card"><span>习惯</span><strong>{companionMemory?.habits.length ?? 0}</strong></article>
                 <article className="stat-card"><span>未完成承诺</span><strong>{companionMemory?.commitments.filter((item) => item.status === "open").length ?? 0}</strong></article>
               </div>
+              <div className="memory-category-list">
+                {([
+                  ["事实", companionMemory?.facts],
+                  ["近期经历", companionMemory?.episodes],
+                  ["习惯", companionMemory?.habits],
+                  ["未完成承诺", companionMemory?.commitments.filter((item) => item.status === "open")]
+                ] as const).map(([label, items]) => (
+                  <details key={label}>
+                    <summary>{label}<span>{items?.length ?? 0}</span></summary>
+                    {items?.length ? <ul>{items.slice(-8).reverse().map((item) => <li key={item.id}>{item.content}</li>)}</ul> : <p>暂无记录</p>}
+                  </details>
+                ))}
+              </div>
               <p className="knowledge-hint">
                 当前打扰评分：{Math.round((companionMemory?.feedback.interruptionScore ?? 0.1) * 100)}% ·
                 忽略 {companionMemory?.feedback.ignored ?? 0} / 稍后 {companionMemory?.feedback.later ?? 0} / 喜欢 {companionMemory?.feedback.liked ?? 0}
               </p>
-            </div>
+            </details>
 
             <div className="relationship-switches proactive-switches">
               <label className="voice-switch">
@@ -3682,6 +4213,17 @@ function App() {
               <label className="voice-switch">
                 <input
                   type="checkbox"
+                  checked={configDraft.proactive.socialCheckins}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    proactive: { ...configDraft.proactive, socialCheckins: event.target.checked }
+                  })}
+                />
+                拟人化主动问候
+              </label>
+              <label className="voice-switch">
+                <input
+                  type="checkbox"
                   checked={configDraft.proactive.lateNightCare}
                   onChange={(event) => setConfigDraft({
                     ...configDraft,
@@ -3703,7 +4245,9 @@ function App() {
               </label>
             </div>
 
-            <div className="inline-grid proactive-number-grid">
+            <details className="settings-fold">
+              <summary><span>频率与时间设置</span><small>提醒间隔、休息时间和安静时段</small></summary>
+              <div className="inline-grid proactive-number-grid">
               <label>
                 连续工作多久后提醒
                 <select
@@ -3731,12 +4275,17 @@ function App() {
                 </select>
               </label>
               <label>
-                每日主动上限
+                主动问候最短间隔
                 <select
-                  value={configDraft.proactive.dailyLimit}
-                  onChange={(event) => setConfigDraft({ ...configDraft, proactive: { ...configDraft.proactive, dailyLimit: Number(event.target.value) } })}
+                  value={configDraft.proactive.minimumIntervalMinutes}
+                  onChange={(event) => setConfigDraft({ ...configDraft, proactive: { ...configDraft.proactive, minimumIntervalMinutes: Number(event.target.value) } })}
                 >
-                  {[2, 3, 4, 6, 8].map((count) => <option value={count} key={count}>{count} 次</option>)}
+                  <option value={30}>30 分钟</option>
+                  <option value={60}>1 小时</option>
+                  <option value={90}>1.5 小时</option>
+                  <option value={120}>2 小时</option>
+                  <option value={180}>3 小时</option>
+                  <option value={240}>4 小时</option>
                 </select>
               </label>
               <label>
@@ -3781,7 +4330,8 @@ function App() {
                 安静时段结束
                 <input type="time" value={configDraft.proactive.quietEnd} onChange={(event) => setConfigDraft({ ...configDraft, proactive: { ...configDraft.proactive, quietEnd: event.target.value } })} />
               </label>
-            </div>
+              </div>
+            </details>
 
             <div className="relationship-actions proactive-actions">
               <span>{lifeState?.pausedUntil && new Date(lifeState.pausedUntil) > new Date() ? "今天已暂停主动提醒" : "状态每 30 秒在本地更新"}</span>
@@ -3795,7 +4345,8 @@ function App() {
               </div>
             </div>
 
-            <div className="schedule-manager">
+            <details className="settings-fold schedule-manager">
+              <summary><span>本地日程与电源计划</span><small>{schedules.length} 项计划</small></summary>
               <div className="section-header-row">
                 <div>
                   <p className="eyebrow">本地日程与电源计划</p>
@@ -3848,7 +4399,7 @@ function App() {
                   </div>
                 )) : <p className="schedule-empty">本地日程表中目前没有等待执行的事项。</p>}
               </div>
-            </div>
+            </details>
           </section>
           <section className="panel-block interest-sandbox-panel settings-panel-interests">
             <div className="section-header-row">
@@ -3862,7 +4413,9 @@ function App() {
             </div>
 
             <div className="power-safety-note">
-              普通创作只会在主人交代的任务完成、没有其他任务运行且电脑达到设定空闲时间后开始。每日日记独立保证：当天首次启动 2–3 小时后写入，重复写会更新同一个日期文件。
+              {configDraft.interests.permissionLevel === "autonomous"
+                ? "自主生活模式会按下方时间窗生成每日虚拟生活日程；到达日程且电脑空闲后开始活动，不要求主人先完成任务。仍只写入 vivi-sandbox，其他本地文件、外链和系统操作继续受限。"
+                : "普通创作只会在主人交代的任务完成、没有其他任务运行且电脑达到设定空闲时间后开始。每日日记会在设定时间之后、电脑空闲时写入。"}
             </div>
 
             <div className="schedule-integration-summary">
@@ -3874,15 +4427,59 @@ function App() {
               <div>
                 <span>今日单篇日记</span>
                 <strong>{interestSnapshot?.today.diaryWritten ? "已写入" : "等待写入"}</strong>
-                <small>{interestSnapshot?.session.diaryDueAt ? `预计 ${new Date(interestSnapshot.session.diaryDueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })} 后执行` : "启动后安排"}</small>
+                <small>{todayDiaryActivity
+                  ? `完成于 ${new Date(todayDiaryActivity.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`
+                  : formatDiarySchedule(interestSnapshot?.session.diaryDueAt, interestScheduleClock)}</small>
+              </div>
+              <div>
+                <span>下一项生活日程</span>
+                <strong>{nextInterestRoutine ? interestActivityLabel(nextInterestRoutine.type) : interestSnapshot?.routine?.length ? "今日计划已完成" : configDraft.interests.virtualScheduleEnabled ? "暂无可排活动" : "虚拟日程未启用"}</strong>
+                <small>{nextInterestRoutine
+                  ? `${new Date(nextInterestRoutine.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })} · ${nextInterestRoutine.status === "due" ? "等待电脑空闲" : "尚未到时间"}`
+                  : interestSnapshot?.routine?.length ? `已完成 ${completedInterestRoutineCount} / ${interestSnapshot.routine.length} 项` : "开启自主生活和虚拟日程后生成"}</small>
               </div>
             </div>
+
+            {interestRuntimeState.status === "working" && interestRuntimeState.logs?.length ? (
+              <div className="interest-live-log">
+                <div><strong>实时活动日志</strong><span>{interestRuntimeState.progress?.actions != null ? `${interestRuntimeState.progress.actions} 次操作` : interestRuntimeState.phase}</span></div>
+                {interestRuntimeState.logs.slice(-6).map((entry, index) => (
+                  <p key={`${entry.at}-${index}`}><time>{new Date(entry.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}</time><span>{entry.label}</span>{entry.highestScore != null ? <em>{entry.highestScore} 分</em> : null}</p>
+                ))}
+              </div>
+            ) : null}
+
+            {interestSnapshot?.routine?.length ? (
+              <div className="interest-routine-panel">
+                <div className="interest-routine-heading">
+                  <strong>今日虚拟生活日程</strong>
+                  <small>每 5 分钟检查一次；需到达计划时间、电脑空闲、未超出 Token/任务/磁盘上限，且没有其他任务运行。</small>
+                </div>
+                <div className="interest-routine-list">
+                  {interestSnapshot.routine.map((item) => (
+                    <div className={`interest-routine-item is-${item.status}`} key={item.id}>
+                      <time>{new Date(item.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}</time>
+                      <div>
+                        <strong>{item.title || interestActivityLabel(item.type)}</strong>
+                        <small>{item.title ? interestActivityLabel(item.type) : `${interestCategoryLabel(item.category)} · ${item.status === "due" ? "已到时间，等待触发" : item.status === "missed" ? "时间已过，本次跳过" : "计划活动"}`}</small>
+                      </div>
+                      <span>{item.status === "completed" ? "已完成" : item.status === "due" ? "等待空闲" : item.status === "missed" ? "已错过" : "未到时间"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <div className="relationship-switches proactive-switches">
               <label className="voice-switch">
                 <input type="checkbox" checked={configDraft.interests.enabled} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, enabled: event.target.checked } })} />
-                启用 Vivi 的私密空间
+                启用私密空间（允许手动创作）
               </label>
+              <label className="voice-switch">
+                <input type="checkbox" checked={configDraft.interests.autonomousLifeEnabled} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, autonomousLifeEnabled: event.target.checked } })} />
+                启用完整自主生活模块
+              </label>
+              <span className="switch-group-divider">创作与试玩</span>
               <label className="voice-switch">
                 <input type="checkbox" checked={configDraft.interests.activities.diary} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, activities: { ...configDraft.interests.activities, diary: event.target.checked } } })} />
                 写每日日记
@@ -3895,16 +4492,35 @@ function App() {
                 <input type="checkbox" disabled={configDraft.interests.permissionLevel === "diary_only" || configDraft.interests.permissionLevel === "off"} checked={configDraft.interests.activities.miniGames} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, activities: { ...configDraft.interests.activities, miniGames: event.target.checked } } })} />
                 创建离线小游戏
               </label>
+              <label className="voice-switch">
+                <input type="checkbox" disabled={!configDraft.interests.activities.miniGames} checked={configDraft.interests.selfPlayGames} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, selfPlayGames: event.target.checked } })} />
+                游戏完成后自主试玩并记录
+              </label>
+              <label className="voice-switch">
+                <input type="checkbox" disabled={configDraft.interests.permissionLevel !== "autonomous"} checked={configDraft.interests.virtualScheduleEnabled} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, virtualScheduleEnabled: event.target.checked } })} />
+                启用人物虚拟生活日程
+              </label>
             </div>
 
-            <div className="inline-grid proactive-number-grid">
+            <details className="settings-fold">
+              <summary><span>权限、预算与时间</span><small>高级设置，通常无需频繁调整</small></summary>
+              <div className="inline-grid proactive-number-grid">
               <label>
                 权限等级
-                <select value={configDraft.interests.permissionLevel} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, permissionLevel: event.target.value as AgentConfig["interests"]["permissionLevel"] } })}>
+                <select value={configDraft.interests.permissionLevel} onChange={(event) => {
+                  const permissionLevel = event.target.value as AgentConfig["interests"]["permissionLevel"];
+                  setConfigDraft({ ...configDraft, interests: {
+                    ...configDraft.interests,
+                    permissionLevel,
+                    dailyTokenBudget: permissionLevel === "autonomous" ? 2_000_000 : configDraft.interests.dailyTokenBudget,
+                    minimumHoursBetweenTasks: permissionLevel === "autonomous" ? Math.min(1, configDraft.interests.minimumHoursBetweenTasks) : configDraft.interests.minimumHoursBetweenTasks
+                  } });
+                }}>
                   <option value="off">关闭：不允许任何活动</option>
                   <option value="diary_only">日记：仅写本地日记</option>
                   <option value="create">创作：允许生成作品但不自动打开</option>
                   <option value="preview">预览：创作后可自动打开作品</option>
+                  <option value="autonomous">自主生活：按日程在沙盒内自由运转</option>
                 </select>
               </label>
               <label>
@@ -3915,17 +4531,22 @@ function App() {
                   <option value="weather_news">只读天气 + 内置领域资讯</option>
                 </select>
               </label>
-              <label>每日任务上限<input type="number" min={1} max={6} value={configDraft.interests.dailyTaskLimit} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, dailyTaskLimit: Number(event.target.value) } })} /></label>
-              <label>每日 Token 上限<input type="number" min={500} max={20000} step={500} value={configDraft.interests.dailyTokenBudget} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, dailyTokenBudget: Number(event.target.value) } })} /></label>
-              <label>单次最长时间（分钟）<input type="number" min={1} max={20} value={configDraft.interests.maxTaskMinutes} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, maxTaskMinutes: Number(event.target.value) } })} /></label>
+              <label>每日创作任务上限<input type="number" min={1} max={48} value={configDraft.interests.dailyTaskLimit} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, dailyTaskLimit: Number(event.target.value) } })} /></label>
+              <label>自主生活每日 Token 总预算<input type="number" min={500} max={2000000} step={500} value={configDraft.interests.dailyTokenBudget} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, dailyTokenBudget: Number(event.target.value) } })} /></label>
+              <label>每日生活日程项数<input type="number" min={3} max={24} value={configDraft.interests.autonomousRoutineLimit} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, autonomousRoutineLimit: Number(event.target.value) } })} /></label>
+              <label>每日娱乐上限<input type="number" min={0} max={12} value={configDraft.interests.entertainmentDailyLimit} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, entertainmentDailyLimit: Number(event.target.value) } })} /></label>
+              <label>单次最长时间（分钟）<input type="number" min={1} max={60} value={configDraft.interests.maxTaskMinutes} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, maxTaskMinutes: Number(event.target.value) } })} /></label>
               <label>磁盘上限（MB）<input type="number" min={10} max={2048} value={configDraft.interests.maxDiskMB} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, maxDiskMB: Number(event.target.value) } })} /></label>
               <label>电脑空闲多久后可活动（分钟）<input type="number" min={5} max={240} value={configDraft.interests.idleMinutes} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, idleMinutes: Number(event.target.value) } })} /></label>
-              <label>两次活动最小间隔（小时）<input type="number" min={1} max={24} value={configDraft.interests.minimumHoursBetweenTasks} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, minimumHoursBetweenTasks: Number(event.target.value) } })} /></label>
+              <label>两次活动最小间隔（小时）<input type="number" min={0} max={24} value={configDraft.interests.minimumHoursBetweenTasks} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, minimumHoursBetweenTasks: Number(event.target.value) } })} /></label>
+              <label>单次试玩上限（秒）<input type="number" min={5} max={60} value={configDraft.interests.selfPlayMaxSeconds} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, selfPlayMaxSeconds: Number(event.target.value) } })} /></label>
+              <label>单次试玩操作上限<input type="number" min={8} max={120} value={configDraft.interests.selfPlayMaxActions} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, selfPlayMaxActions: Number(event.target.value) } })} /></label>
+              <label>失败自动修复次数<input type="number" min={0} max={2} value={configDraft.interests.selfRepairAttempts} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, selfRepairAttempts: Number(event.target.value) } })} /></label>
+              <label>每日日记计划时间<input type="time" value={configDraft.interests.diaryTime} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, diaryTime: event.target.value } })} /></label>
               <label>允许开始时间<input type="time" value={configDraft.interests.activeStart} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, activeStart: event.target.value } })} /></label>
               <label>允许结束时间<input type="time" value={configDraft.interests.activeEnd} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, activeEnd: event.target.value } })} /></label>
-              <label>日记安排<input value="当日首次启动后 2–3 小时" readOnly /></label>
               <label>天气定位<input value={interestSnapshot?.location ? `${interestSnapshot.location.city || interestSnapshot.location.region || "Windows 已定位"} · 精度约 ${Math.round(interestSnapshot.location.accuracy)} 米` : "等待 Windows 定位授权"} readOnly /></label>
-            </div>
+              </div>
 
             {configDraft.interests.networkAccess === "weather_news" ? (
               <div className="relationship-switches proactive-switches">
@@ -3947,12 +4568,13 @@ function App() {
               <input type="checkbox" disabled={configDraft.interests.permissionLevel !== "preview"} checked={configDraft.interests.autoOpenPreview} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, autoOpenPreview: event.target.checked } })} />
               完成后自动打开作品（仅“预览”权限可用）
             </label>
+            </details>
 
             <div className="stats-grid">
               <article className="stat-card"><span>今日自主创作</span><strong>{interestSnapshot?.today.creativeTaskCount ?? 0} / {configDraft.interests.dailyTaskLimit}</strong></article>
-              <article className="stat-card"><span>今日单篇日记</span><strong>{interestSnapshot?.today.diaryWritten ? "已更新" : "未写"}</strong></article>
-              <article className="stat-card"><span>今日 Token</span><strong>{interestSnapshot?.today.tokenCount ?? 0}</strong></article>
-              <article className="stat-card"><span>独立空间占用</span><strong>{((interestSnapshot?.diskBytes ?? 0) / 1024 / 1024).toFixed(1)} MB</strong></article>
+              <article className="stat-card"><span>轻量 / 娱乐 / 陪伴</span><strong>{interestSnapshot?.today.lightActivityCount ?? 0} / {interestSnapshot?.today.entertainmentCount ?? 0} / {interestSnapshot?.today.companionActivityCount ?? 0}</strong></article>
+              <article className="stat-card"><span>自主 Token 总预算</span><strong>{interestSnapshot?.today.tokenCount ?? 0} / {configDraft.interests.dailyTokenBudget}</strong></article>
+              <article className="stat-card"><span>独立空间占用</span><strong>{formatStorageBytes(interestSnapshot?.diskBytes)}</strong></article>
             </div>
 
             <div className="action-row">
@@ -3961,18 +4583,77 @@ function App() {
               <button className="ghost-button compact" type="button" disabled={!bridge || Boolean(interestRunning) || interestRuntimeState.status === "working"} onClick={() => void handleInterestActivity("mini_game")}>现在做个小游戏</button>
               <button className="ghost-button compact" type="button" disabled={!bridge} onClick={async () => setInterestSnapshot(await bridge!.getInterestSandbox())}>刷新记录</button>
             </div>
+
+            {configDraft.interests.autonomousLifeEnabled ? (
+              <details className="settings-fold">
+                <summary><span>自主生活内容</span><small>选择允许自行安排的日常行为</small></summary>
+                <div className="autonomous-activity-switches">
+                {([
+                  ["collectDiaryMaterials", "收集日记素材"], ["browseInformation", "看天气和资讯"],
+                  ["organizeMemory", "整理记忆和近期话题"], ["playExistingGame", "玩已有游戏"],
+                  ["improveExistingGame", "改进以前的游戏"], ["reviewDrawing", "回顾自己的画作"],
+                  ["planCreation", "规划下一次创作"], ["rest", "休息和发呆"],
+                  ["prepareChatTopics", "准备聊天话题"]
+                ] as const).map(([key, label]) => (
+                  <label className="voice-switch" key={key}>
+                    <input type="checkbox" checked={configDraft.interests.autonomousActivities[key]} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, autonomousActivities: { ...configDraft.interests.autonomousActivities, [key]: event.target.checked } } })} />
+                    {label}
+                  </label>
+                ))}
+                </div>
+              </details>
+            ) : <p className="knowledge-hint">自主生活关闭时，不生成虚拟日程、不执行后台日常、不使用自主预算；手动对话、原有工具和手动沙盒按钮保持可用。</p>}
             {interestMessage ? <p className="feedback-text">{interestMessage}</p> : null}
 
-            <div className="file-result-list operation-log-list">
-              {interestSnapshot?.activities.slice(0, 12).map((activity) => (
-                <article className="file-result" key={activity.id}>
-                  <strong>{activity.title}</strong>
-                  <span>{activity.type === "diary" ? "日记" : activity.type === "drawing" ? "绘画" : "小游戏"} · {activity.action === "updated" ? "更新" : "新建"} · {new Date(activity.createdAt).toLocaleString("zh-CN", { hour12: false })}</span>
-                  <p>{activity.summary}</p>
-                  <button className="ghost-button compact" type="button" disabled={!activity.artifactPath} onClick={() => void bridge?.openInterestArtifact(activity.artifactPath)}>{activity.status === "completed" ? "查看作品" : activity.status === "cancelled" ? "已终止，等待续作" : "未生成作品"}</button>
-                </article>
-              ))}
-              {interestSnapshot && !interestSnapshot.activities.length ? <p className="knowledge-hint">这里还没有活动。启用并保存后，Vivi 会在符合限制时开始自己的小创作。</p> : null}
+            <div className="interest-storage-panel">
+              <div className="interest-storage-heading">
+                <div><strong>空间管理</strong><span>失败记录不包含作品；清理失败日志不会删除已经完成的日记、绘画或小游戏。</span></div>
+                <div className="interest-storage-actions">
+                  <button className="ghost-button compact" type="button" disabled={cleaningInterest || !(interestSnapshot?.storage?.failedCount)} onClick={() => void handleCleanupInterest("failed_logs")}>清理失败记录（{interestSnapshot?.storage?.failedCount ?? 0}）</button>
+                  <button className="ghost-button compact danger" type="button" disabled={cleaningInterest || !(interestSnapshot?.activities.length)} onClick={() => void handleCleanupInterest("all_content")}>清空全部作品</button>
+                </div>
+              </div>
+              <div className="interest-category-actions">
+                <button className="ghost-button compact" type="button" disabled={!bridge} onClick={() => void bridge?.openInterestCategory("diary")}>打开日记目录</button>
+                <button className="ghost-button compact" type="button" disabled={!bridge} onClick={() => void bridge?.openInterestCategory("drawing")}>打开绘画目录</button>
+                <button className="ghost-button compact" type="button" disabled={!bridge} onClick={() => void bridge?.openInterestCategory("mini_game")}>打开游戏目录</button>
+              </div>
+              <div className="interest-storage-breakdown">
+                <span>日记 {formatStorageBytes(interestSnapshot?.storage?.byType.diary)}</span>
+                <span>绘画 {formatStorageBytes(interestSnapshot?.storage?.byType.drawing)}</span>
+                <span>小游戏 {formatStorageBytes(interestSnapshot?.storage?.byType.mini_game)}</span>
+                <span>日常记录 {formatStorageBytes(interestSnapshot?.storage?.byType.life)}</span>
+                <span>人格归档 {interestSnapshot?.storage?.personaCount ?? 0} 个</span>
+              </div>
+            </div>
+
+            <div className="interest-log-panel">
+              <div className="interest-log-toolbar">
+                <div><strong>活动记录</strong><span>共 {filteredInterestActivities.length} 条</span></div>
+                <select value={interestLogStatus} onChange={(event) => { setInterestLogStatus(event.target.value as typeof interestLogStatus); setInterestLogPage(1); }}>
+                  <option value="all">全部状态</option><option value="completed">仅完成</option><option value="failed">失败 / 终止</option>
+                </select>
+                <select value={interestLogPersona} onChange={(event) => { setInterestLogPersona(event.target.value); setInterestLogPage(1); }}>
+                  <option value="all">全部人物卡</option>{interestPersonaOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </div>
+              {pagedInterestActivities.length ? <table className="interest-log-table">
+                <thead><tr><th>作品</th><th>类型 / 状态</th><th>人物卡</th><th>时间</th><th>操作</th></tr></thead>
+                <tbody>{pagedInterestActivities.map((activity) => (
+                  <tr key={activity.id} className={activity.status !== "completed" ? "is-failed" : ""}>
+                    <td><strong>{activity.title}</strong><small title={activity.summary}>{activity.summary}</small>{activity.playtest ? <em title={`${activity.playtest.reflection}${activity.playtest.timeline?.length ? `\n${activity.playtest.timeline.map((entry) => entry.label).join(" → ")}` : ""}`}>自主试玩 · {activity.playtest.outcome === "cancelled" ? "已中止" : activity.playtest.outcome === "won" ? "胜利" : activity.playtest.outcome === "lost" ? "结束" : activity.playtest.ok ? "已运行" : "失败"}{activity.playtest.highestScore != null ? ` · ${activity.playtest.highestScore} 分` : ""}</em> : activity.relatedActivityIds?.length && ["diary", "drawing"].includes(activity.type) ? <em>已关联当天的{activity.type === "diary" ? "画作" : "日记"}</em> : null}</td>
+                    <td><span>{interestActivityLabel(activity.type)}</span><small>{interestCategoryLabel(activity.category)} · {activity.status === "completed" ? activity.action === "updated" ? "已更新" : "已完成" : activity.status === "cancelled" ? "已终止" : "失败"}</small></td>
+                    <td><span>{activity.personaName || "旧记录"}</span><small>{activity.personaVersion ? `v${activity.personaVersion}` : "未标注"}</small></td>
+                    <td>{new Date(activity.createdAt).toLocaleString("zh-CN", { hour12: false })}</td>
+                    <td><div className="interest-row-actions"><button className="ghost-button compact" type="button" disabled={!activity.artifactPath} onClick={() => void bridge?.openInterestArtifact(activity.artifactPath)}>查看</button>{activity.type === "mini_game" && activity.status === "completed" ? <button className="ghost-button compact" type="button" disabled={Boolean(interestRunning) || interestRuntimeState.status === "working"} onClick={() => void handlePlayInterestGame(activity.id)}>试玩</button> : null}{activity.playtest?.screenshotPath ? <button className="ghost-button compact" type="button" onClick={() => void bridge?.openInterestArtifact(activity.playtest!.screenshotPath)}>截图</button> : null}</div></td>
+                  </tr>
+                ))}</tbody>
+              </table> : <p className="knowledge-hint">当前筛选条件下没有活动记录。</p>}
+              <div className="interest-log-pagination">
+                <button className="ghost-button compact" type="button" disabled={safeInterestLogPage <= 1} onClick={() => setInterestLogPage((page) => Math.max(1, page - 1))}>上一页</button>
+                <span>第 {safeInterestLogPage} / {interestLogPageCount} 页</span>
+                <button className="ghost-button compact" type="button" disabled={safeInterestLogPage >= interestLogPageCount} onClick={() => setInterestLogPage((page) => Math.min(interestLogPageCount, page + 1))}>下一页</button>
+              </div>
             </div>
           </section>
           </div>
@@ -4508,6 +5189,7 @@ function App() {
 
 
   if (viewMode === "bubble") {
+    const showingInterestActivity = interestRuntimeState.status === "working";
     return (
       <div className={`bubble-window-shell placement-${bubblePlacement}`}>
         {bubbleVisible ? (
@@ -4527,7 +5209,7 @@ function App() {
                 ×
               </button>
             </div>
-            {lastReplyMeta ? (
+            {!showingInterestActivity && lastReplyMeta ? (
               <div className="bubble-runtime-status">
                 <span className={`runtime-badge ${lastReplyMeta.responseMode}`}>{lastReplyMeta.sourceLabel}</span>
                 <span className="runtime-inline-text">
@@ -4535,7 +5217,20 @@ function App() {
                 </span>
               </div>
             ) : null}
-            <p>{bubbleSegmentText || "..."}</p>
+            {showingInterestActivity ? (
+              <div className="bubble-interest-activity">
+                <span>兴趣沙盒 · 进行中</span>
+                <p>{interestRuntimeState.label || "正在进行自己的活动…"}</p>
+                <small>{interestRuntimeState.type === "mini_game"
+                  ? `${interestRuntimeState.progress?.actions != null ? `已操作 ${interestRuntimeState.progress.actions} 次` : "正在准备操作"}${interestRuntimeState.progress?.highestScore != null ? ` · 当前最高 ${interestRuntimeState.progress.highestScore} 分` : ""} · 不需要视觉识别`
+                  : "作品只会写入人物自己的沙盒目录。"}</small>
+                {interestRuntimeState.logs?.length ? <div className="bubble-interest-log">{interestRuntimeState.logs.slice(-3).map((entry, index) => <span key={`${entry.at}-${index}`}>{entry.label}</span>)}</div> : null}
+                <div className="bubble-interest-actions">
+                  <button type="button" disabled={interestRuntimeState.phase === "stopping"} onClick={() => void handleInterruptInterestActivity()}>{interestRuntimeState.phase === "stopping" ? "正在停止…" : "先停下"}</button>
+                  <button type="button" onClick={() => { clearBubbleTimers(bubbleTimersRef); setBubbleVisible(false); }}>等你完成</button>
+                </div>
+              </div>
+            ) : <p>{bubbleSegmentReady ? (bubbleSegmentText || "...") : "正在准备语音…"}</p>}
           </article>
         ) : null}
       </div>
