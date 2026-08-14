@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, powerMonitor, protocol, screen, session, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray } from "electron";
 import { createHash } from "node:crypto";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
@@ -68,6 +68,7 @@ import {
   evaluateLifeTick,
   loadLifeState,
   pauseProactiveForToday,
+  recordOwnerInteraction,
   resetWorkSession,
   saveLifeState
 } from "../src-agent/proactive-engine.js";
@@ -149,6 +150,7 @@ let currentAgentConfig = defaultConfig;
 let petWindowScale = 1;
 let positionLocked = false;
 let petHiddenForChat = false;
+let petManuallyHidden = false;
 let activeManualExpressions = new Set();
 let activeInterestExpressions = new Set();
 const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
@@ -165,6 +167,8 @@ let cursorTrackingTimer = null;
 let proactiveTimer = null;
 let currentLifeState = null;
 let proactiveTickRunning = false;
+let ownerInteractionRevision = 0;
+let ownerInteractionUpdateRunning = false;
 let scheduleTimer = null;
 let scheduleTickRunning = false;
 let interestTimer = null;
@@ -661,6 +665,7 @@ function createPetWindow() {
   });
 
   loadView(win, "pet");
+  win.setAlwaysOnTop(true, "screen-saver");
 
   win.on("move", () => {
     updateBubbleWindowLayout();
@@ -861,6 +866,7 @@ function createChatWindow() {
   });
 
   win.on("minimize", restorePetAfterChat);
+  win.on("hide", restorePetAfterChat);
   win.on("restore", hidePetForChat);
   for (const eventName of ["show", "hide", "minimize", "restore"]) {
     win.on(eventName, syncGlobalCursorTracking);
@@ -941,6 +947,7 @@ function createBubbleWindow() {
   });
 
   loadView(win, "bubble");
+  win.setAlwaysOnTop(true, "screen-saver");
 
   win.webContents.on("did-finish-load", () => {
     updateBubbleWindowLayout();
@@ -1100,18 +1107,22 @@ function openChatWindow() {
 }
 
 function hidePetForChat() {
-  if (!petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return;
+  if (petManuallyHidden) return;
   petHiddenForChat = true;
-  petWindow.hide();
-  bubbleWindow?.hide();
+  if (petWindow && !petWindow.isDestroyed()) petWindow.hide();
+  if (bubbleWindow && !bubbleWindow.isDestroyed()) bubbleWindow.hide();
   syncGlobalCursorTracking();
   refreshTrayMenu();
 }
 
 function restorePetAfterChat() {
-  if (!petHiddenForChat || app.isQuiting || !petWindow || petWindow.isDestroyed()) return;
+  if (!petHiddenForChat || petManuallyHidden || app.isQuiting) return;
   petHiddenForChat = false;
+  if (!petWindow || petWindow.isDestroyed()) createPetWindow();
+  petWindow.setAlwaysOnTop(true, "screen-saver");
   petWindow.showInactive();
+  petWindow.moveTop();
+  petWindow.webContents.invalidate();
   wakeBubbleWindow(true);
   syncGlobalCursorTracking();
   refreshTrayMenu();
@@ -1126,9 +1137,12 @@ function showPetWindow() {
     return false;
   }
   if (!petWindow || petWindow.isDestroyed()) createPetWindow();
+  petManuallyHidden = false;
   petHiddenForChat = false;
+  petWindow.setAlwaysOnTop(true, "screen-saver");
   petWindow.showInactive();
   petWindow.moveTop();
+  petWindow.webContents.invalidate();
   wakeBubbleWindow(true);
   syncGlobalCursorTracking();
   refreshTrayMenu();
@@ -1138,6 +1152,7 @@ function showPetWindow() {
 function wakeBubbleWindow(replayLastReply = false) {
   if (petHiddenForChat || !petWindow || petWindow.isDestroyed() || !petWindow.isVisible()) return false;
   const bubble = ensureBubbleWindow();
+  bubble.setAlwaysOnTop(true, "screen-saver");
   updateBubbleWindowLayout();
   if (replayLastReply) {
     const replay = () => bubble.webContents.send("agent:menu-action", "show-bubble");
@@ -1145,10 +1160,12 @@ function wakeBubbleWindow(replayLastReply = false) {
     else replay();
   }
   bubble.showInactive();
+  bubble.moveTop();
   return true;
 }
 
 function hidePetWindow() {
+  petManuallyHidden = true;
   petHiddenForChat = false;
   petWindow?.hide();
   bubbleWindow?.hide();
@@ -1218,6 +1235,12 @@ function buildTrayContextMenu() {
     { label: "快速输入", click: () => openComposerWindow() },
     { label: "代码工作台", click: () => openCodeWindow() },
     { label: "设置", click: () => openSettingsWindow() },
+    {
+      label: "鼠标移入时隐藏并穿透",
+      type: "checkbox",
+      checked: currentAgentConfig.appearance?.hoverAutoHide === true,
+      click: (menuItem) => { void updateHoverAutoHide(menuItem.checked); }
+    },
     { type: "separator" },
     {
       label: "开机自动启动",
@@ -1450,9 +1473,10 @@ async function publishTodayAgendaOnStartup() {
 }
 
 async function tickProactiveLife() {
-  if (proactiveTickRunning || !app.isReady()) return;
+  if (proactiveTickRunning || ownerInteractionUpdateRunning || !app.isReady()) return;
   proactiveTickRunning = true;
   try {
+    const interactionRevisionAtStart = ownerInteractionRevision;
     const now = new Date();
     const previous = currentLifeState ?? await loadLifeState(app.getPath("userData"), now);
     const companion = await getFollowUpCandidate(app.getPath("userData"), now);
@@ -1460,12 +1484,13 @@ async function tickProactiveLife() {
     const interestSettings = normalizeInterestConfig(currentAgentConfig.interests);
     const result = evaluateLifeTick(previous, currentAgentConfig.proactive, {
       now,
-      idleSeconds: powerMonitor.getSystemIdleTime(),
+      interactionIdleSeconds: ownerInteractionIdleSeconds(previous, now),
       interruptionScore: companion.store.feedback.interruptionScore,
       followUpCandidate: companion.candidate,
       relationshipStage: relationship.affection.stage,
       autonomousLifeEnabled: interestSettings.enabled && interestSettings.autonomousLifeEnabled
     });
+    if (interactionRevisionAtStart !== ownerInteractionRevision) return;
     currentLifeState = await saveLifeState(app.getPath("userData"), result.state);
     broadcastLifeState(currentLifeState);
     for (const event of result.events) {
@@ -1490,6 +1515,25 @@ function startProactiveLifeEngine() {
 function stopProactiveLifeEngine() {
   if (proactiveTimer) clearInterval(proactiveTimer);
   proactiveTimer = null;
+}
+
+function ownerInteractionIdleSeconds(state, now = new Date()) {
+  const lastInteraction = Date.parse(state?.lastInteractionAt || state?.updatedAt || "");
+  return Number.isFinite(lastInteraction)
+    ? Math.max(0, (now.getTime() - lastInteraction) / 1000)
+    : 0;
+}
+
+async function markOwnerInteraction(now = new Date()) {
+  ownerInteractionRevision += 1;
+  ownerInteractionUpdateRunning = true;
+  try {
+    currentLifeState = await recordOwnerInteraction(app.getPath("userData"), currentLifeState, now);
+    broadcastLifeState(currentLifeState);
+    return currentLifeState;
+  } finally {
+    ownerInteractionUpdateRunning = false;
+  }
 }
 
 async function tickSchedules() {
@@ -1551,7 +1595,7 @@ async function tickInterestSandbox() {
     const diaryDue = Boolean(snapshot.session?.diaryDueAt)
       && new Date(snapshot.session.diaryDueAt).getTime() <= Date.now()
       && !snapshot.today.diaryWritten;
-    const idleEnough = powerMonitor.getSystemIdleTime() >= settings.idleMinutes * 60;
+    const idleEnough = ownerInteractionIdleSeconds(currentLifeState) >= settings.idleMinutes * 60;
     if (!idleEnough) return;
     const completedAfterLaunch = Boolean(snapshot.session?.lastTaskCompletedAt)
       && new Date(snapshot.session.lastTaskCompletedAt) >= new Date(snapshot.session.launchedAt);
@@ -2040,6 +2084,20 @@ async function updateMouseFollow(enabled) {
   return currentAgentConfig.appearance.mouseFollow;
 }
 
+async function updateHoverAutoHide(enabled) {
+  currentAgentConfig = mergeAgentConfig({
+    ...currentAgentConfig,
+    appearance: { ...currentAgentConfig.appearance, hoverAutoHide: Boolean(enabled) }
+  });
+  if (petWindow && !petWindow.isDestroyed() && !enabled) {
+    petWindow.setIgnoreMouseEvents(false);
+  }
+  await saveConfig(app.getPath("userData"), currentAgentConfig);
+  broadcastConfigUpdated(currentAgentConfig);
+  refreshTrayMenu();
+  return currentAgentConfig.appearance.hoverAutoHide;
+}
+
 function broadcastActiveExpressions() {
   const expressions = getActiveExpressions();
   petWindow?.webContents.send("agent:expressions-updated", expressions);
@@ -2154,8 +2212,14 @@ function buildPetContextMenu() {
             }
 
             const nextState = !petWindow.isAlwaysOnTop();
-            petWindow.setAlwaysOnTop(nextState);
+            petWindow.setAlwaysOnTop(nextState, nextState ? "screen-saver" : "normal");
           }
+        },
+        {
+          label: "鼠标移入时隐藏并穿透",
+          type: "checkbox",
+          checked: currentAgentConfig.appearance?.hoverAutoHide === true,
+          click: (menuItem) => { void updateHoverAutoHide(menuItem.checked); }
         },
         {
           label: "重置位置",
@@ -2392,12 +2456,17 @@ ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   if (currentAgentConfig.appearance?.mouseFollow !== merged.appearance?.mouseFollow) {
     cursorDeliveryState.clear();
   }
+  if (currentAgentConfig.appearance?.hoverAutoHide === true && merged.appearance?.hoverAutoHide !== true
+    && petWindow && !petWindow.isDestroyed()) {
+    petWindow.setIgnoreMouseEvents(false);
+  }
   const activePersonaCard = await getActivePersonaCard(app.getPath("userData"), merged);
   currentAgentConfig = applyPersonaCardToConfig(merged, activePersonaCard);
   syncGlobalCursorTracking();
   currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
   updateTitleBarOverlays();
   broadcastConfigUpdated(currentAgentConfig);
+  refreshTrayMenu();
   await syncScheduleIntegrations();
   await broadcastSchedules();
   return currentAgentConfig;
@@ -2570,12 +2639,13 @@ ipcMain.handle("agent:open-local-stt-folder", async () => {
 });
 
 ipcMain.handle("agent:chat", async (_event, payload) => {
+  await markOwnerInteraction();
   if (currentInterestActivity) {
     const text = String(payload?.message || "").trim();
     if (/^(?:终止|停止|取消)(?:创作|当前创作|这个任务|吧)?$/.test(text)) {
       const label = currentInterestActivity.label || interestStatusLabel(currentInterestActivity.type);
       currentInterestActivity.controller.abort(new Error("用户终止创作"));
-      return publishInterestInteraction(`好，我先停下${label}。这项内容会保留为待继续，等你没有其他事务且电脑再次空闲后，我会重新接着完成。`, "idle", text);
+      return publishInterestInteraction(`好，我先停下${label}。这项内容会保留为待继续，等你一段时间没有和我互动、我也没有其他事务时，再接着完成。`, "idle", text);
     }
     if (/^(?:等待|继续|等你完成|你继续|继续完成)(?:吧)?$/.test(text)) {
       return publishInterestInteraction(`好，我继续${currentInterestActivity.label || interestStatusLabel(currentInterestActivity.type)}，完成后再告诉你。`, "thinking", text);
@@ -2689,6 +2759,7 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
 });
 
 ipcMain.handle("agent:pet-touch", async () => {
+  await markOwnerInteraction();
   if (currentInterestActivity) {
     return {
       ok: true,
@@ -3029,7 +3100,8 @@ ipcMain.handle("agent:set-pet-window-position", async (_event, { x, y }) => {
 
 ipcMain.on("agent:set-pet-mouse-passthrough", (event, ignore) => {
   if (!petWindow || petWindow.isDestroyed() || event.sender !== petWindow.webContents) return;
-  if (ignore) petWindow.setIgnoreMouseEvents(true, { forward: true });
+  const shouldIgnore = currentAgentConfig.appearance?.hoverAutoHide === true || Boolean(ignore);
+  if (shouldIgnore) petWindow.setIgnoreMouseEvents(true, { forward: true });
   else petWindow.setIgnoreMouseEvents(false);
 });
 

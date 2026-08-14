@@ -77,6 +77,7 @@ const previewConfig: AgentConfig = {
     theme: "light",
     live2dModel: "qianqian",
     mouseFollow: true,
+    hoverAutoHide: false,
     renderFps: 30,
     powerSaving: true
   },
@@ -254,7 +255,7 @@ function formatDiarySchedule(dueAt: string | undefined, nowMs: number) {
   const due = new Date(dueAt);
   const clock = due.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   const remainingMinutes = Math.ceil((due.getTime() - nowMs) / 60000);
-  if (remainingMinutes <= 0) return `计划 ${clock} · 等待电脑空闲`;
+  if (remainingMinutes <= 0) return `计划 ${clock} · 等待主人暂时没有互动`;
   if (remainingMinutes < 60) return `计划 ${clock} · 还有 ${remainingMinutes} 分钟`;
   const hours = Math.floor(remainingMinutes / 60);
   const minutes = remainingMinutes % 60;
@@ -663,6 +664,7 @@ function App() {
   const [activeExpressionSet, setActiveExpressionSet] = useState<Set<string>>(new Set());
   const [faceParams, setFaceParams] = useState<Record<string, number> | null>(null);
   const [petSpeaking, setPetSpeaking] = useState(false);
+  const [petHoverHidden, setPetHoverHidden] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const historyListRef = useRef<HTMLDivElement | null>(null);
   const bubbleTimersRef = useRef<number[]>([]);
@@ -725,6 +727,7 @@ function App() {
     startedAt: number;
     moved: boolean;
   } | null>(null);
+  const lastPetInteractiveRef = useRef(true);
   const bridge = window.agentDesktop;
   const availableVoiceOptions = useMemo(() => {
     const voices = new Map(elevenLabsVoicePresets.map((voice) => [voice.voiceId, voice]));
@@ -736,6 +739,13 @@ function App() {
     const theme = configDraft?.appearance?.theme ?? "light";
     document.documentElement.dataset.theme = theme;
   }, [configDraft?.appearance?.theme]);
+
+  useEffect(() => {
+    if (!bridge || viewMode !== "pet") return;
+    const enabled = configDraft?.appearance?.hoverAutoHide === true;
+    setPetHoverHidden(enabled && lastPetInteractiveRef.current);
+    bridge.setPetMousePassthrough(enabled || !lastPetInteractiveRef.current);
+  }, [bridge, configDraft?.appearance?.hoverAutoHide, viewMode]);
 
   useEffect(() => {
     if (!bridge || !configDraft || (viewMode !== "settings" && viewMode !== "chat")) return;
@@ -2897,6 +2907,20 @@ function App() {
               </label>
               <span>鼠标离开模型本体和透明区域后仍会持续跟随，停止时自然保持视线。</span>
             </div>
+            <div className="relationship-switches live2d-behavior-switches">
+              <label className="voice-switch">
+                <input
+                  type="checkbox"
+                  checked={configDraft.appearance?.hoverAutoHide === true}
+                  onChange={(event) => setConfigDraft({
+                    ...configDraft,
+                    appearance: { ...configDraft.appearance, hoverAutoHide: event.target.checked }
+                  })}
+                />
+                鼠标移入模型时自动隐藏并点击穿透
+              </label>
+              <span>方便点击模型下方的应用；开启后可从右下角托盘图标的“窗口”菜单关闭。</span>
+            </div>
             <div className="inline-grid live2d-performance-settings">
               <label>
                 Live2D 目标帧率
@@ -4128,13 +4152,14 @@ function App() {
           <section className="panel-block proactive-settings-panel settings-panel-proactive">
             <p className="eyebrow">主动陪伴</p>
             <p className="settings-section-description">
-              Vivi 只依据本地时间和 Windows 空闲状态判断是否适合提醒；不会读取键入内容或后台截图。
+              Vivi 只依据本地时间和你最近一次与模型互动的时间判断状态；不会读取其他软件的键入内容或后台截图。
             </p>
 
             <div className="proactive-status-card">
               <div>
                 <span>主人状态</span>
-                <strong>{lifeState?.ownerStatus === "away" ? "暂时离开" : "正在使用电脑"}</strong>
+                <strong>{lifeState?.ownerStatus === "away" ? "暂时未互动" : "近期有互动"}</strong>
+                <small>{lifeState?.lastInteractionAt ? `上次互动 ${new Date(lifeState.lastInteractionAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}` : "等待首次互动"}</small>
               </div>
               <div>
                 <span>连续工作</span>
@@ -4276,20 +4301,18 @@ function App() {
               </label>
               <label>
                 主动问候最短间隔
-                <select
+                <input
+                  type="number"
+                  min={5}
+                  max={720}
+                  step={1}
                   value={configDraft.proactive.minimumIntervalMinutes}
                   onChange={(event) => setConfigDraft({ ...configDraft, proactive: { ...configDraft.proactive, minimumIntervalMinutes: Number(event.target.value) } })}
-                >
-                  <option value={30}>30 分钟</option>
-                  <option value={60}>1 小时</option>
-                  <option value={90}>1.5 小时</option>
-                  <option value={120}>2 小时</option>
-                  <option value={180}>3 小时</option>
-                  <option value={240}>4 小时</option>
-                </select>
+                />
+                <small>可自定义 5–720 分钟；从你最后一次聊天或触碰模型开始计时。</small>
               </label>
               <label>
-                离开多久重置工作时长
+                多久未互动后重置工作时长
                 <select
                   value={configDraft.proactive.idleResetMinutes}
                   onChange={(event) => setConfigDraft({ ...configDraft, proactive: { ...configDraft.proactive, idleResetMinutes: Number(event.target.value) } })}
@@ -4414,8 +4437,8 @@ function App() {
 
             <div className="power-safety-note">
               {configDraft.interests.permissionLevel === "autonomous"
-                ? "自主生活模式会按下方时间窗生成每日虚拟生活日程；到达日程且电脑空闲后开始活动，不要求主人先完成任务。仍只写入 vivi-sandbox，其他本地文件、外链和系统操作继续受限。"
-                : "普通创作只会在主人交代的任务完成、没有其他任务运行且电脑达到设定空闲时间后开始。每日日记会在设定时间之后、电脑空闲时写入。"}
+                ? "自主生活模式会按下方时间窗生成每日虚拟生活日程；到达日程且主人一段时间没有与模型互动后开始活动，不受电脑上其他操作影响。仍只写入 vivi-sandbox，其他本地文件、外链和系统操作继续受限。"
+                : "普通创作只会在主人交代的任务完成、没有其他任务运行且一段时间没有与模型互动后开始。每日日记会在设定时间之后等待互动空闲时写入。"}
             </div>
 
             <div className="schedule-integration-summary">
@@ -4435,7 +4458,7 @@ function App() {
                 <span>下一项生活日程</span>
                 <strong>{nextInterestRoutine ? interestActivityLabel(nextInterestRoutine.type) : interestSnapshot?.routine?.length ? "今日计划已完成" : configDraft.interests.virtualScheduleEnabled ? "暂无可排活动" : "虚拟日程未启用"}</strong>
                 <small>{nextInterestRoutine
-                  ? `${new Date(nextInterestRoutine.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })} · ${nextInterestRoutine.status === "due" ? "等待电脑空闲" : "尚未到时间"}`
+                  ? `${new Date(nextInterestRoutine.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })} · ${nextInterestRoutine.status === "due" ? "等待互动空闲" : "尚未到时间"}`
                   : interestSnapshot?.routine?.length ? `已完成 ${completedInterestRoutineCount} / ${interestSnapshot.routine.length} 项` : "开启自主生活和虚拟日程后生成"}</small>
               </div>
             </div>
@@ -4453,7 +4476,7 @@ function App() {
               <div className="interest-routine-panel">
                 <div className="interest-routine-heading">
                   <strong>今日虚拟生活日程</strong>
-                  <small>每 5 分钟检查一次；需到达计划时间、电脑空闲、未超出 Token/任务/磁盘上限，且没有其他任务运行。</small>
+                  <small>每 5 分钟检查一次；需到达计划时间、主人一段时间未与模型互动、未超出 Token/任务/磁盘上限，且没有其他任务运行。</small>
                 </div>
                 <div className="interest-routine-list">
                   {interestSnapshot.routine.map((item) => (
@@ -4463,7 +4486,7 @@ function App() {
                         <strong>{item.title || interestActivityLabel(item.type)}</strong>
                         <small>{item.title ? interestActivityLabel(item.type) : `${interestCategoryLabel(item.category)} · ${item.status === "due" ? "已到时间，等待触发" : item.status === "missed" ? "时间已过，本次跳过" : "计划活动"}`}</small>
                       </div>
-                      <span>{item.status === "completed" ? "已完成" : item.status === "due" ? "等待空闲" : item.status === "missed" ? "已错过" : "未到时间"}</span>
+                      <span>{item.status === "completed" ? "已完成" : item.status === "due" ? "等待互动空闲" : item.status === "missed" ? "已错过" : "未到时间"}</span>
                     </div>
                   ))}
                 </div>
@@ -4537,7 +4560,7 @@ function App() {
               <label>每日娱乐上限<input type="number" min={0} max={12} value={configDraft.interests.entertainmentDailyLimit} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, entertainmentDailyLimit: Number(event.target.value) } })} /></label>
               <label>单次最长时间（分钟）<input type="number" min={1} max={60} value={configDraft.interests.maxTaskMinutes} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, maxTaskMinutes: Number(event.target.value) } })} /></label>
               <label>磁盘上限（MB）<input type="number" min={10} max={2048} value={configDraft.interests.maxDiskMB} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, maxDiskMB: Number(event.target.value) } })} /></label>
-              <label>电脑空闲多久后可活动（分钟）<input type="number" min={5} max={240} value={configDraft.interests.idleMinutes} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, idleMinutes: Number(event.target.value) } })} /></label>
+              <label>多久未与模型互动后可活动（分钟）<input type="number" min={5} max={240} value={configDraft.interests.idleMinutes} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, idleMinutes: Number(event.target.value) } })} /></label>
               <label>两次活动最小间隔（小时）<input type="number" min={0} max={24} value={configDraft.interests.minimumHoursBetweenTasks} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, minimumHoursBetweenTasks: Number(event.target.value) } })} /></label>
               <label>单次试玩上限（秒）<input type="number" min={5} max={60} value={configDraft.interests.selfPlayMaxSeconds} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, selfPlayMaxSeconds: Number(event.target.value) } })} /></label>
               <label>单次试玩操作上限<input type="number" min={8} max={120} value={configDraft.interests.selfPlayMaxActions} onChange={(event) => setConfigDraft({ ...configDraft, interests: { ...configDraft.interests, selfPlayMaxActions: Number(event.target.value) } })} /></label>
@@ -5111,7 +5134,10 @@ function App() {
 
   function handlePetInteractionChange(interactive: boolean) {
     if (dragStateRef.current || petTouchPointerRef.current || !bridge || viewMode !== "pet") return;
-    bridge.setPetMousePassthrough(!interactive);
+    lastPetInteractiveRef.current = interactive;
+    const hoverAutoHide = configDraft.appearance?.hoverAutoHide === true;
+    setPetHoverHidden(hoverAutoHide && interactive);
+    bridge.setPetMousePassthrough(hoverAutoHide || !interactive);
   }
 
   if (viewMode === "expressions") {
@@ -5238,7 +5264,7 @@ function App() {
   }
 
   return (
-    <div className="pet-window-shell" onContextMenu={handleContextMenu}>
+    <div className={`pet-window-shell ${petHoverHidden ? "is-hover-hidden" : ""}`} onContextMenu={handleContextMenu}>
       <div className="pet-window-frame">
         <div className="pet-stage no-drag">
           <div

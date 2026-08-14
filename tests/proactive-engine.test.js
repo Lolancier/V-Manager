@@ -44,9 +44,9 @@ test("quiet time and daily pause suppress proactive messages", () => {
   assert.equal(paused.events.length, 0);
 });
 
-test("being away resets the work session and lets Vivi rest", () => {
+test("a long period without model interaction resets the work session and lets Vivi rest", () => {
   const state = createLifeState(new Date("2026-08-08T09:00:00"));
-  const result = evaluateLifeTick(state, baseConfig, { now: new Date("2026-08-08T11:00:00"), idleSeconds: 700 });
+  const result = evaluateLifeTick(state, baseConfig, { now: new Date("2026-08-08T11:00:00"), interactionIdleSeconds: 700 });
   assert.equal(result.state.ownerStatus, "away");
   assert.equal(result.state.viviStatus, "resting");
   assert.equal(result.state.activeMinutes, 0);
@@ -74,12 +74,22 @@ test("an earlier commitment produces a varied follow-up event", () => {
 test("social check-ins use a minimum time interval instead of a daily count", () => {
   const state = createLifeState(new Date("2026-08-08T09:00:00"));
   const config = { ...baseConfig, workMinutes: 240, viviRestAfterMinutes: 360, minimumIntervalMinutes: 60 };
-  const first = evaluateLifeTick(state, config, { now: new Date("2026-08-08T10:01:00"), idleSeconds: 0, interruptionScore: 0.1 });
+  const first = evaluateLifeTick(state, config, { now: new Date("2026-08-08T10:01:00"), interactionIdleSeconds: 3660, interruptionScore: 0.1 });
   assert.equal(first.events.some((event) => event.kind === "social_checkin"), true);
 
-  const tooSoon = evaluateLifeTick(first.state, config, { now: new Date("2026-08-08T10:45:00"), idleSeconds: 0, interruptionScore: 0.1 });
+  const tooSoon = evaluateLifeTick(first.state, config, { now: new Date("2026-08-08T10:45:00"), interactionIdleSeconds: 6300, interruptionScore: 0.1 });
   assert.equal(tooSoon.events.length, 0);
 
-  const later = evaluateLifeTick(tooSoon.state, config, { now: new Date("2026-08-08T11:02:00"), idleSeconds: 0, interruptionScore: 0.1 });
+  const later = evaluateLifeTick(tooSoon.state, config, { now: new Date("2026-08-08T11:02:00"), interactionIdleSeconds: 7320, interruptionScore: 0.1 });
   assert.equal(later.events.some((event) => event.kind === "social_checkin"), true);
+});
+
+test("social check-ins support a five-minute custom minimum", () => {
+  const state = createLifeState(new Date("2026-08-08T10:00:00"));
+  const config = { ...baseConfig, workMinutes: 240, viviRestAfterMinutes: 360, minimumIntervalMinutes: 5 };
+  const result = evaluateLifeTick(state, config, {
+    now: new Date("2026-08-08T10:06:00"), interactionIdleSeconds: 360, interruptionScore: 0.1
+  });
+  assert.equal(result.minimumIntervalMinutes, 5);
+  assert.equal(result.events.some((event) => event.kind === "social_checkin"), true);
 });

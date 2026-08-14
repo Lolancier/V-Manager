@@ -38,6 +38,7 @@ export function createLifeState(now = new Date()) {
     sessionStartedAt: now.toISOString(),
     lastTickAt: now.toISOString(),
     lastActiveAt: now.toISOString(),
+    lastInteractionAt: now.toISOString(),
     activeMinutes: 0,
     energy: 100,
     restUntil: null,
@@ -72,10 +73,10 @@ export function evaluateLifeTick(previous, config, context = {}) {
   const settings = config || {};
   const state = normalizeState(previous, now);
   const events = [];
-  const idleSeconds = Math.max(0, Number(context.idleSeconds) || 0);
+  const interactionIdleSeconds = Math.max(0, Number(context.interactionIdleSeconds ?? context.idleSeconds) || 0);
   const idleResetSeconds = clamp(settings.idleResetMinutes ?? 10, 1, 240) * 60;
   const wasAway = state.ownerStatus === "away";
-  const isAway = idleSeconds >= idleResetSeconds;
+  const isAway = interactionIdleSeconds >= idleResetSeconds;
 
   if (isAway) {
     state.ownerStatus = "away";
@@ -102,10 +103,11 @@ export function evaluateLifeTick(previous, config, context = {}) {
   const paused = state.pausedUntil && new Date(state.pausedUntil) > now;
   const quiet = isInQuietHours(now, settings.quietStart ?? "00:00", settings.quietEnd ?? "08:00");
   const interruptionScore = clamp(context.interruptionScore ?? 0.25, 0, 1);
-  const minimumIntervalMinutes = clamp(settings.minimumIntervalMinutes ?? settings.reminderCooldownMinutes ?? 120, 15, 720);
+  const minimumIntervalMinutes = clamp(settings.minimumIntervalMinutes ?? settings.reminderCooldownMinutes ?? 120, 5, 720);
   const globalIntervalReady = !state.lastProactiveAt
     || now.getTime() - new Date(state.lastProactiveAt).getTime() >= minimumIntervalMinutes * 60000;
-  const canSpeak = enabled && !paused && !isAway && !quiet && interruptionScore < 0.88 && globalIntervalReady;
+  const canSpeak = enabled && !paused && !quiet && interruptionScore < 0.88 && globalIntervalReady;
+  const canInterruptWork = canSpeak && !isAway;
   const eventReady = (kind, cooldownMinutes) => {
     const lastAt = state.lastEvents[kind];
     return !lastAt || now.getTime() - new Date(lastAt).getTime() >= cooldownMinutes * 60000;
@@ -126,7 +128,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     state.daily.proactiveCount += 1;
   };
 
-  if (canSpeak && settings.healthReminders !== false) {
+  if (canInterruptWork && settings.healthReminders !== false) {
     const workMinutes = clamp(settings.workMinutes ?? 60, 15, 240);
     const cooldown = clamp(settings.reminderCooldownMinutes ?? 90, 15, 360) * (1 + interruptionScore);
     if (state.activeMinutes >= workMinutes && eventReady("work_break", cooldown)) {
@@ -138,7 +140,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     }
   }
 
-  if (canSpeak && events.length === 0 && settings.lateNightCare !== false) {
+  if (canInterruptWork && events.length === 0 && settings.lateNightCare !== false) {
     const lateHour = clamp(settings.lateNightHour ?? 23, 20, 23);
     if (now.getHours() >= lateHour && eventReady("late_night", 18 * 60)) {
       emit("late_night", [
@@ -149,7 +151,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
     }
   }
 
-  if (canSpeak && events.length === 0 && !state.restUntil) {
+  if (canInterruptWork && events.length === 0 && !state.restUntil) {
     const restAfter = clamp(settings.viviRestAfterMinutes ?? 120, 30, 360);
     if (state.activeMinutes >= restAfter && eventReady("vivi_rest", restAfter)) {
       state.restUntil = new Date(now.getTime() + 10 * 60000).toISOString();
@@ -172,7 +174,7 @@ export function evaluateLifeTick(previous, config, context = {}) {
   }
 
   if (canSpeak && events.length === 0 && context.autonomousLifeEnabled !== false && settings.socialCheckins !== false
-    && state.activeMinutes >= minimumIntervalMinutes
+    && interactionIdleSeconds >= minimumIntervalMinutes * 60
     && eventReady("social_checkin", minimumIntervalMinutes)) {
     emit("social_checkin", [
       "你在忙吗？在忙什么呀，还要多久？有我能帮上的地方吗？",
@@ -224,5 +226,15 @@ export async function resetWorkSession(baseDir, now = new Date()) {
   state.energy = Math.max(state.energy, 72);
   state.restUntil = null;
   state.viviStatus = "companion";
+  return saveLifeState(baseDir, state);
+}
+
+export async function recordOwnerInteraction(baseDir, previous = null, now = new Date()) {
+  const state = normalizeState(previous || await loadLifeState(baseDir, now), now);
+  state.lastInteractionAt = now.toISOString();
+  state.ownerStatus = "active";
+  state.sessionStartedAt = state.sessionStartedAt || now.toISOString();
+  state.lastActiveAt = now.toISOString();
+  state.updatedAt = now.toISOString();
   return saveLifeState(baseDir, state);
 }

@@ -9,9 +9,10 @@ import { handle as scheduleHandle } from "./executors/schedule-executor.js";
 
 function detectScheduleIntent(message) {
   const normalized = normalizeText(message).toLowerCase();
-  const mentionsSchedule = /提醒|备忘|闹铃|定时|计划|日程|安排|事项/.test(normalized);
+  const mentionsSchedule = /提醒|备忘|闹铃|定时|计划|日程|安排|事项|待办|任务清单/.test(normalized);
   const mentionsTimeOrControl = /分钟|小时|今天|今日|明天|今晚|点|时|查看|有什么|列表|清单|取消|关机|重启/.test(normalized);
   if ((mentionsSchedule && mentionsTimeOrControl)
+    || /(?:整理|查看|列出|显示).*(?:待办|任务清单)|(?:待办|任务清单).*(?:整理|查看|列出|显示)/.test(normalized)
     || /(?:确认|取消|撤销)(?:执行)?(?:定时)?(?:关机|重启)/.test(normalized)
     || /(?:分钟|小时)后(?:关机|重启)/.test(normalized)) {
     return { type: "schedule" };

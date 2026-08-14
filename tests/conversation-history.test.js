@@ -49,6 +49,17 @@ test("invalid empty-model turns are excluded from future model context", () => {
   assert.deepEqual(messages.map((message) => message.content), ["再说一次", "我是九条真白喵。"]);
 });
 
+test("dated history preserves the turn timestamp for relative-date reasoning", () => {
+  const messages = buildRecentHistoryMessages([{
+    timestamp: "2026-08-13T12:30:00.000Z",
+    user: "明天继续整理待办",
+    assistant: "好，明天继续。"
+  }], 40, false);
+  assert.match(messages[0].content, /该轮对话记录于/);
+  assert.match(messages[0].content, /明天继续整理待办/);
+  assert.match(messages[1].content, /该轮对话记录于/);
+});
+
 test("persona history keeps continuity without leaking replies from another card", () => {
   const history = [
     { user: "旧问题", assistant: "旧人格回答", personaCardId: "vivi", personaVersion: 2 },

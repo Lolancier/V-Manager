@@ -199,6 +199,12 @@ body:has(.bubble-window-shell) #root {
   width: 100%;
   padding: 8px 8px 12px;
   background: transparent;
+  opacity: 1;
+  transition: opacity 90ms ease;
+}
+
+.pet-window-shell.is-hover-hidden .pet-window-frame {
+  opacity: 0;
 }
 
 .pet-stage {

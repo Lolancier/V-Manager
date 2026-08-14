@@ -141,6 +141,16 @@ test("schedule language uses the schedule route", () => {
   assert.equal(resolveAgentRoute("明天下午三点提醒我开会").type, "schedule");
   assert.equal(resolveAgentRoute("确认定时关机").type, "schedule");
   assert.equal(resolveAgentRoute("今天有什么安排").type, "schedule");
+  assert.equal(resolveAgentRoute("整理一下待办").type, "schedule");
+});
+
+test("organizing todos reads the real local schedule instead of inventing a chat list", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-schedule-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await createReminder(root, { dueAt: new Date(Date.now() + 3600000).toISOString(), message: "整理项目说明" });
+  const result = await handleScheduleMessage("整理一下待办", { baseDir: root });
+  assert.equal(result.meta.localTool, "schedule_list");
+  assert.match(result.reply, /整理项目说明/);
 });
 
 test("power confirmation tool rejects a generic confirmation", async (t) => {

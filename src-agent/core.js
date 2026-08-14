@@ -62,6 +62,7 @@ export const defaultConfig = {
     theme: "light",
     live2dModel: "qianqian",
     mouseFollow: true,
+    hoverAutoHide: false,
     renderFps: 30,
     powerSaving: true
   },
@@ -725,11 +726,33 @@ export async function testDeepSeekConnection(baseDir) {
 
 // ---- System prompts ----
 
+function formatLocalHistoryTime(value) {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return "";
+  return parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
+function buildTemporalContext(now = new Date()) {
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  const dateLabel = (value) => value.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    weekday: "long"
+  });
+  return [
+    `当前本地时间为：${now.toLocaleString("zh-CN", { hour12: false })}。`,
+    `日期锚点：昨天=${dateLabel(yesterday)}；今天=${dateLabel(now)}；明天=${dateLabel(tomorrow)}。`,
+    "历史消息若带有记录时间，其中的“今天、昨天、明天、今晚”等相对日期必须以该条消息的记录时间为基准解析，不能直接沿用到当前日期。",
+    "整理跨日待办时必须先换算成绝对日期再回答；如果历史中的‘明天’已经成为今天，要明确说‘今天’，禁止出现‘明日（今天的日期）’这类矛盾表述。"
+  ].join("\n");
+}
+
 function buildSystemPrompt(config, knowledge) {
   const now = new Date();
-  const currentTimeText = now.toLocaleString("zh-CN", {
-    hour12: false
-  });
   const knowledgeBlock = knowledge.length
     ? knowledge
       .map((item, index) => `【知识片段 ${index + 1} | ${item.file}】\n${item.content}`)
@@ -740,7 +763,7 @@ function buildSystemPrompt(config, knowledge) {
     `你的人设名为 ${config.personaName}。`,
     config.personaPrompt,
     "",
-    `当前本地时间为：${currentTimeText}。`,
+    buildTemporalContext(now),
     "你需要基于本地知识库和近期上下文回答，避免凭空编造权限和操作结果。",
     "如果用户询问当前时间、日期、星期，优先使用上面的当前本地时间直接回答，不要自行编造。",
     "浏览器网址打开、网页搜索和 VS Code 文件/工作区打开已经接通。微信仅支持在用户当前消息明确给出精确联系人和完整内容时发送单条消息；自动读取回复和连续对话仍未接通。QQ 自动发消息尚未接通。",
@@ -751,9 +774,6 @@ function buildSystemPrompt(config, knowledge) {
 
 function buildSystemPromptV2(config, knowledge) {
   const now = new Date();
-  const currentTimeText = now.toLocaleString("zh-CN", {
-    hour12: false
-  });
   const knowledgeBlock = knowledge.length
     ? knowledge
       .map((item, index) => `【知识片段 ${index + 1} | ${item.file}】\n${item.content}`)
@@ -764,7 +784,7 @@ function buildSystemPromptV2(config, knowledge) {
     `你的人设名为 ${config.personaName}。`,
     config.personaPrompt,
     "",
-    `当前本地时间为：${currentTimeText}。`,
+    buildTemporalContext(now),
     "你需要基于本地知识库和近期上下文回答，避免凭空编造权限和操作结果。",
     "如果用户询问当前时间、日期、星期，优先使用上面的当前本地时间直接回答，不要自行编造。",
     "当用户明确要求启动应用、打开文件或文件夹、列出目录、读取文本文件、创建文件夹或文本文件、追加文本、整理文件或将路径移入回收站时，优先走本地执行层；如果当前能力做不到，要直接说明限制。",
@@ -792,7 +812,9 @@ export function buildRecentHistoryMessages(history, maxMessages = 40, includeToo
     if (!assistantText || assistantText === EMPTY_MODEL_REPLY || assistantText === INCOMPLETE_MODEL_REPLY) {
       continue;
     }
-    const entries = [{ role: "user", content: String(item.user || "") }];
+    const recordedAt = formatLocalHistoryTime(item.timestamp);
+    const historyPrefix = recordedAt ? `[该轮对话记录于 ${recordedAt}]\n` : "";
+    const entries = [{ role: "user", content: `${historyPrefix}${String(item.user || "")}` }];
     if (includeToolHistory && Array.isArray(item.toolCalls) && Array.isArray(item.toolResults)) {
       const resultsById = new Map(
         item.toolResults
@@ -816,7 +838,7 @@ export function buildRecentHistoryMessages(history, maxMessages = 40, includeToo
         if (call?.id) seenToolCallIds.add(call.id);
       }
     }
-    entries.push({ role: "assistant", content: String(item.assistant || "") });
+    entries.push({ role: "assistant", content: `${historyPrefix}${String(item.assistant || "")}` });
 
     // A tool-call round is atomic. Truncating from its tail can leave an orphaned
     // `tool` message, which OpenAI-compatible APIs correctly reject with HTTP 400.
@@ -855,7 +877,6 @@ function buildCodeModePrompt(codeContext) {
 
 function buildSystemPromptV3(config, knowledge, relationshipProfile, companionMemory, toolsEnabled = true, codeContext = null, conversationStyle = null) {
   const now = new Date();
-  const currentTimeText = now.toLocaleString("zh-CN", { hour12: false });
   const knowledgeBlock = knowledge.length
     ? knowledge.map((item, index) => `【知识片段 ${index + 1} | ${item.file}】\n${item.content}`).join("\n\n")
     : "暂无命中知识片段。";
@@ -883,7 +904,7 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, companionMe
     `你的人设名为 ${config.personaName}。`,
     config.personaPrompt,
     "",
-    `当前本地时间为：${currentTimeText}。`,
+    buildTemporalContext(now),
     "身份设定优先级：当前启用的人物卡是名字、自称、用户称呼、关系和表达风格的唯一主设定。知识库中的 persona.md 与其他知识片段只补充背景、经历和偏好；若与人物卡冲突，必须以人物卡为准，不得让知识片段改写当前身份。",
     config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
     buildCompanionMemoryPrompt(companionMemory),

@@ -61,12 +61,12 @@ export async function handle(message, context = {}) {
     }
   }
 
-  if (/(?:查看|列出|有哪些|有什么|显示).*(?:提醒|计划|日程|安排|事项)|(?:提醒|计划|日程)(?:列表|清单)/.test(text)) {
+  if (/(?:查看|列出|有哪些|有什么|显示|整理).*(?:提醒|计划|日程|安排|事项|待办|任务清单)|(?:提醒|计划|日程|待办|任务清单)(?:列表|清单)/.test(text)) {
     const todayOnly = /今天|今日/.test(text);
     const items = todayOnly ? await listSchedulesForDay(baseDir) : await listSchedules(baseDir);
     const reply = items.length
       ? `${todayOnly ? "今天的安排" : "当前本地日程"}：\n${items.map((item, index) => `${index + 1}. ${item.title} · ${formatTime(item.dueAt)}${item.status === "pending_confirmation" ? " · 等待确认" : ""}`).join("\n")}`
-      : todayOnly ? "今天没有未完成的安排。" : "当前没有未完成的提醒或电源计划。";
+      : todayOnly ? "今天没有未完成的安排。" : "当前本地待办和日程中没有未完成事项。";
     return { reply, meta: { responseMode: "local_tool", localTool: "schedule_list" } };
   }
 

@@ -35,6 +35,7 @@ interface AgentConfig {
     theme: "light" | "dark";
     live2dModel: string;
     mouseFollow: boolean;
+    hoverAutoHide: boolean;
     renderFps: number;
     powerSaving: boolean;
   };
@@ -340,6 +341,7 @@ interface LifeState {
   sessionStartedAt: string | null;
   lastTickAt: string;
   lastActiveAt: string;
+  lastInteractionAt?: string | null;
   activeMinutes: number;
   energy: number;
   restUntil: string | null;
