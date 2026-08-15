@@ -20,7 +20,7 @@ function actionLabel(action) {
 }
 
 async function afterMutation(context) {
-  await context.scheduleClient?.afterMutation?.();
+  return context.scheduleClient?.afterMutation?.();
 }
 
 export async function handle(message, context = {}) {
@@ -92,8 +92,12 @@ export async function handle(message, context = {}) {
         dueAt: parsedUpdate.dueAt,
         message: contentMatch?.[1]?.trim()
       });
-      await afterMutation(context);
-      return { reply: `已经把“${item.message}”改到 ${formatTime(item.dueAt)}，本地日程表和 Windows 后台任务已一并更新。`, meta: { responseMode: "local_tool", localTool: "reminder_update" } };
+      const sync = await afterMutation(context);
+      const windowsFailed = sync?.integrationResults?.some((result) => !result.ok || result.integrationError);
+      const syncMessage = windowsFailed
+        ? "本地日程已更新，但 Windows 后台任务同步失败，我会在下次同步时重试。"
+        : "本地日程表和 Windows 后台任务已一并更新。";
+      return { reply: `已经把“${item.message}”改到 ${formatTime(item.dueAt)}，${syncMessage}`, meta: { responseMode: "local_tool", localTool: "reminder_update" } };
     } catch (error) {
       return { reply: error.message, meta: { responseMode: "local_tool", localTool: "reminder_update" } };
     }

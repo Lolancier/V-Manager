@@ -45,6 +45,15 @@ async function writeScheduleStore(baseDir, store) {
   return normalizeStore(store);
 }
 
+function reminderDelivery(item) {
+  if (item.type !== "reminder") return null;
+  if (item.delivery?.status) return item.delivery;
+  if (item.status === "completed") {
+    return { status: "delivered", deliveredAt: item.completedAt || item.dueAt, legacy: true };
+  }
+  return null;
+}
+
 export async function saveScheduleStore(baseDir, store) {
   return withScheduleWriteLock(baseDir, () => writeScheduleStore(baseDir, store));
 }
@@ -218,11 +227,70 @@ export async function processDueSchedules(baseDir, now = new Date()) {
     }
     item.status = item.type === "power" ? "executing" : "completed";
     item.completedAt = now.toISOString();
+    if (item.type === "reminder") {
+      item.delivery = { status: "pending", attempts: 0, pendingAt: now.toISOString() };
+    }
     due.push({ ...item });
     changed = true;
   }
   if (changed) await writeScheduleStore(baseDir, store);
   return due;
+  });
+}
+
+export async function listPendingReminderDeliveries(baseDir, now = new Date(), leaseMs = 60_000) {
+  const store = await loadScheduleStore(baseDir);
+  const expiredBefore = now.getTime() - leaseMs;
+  return store.items.filter((item) => {
+    const delivery = reminderDelivery(item);
+    if (item.type !== "reminder" || item.status !== "completed" || !delivery) return false;
+    if (delivery.status === "pending") return true;
+    const claimedAt = Date.parse(delivery.claimedAt || "");
+    return delivery.status === "delivering" && (!Number.isFinite(claimedAt) || claimedAt <= expiredBefore);
+  }).map((item) => ({ ...item, delivery: { ...reminderDelivery(item) } }));
+}
+
+export async function claimReminderDelivery(baseDir, id, now = new Date(), leaseMs = 60_000) {
+  return withScheduleWriteLock(baseDir, async () => {
+    const store = await loadScheduleStore(baseDir);
+    const item = store.items.find((entry) => entry.id === id && entry.type === "reminder" && entry.status === "completed");
+    if (!item) return null;
+    const delivery = reminderDelivery(item);
+    const claimedAt = Date.parse(delivery?.claimedAt || "");
+    const claimExpired = delivery?.status === "delivering"
+      && (!Number.isFinite(claimedAt) || claimedAt <= now.getTime() - leaseMs);
+    if (delivery?.status !== "pending" && !claimExpired) return null;
+    item.delivery = {
+      ...delivery,
+      status: "delivering",
+      claimedAt: now.toISOString(),
+      attempts: Number(delivery?.attempts || 0) + 1,
+      error: undefined
+    };
+    await writeScheduleStore(baseDir, store);
+    return { ...item, delivery: { ...item.delivery } };
+  });
+}
+
+export async function markReminderDelivered(baseDir, id, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
+    const store = await loadScheduleStore(baseDir);
+    const item = store.items.find((entry) => entry.id === id && entry.type === "reminder");
+    if (!item || reminderDelivery(item)?.status === "delivered") return item || null;
+    item.delivery = { ...item.delivery, status: "delivered", deliveredAt: now.toISOString(), error: undefined };
+    await writeScheduleStore(baseDir, store);
+    return item;
+  });
+}
+
+export async function releaseReminderDelivery(baseDir, id, error = "", now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
+    const store = await loadScheduleStore(baseDir);
+    const item = store.items.find((entry) => entry.id === id && entry.type === "reminder");
+    if (!item || reminderDelivery(item)?.status !== "delivering") return item || null;
+    item.delivery = { ...item.delivery, status: "pending", pendingAt: now.toISOString(), error: error || undefined };
+    await writeScheduleStore(baseDir, store);
+    return item;
   });
 }
 

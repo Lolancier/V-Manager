@@ -2,10 +2,14 @@ import {
   abortWindowsPowerAction,
   cancelSchedule,
   executeWindowsPowerAction,
+  claimReminderDelivery,
+  listPendingReminderDeliveries,
   listSchedules,
   listSchedulesForDay,
   markPowerResult,
+  markReminderDelivered,
   processDueSchedules,
+  releaseReminderDelivery,
   updateScheduleIntegration
 } from "../../src-agent/schedule-engine.js";
 import {
@@ -23,10 +27,14 @@ const defaultDependencies = {
   abortWindowsPowerAction,
   cancelSchedule,
   executeWindowsPowerAction,
+  claimReminderDelivery,
+  listPendingReminderDeliveries,
   listSchedules,
   listSchedulesForDay,
   markPowerResult,
+  markReminderDelivered,
   processDueSchedules,
+  releaseReminderDelivery,
   updateScheduleIntegration,
   buildScheduledLaunchSpec,
   registerWindowsScheduleTask,
@@ -49,6 +57,8 @@ export function createScheduleService(options) {
   const registeredChannels = new Set();
   const powerResultTimers = new Map();
   const reconciledReminderIds = new Set();
+  const commitmentInFlight = new Map();
+  const deliveryInFlight = new Map();
   let timer = null;
   let tickPromise = null;
   let reconciliationPromise = null;
@@ -71,19 +81,77 @@ export function createScheduleService(options) {
     return items;
   }
 
-  async function reconcileReminder(item, resolvedAt = new Date(item.completedAt || item.dueAt)) {
-    if (reconciledReminderIds.has(item.id)) return;
-    await options.resolveCommitmentsByText?.(
-      baseDir(),
-      `${item.title || ""} ${item.message || ""}`,
-      resolvedAt
-    );
-    reconciledReminderIds.add(item.id);
+  function reconcileReminder(item, resolvedAt = new Date(item.completedAt || item.dueAt)) {
+    if (reconciledReminderIds.has(item.id)) return Promise.resolve();
+    if (commitmentInFlight.has(item.id)) return commitmentInFlight.get(item.id);
+    const promise = Promise.resolve().then(() => options.resolveCommitmentsByText?.(
+      baseDir(), `${item.title || ""} ${item.message || ""}`, resolvedAt
+    )).then(() => {
+      reconciledReminderIds.add(item.id);
+    }).finally(() => {
+      if (commitmentInFlight.get(item.id) === promise) commitmentInFlight.delete(item.id);
+    });
+    commitmentInFlight.set(item.id, promise);
+    return promise;
+  }
+
+  function deliverReminder(item, generation, deliveryTime = now()) {
+    if (deliveryInFlight.has(item.id)) return deliveryInFlight.get(item.id);
+    const promise = (async () => {
+      const claim = await dependencies.claimReminderDelivery(baseDir(), item.id, deliveryTime, options.deliveryLeaseMs ?? 60_000);
+      const claimed = claim ? { ...item, ...claim, delivery: { ...(item.delivery || {}), ...(claim.delivery || {}) } } : null;
+      if (!claimed) return false;
+      if (disposed || generation !== lifecycleGeneration || !acceptTicks) {
+        await dependencies.releaseReminderDelivery(baseDir(), item.id, "service stopped before delivery", now());
+        return false;
+      }
+      try {
+        await reconcileReminder(claimed, new Date(claimed.completedAt || claimed.dueAt));
+      } catch (error) {
+        reportError("reminder-commitment", error);
+      }
+      if (disposed || generation !== lifecycleGeneration || !acceptTicks) {
+        await dependencies.releaseReminderDelivery(baseDir(), item.id, "service stopped before delivery", now());
+        return false;
+      }
+      try {
+        await options.publishProactiveEvent?.({
+          kind: "reminder",
+          message: `提醒时间到了：${claimed.message}`,
+          mood: "surprised"
+        });
+      } catch (error) {
+        await dependencies.releaseReminderDelivery(baseDir(), item.id, errorMessage(error), now());
+        throw error;
+      }
+      await dependencies.markReminderDelivered(baseDir(), item.id, now());
+      return true;
+    })().finally(() => {
+      if (deliveryInFlight.get(item.id) === promise) deliveryInFlight.delete(item.id);
+    });
+    deliveryInFlight.set(item.id, promise);
+    return promise;
+  }
+
+  async function deliverPendingReminders(generation = lifecycleGeneration) {
+    if (disposed || !acceptTicks || generation !== lifecycleGeneration) return [];
+    const deliveryTime = now();
+    const pending = await dependencies.listPendingReminderDeliveries(baseDir(), deliveryTime, options.deliveryLeaseMs ?? 60_000);
+    const results = [];
+    for (const item of pending) {
+      try {
+        results.push(await deliverReminder(item, generation, deliveryTime));
+      } catch (error) {
+        reportError("reminder-delivery", error);
+      }
+    }
+    return results;
   }
 
   function reconcileCompletedReminderCommitments() {
     if (reconciliationPromise) return reconciliationPromise;
     reconciliationPromise = (async () => {
+      await deliverPendingReminders();
       const completed = (await dependencies.listSchedules(baseDir(), { includeHistory: true }))
         .filter((item) => item.type === "reminder" && item.status === "completed")
         .slice(-100);
@@ -166,6 +234,7 @@ export function createScheduleService(options) {
       integrationResults = await syncWindowsScheduleTasks();
     } catch (error) {
       reportError("windows-integration", error);
+      integrationResults = [{ ok: false, error: errorMessage(error) }];
     }
     const items = await broadcastSchedules();
     return { items, integrationResults };
@@ -183,20 +252,6 @@ export function createScheduleService(options) {
         .catch((error) => reportError("power-result", error));
     }, powerResultDelayMs);
     powerResultTimers.set(item.id, timeout);
-  }
-
-  async function processReminder(item, generation, tickTime) {
-    try {
-      await reconcileReminder(item, tickTime);
-    } catch (error) {
-      reportError("reminder-commitment", error);
-    }
-    if (disposed || generation !== lifecycleGeneration) return;
-    await options.publishProactiveEvent?.({
-      kind: "reminder",
-      message: `提醒时间到了：${item.message}`,
-      mood: "surprised"
-    });
   }
 
   async function processPower(item, generation) {
@@ -240,11 +295,23 @@ export function createScheduleService(options) {
       if (options.isHostReady && !options.isHostReady()) return [];
       const tickTime = now();
       const due = await dependencies.processDueSchedules(baseDir(), tickTime);
-      for (const item of due) {
+      const pendingReminders = await dependencies.listPendingReminderDeliveries(baseDir(), tickTime, options.deliveryLeaseMs ?? 60_000);
+      const reminderItems = new Map([
+        ...due.filter((item) => item.type === "reminder").map((item) => [item.id, item]),
+        ...pendingReminders.map((item) => [item.id, item])
+      ]);
+      for (const item of reminderItems.values()) {
         if (disposed || generation !== lifecycleGeneration) break;
         try {
-          if (item.type === "reminder") await processReminder(item, generation, tickTime);
-          else await processPower(item, generation);
+          await deliverReminder(item, generation, tickTime);
+        } catch (error) {
+          reportError("reminder-delivery", error);
+        }
+      }
+      for (const item of due.filter((entry) => entry.type !== "reminder")) {
+        if (disposed || generation !== lifecycleGeneration) break;
+        try {
+          await processPower(item, generation);
         } catch (error) {
           reportError(`schedule-${item.type || "unknown"}`, error);
         }
@@ -282,7 +349,7 @@ export function createScheduleService(options) {
     started = true;
     acceptTicks = true;
     const generation = ++lifecycleGeneration;
-    startPromise = (async () => {
+    const ownPromise = (async () => {
       try { await syncWindowsScheduleTasks(); } catch (error) { reportError("startup-windows-integration", error); }
       if (generation === lifecycleGeneration && started) {
         try {
@@ -308,8 +375,12 @@ export function createScheduleService(options) {
         }
       }
       return snapshot();
-    })().finally(() => { startPromise = null; });
-    return startPromise;
+    })();
+    startPromise = ownPromise;
+    void ownPromise.finally(() => {
+      if (startPromise === ownPromise) startPromise = null;
+    }).catch(() => {});
+    return ownPromise;
   }
 
   function stop() {

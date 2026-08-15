@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createTrustedIpcRegistrar } from "../electron/ipc-security.js";
 import { createScheduleService, SCHEDULE_HANDLE_CHANNELS } from "../electron/services/schedule-service.js";
+import { createReminder, listPendingReminderDeliveries, processDueSchedules } from "../src-agent/schedule-engine.js";
 
 function serviceHarness(overrides = {}) {
   const handlers = new Map();
@@ -16,8 +19,12 @@ function serviceHarness(overrides = {}) {
     cancelSchedule: async (_baseDir, id) => ({ id, status: "cancelled", wasExecuting: false }),
     abortWindowsPowerAction: async () => true,
     executeWindowsPowerAction: async () => true,
+    claimReminderDelivery: async (_baseDir, id) => ({ id }),
+    listPendingReminderDeliveries: async () => [],
     markPowerResult: async () => ({}),
+    markReminderDelivered: async () => ({}),
     updateScheduleIntegration: async () => ({}),
+    releaseReminderDelivery: async () => ({}),
     buildScheduledLaunchSpec: (input) => input,
     registerWindowsScheduleTask: async () => ({ ok: true, taskName: "task" }),
     unregisterWindowsScheduleTask: async () => ({ ok: true, taskName: "task" }),
@@ -99,6 +106,45 @@ test("concurrent ticks join and use one injected time for due processing and com
   assert.equal(commitments.length, 1);
 });
 
+test("concurrent tick and reconciliation share one commitment resolution by reminder id", async () => {
+  const item = { id: "shared", type: "reminder", status: "completed", title: "共享", message: "共享", completedAt: "2026-08-16T10:00:00.000Z" };
+  let resolveCalls = 0;
+  let release;
+  const harness = serviceHarness({
+    dependencies: {
+      processDueSchedules: async () => [item],
+      listPendingReminderDeliveries: async () => [item],
+      listSchedules: async () => [item]
+    },
+    resolveCommitmentsByText: async () => {
+      resolveCalls += 1;
+      await new Promise((resolve) => { release = resolve; });
+    }
+  });
+  const tick = harness.service.tick();
+  const reconcile = harness.service.reconcileCompletedReminderCommitments();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolveCalls, 1);
+  release();
+  await Promise.all([tick, reconcile]);
+  assert.equal(resolveCalls, 1);
+});
+
+test("failed commitment resolution clears its in-flight entry for retry", async () => {
+  const item = { id: "retry", type: "reminder", status: "completed", title: "重试", message: "重试", completedAt: "2026-08-16T10:00:00.000Z" };
+  let calls = 0;
+  const harness = serviceHarness({
+    dependencies: { listSchedules: async () => [item] },
+    resolveCommitmentsByText: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("temporary");
+    }
+  });
+  await harness.service.reconcileCompletedReminderCommitments();
+  await harness.service.reconcileCompletedReminderCommitments();
+  assert.equal(calls, 2);
+});
+
 test("stop during an in-flight tick suppresses notifications, power actions and future scheduling", async () => {
   let release;
   let powerCalls = 0;
@@ -122,6 +168,55 @@ test("stop during an in-flight tick suppresses notifications, power actions and 
   assert.equal(harness.service.snapshot().started, false);
   await harness.service.tick();
   assert.equal(powerCalls, 0);
+});
+
+test("a reminder completed during stop is delivered once after service restart", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-schedule-delivery-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const createdAt = new Date("2026-08-16T09:00:00.000Z");
+  const dueAt = new Date("2026-08-16T10:00:00.000Z");
+  await createReminder(root, { dueAt: dueAt.toISOString(), message: "不会丢" }, createdAt);
+  let firstService;
+  let notifications = 0;
+  firstService = createScheduleService({
+    trustedIpc: { handle: () => {}, removeHandler: () => {} },
+    getBaseDir: () => root,
+    platform: "linux",
+    isHostReady: () => true,
+    getExecutablePath: () => "electron.exe",
+    getAppPath: () => "app",
+    isPackaged: () => false,
+    now: () => dueAt,
+    publishProactiveEvent: () => { notifications += 1; },
+    dependencies: {
+      processDueSchedules: async (...args) => {
+        const due = await processDueSchedules(...args);
+        firstService.stop();
+        return due;
+      }
+    }
+  });
+  await firstService.tick();
+  assert.equal(notifications, 0);
+  assert.equal((await listPendingReminderDeliveries(root, dueAt)).length, 1);
+  firstService.dispose();
+
+  const restarted = createScheduleService({
+    trustedIpc: { handle: () => {}, removeHandler: () => {} },
+    getBaseDir: () => root,
+    platform: "linux",
+    isHostReady: () => true,
+    getExecutablePath: () => "electron.exe",
+    getAppPath: () => "app",
+    isPackaged: () => false,
+    now: () => dueAt,
+    publishProactiveEvent: () => { notifications += 1; }
+  });
+  await restarted.reconcileCompletedReminderCommitments();
+  await restarted.tick();
+  assert.equal(notifications, 1);
+  assert.equal((await listPendingReminderDeliveries(root, dueAt)).length, 0);
+  restarted.dispose();
 });
 
 test("start preserves sync, tick, agenda, timer order and degrades individual failures", async () => {
@@ -148,6 +243,33 @@ test("start preserves sync, tick, agenda, timer order and degrades individual fa
   assert.match(harness.service.snapshot().lastError, /task scheduler offline/);
   await harness.service.start();
   assert.equal(order.filter((item) => item.startsWith("timer")).length, 1);
+});
+
+test("an old start completion cannot clear the promise for a restarted generation", async () => {
+  const releases = [];
+  let historyCalls = 0;
+  const harness = serviceHarness({
+    platform: "win32",
+    dependencies: {
+      listSchedules: async (_baseDir, options) => {
+        if (!options?.includeHistory) return [];
+        historyCalls += 1;
+        if (historyCalls <= 2) await new Promise((resolve) => releases.push(resolve));
+        return [];
+      }
+    }
+  });
+  const oldStart = harness.service.start({ publishAgenda: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.service.stop();
+  const newStart = harness.service.start({ publishAgenda: false });
+  await new Promise((resolve) => setImmediate(resolve));
+  releases[0]();
+  await oldStart;
+  const thirdStart = harness.service.start({ publishAgenda: false });
+  assert.equal(thirdStart, newStart);
+  releases[1]();
+  await Promise.all([newStart, thirdStart]);
 });
 
 test("background start skips today's agenda and one failing reminder does not block the next", async () => {

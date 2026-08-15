@@ -5,13 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import {
   cancelSchedule,
+  claimReminderDelivery,
   confirmLatestPowerDraft,
   createPowerDraft,
   createReminder,
+  listPendingReminderDeliveries,
   listSchedulesForDay,
   listSchedules,
   parseNaturalSchedule,
   processDueSchedules,
+  markReminderDelivered,
+  releaseReminderDelivery,
+  saveScheduleStore,
   updateReminder
 } from "../src-agent/schedule-engine.js";
 import { executeTool } from "../src-agent/tool-executor.js";
@@ -87,6 +92,7 @@ test("due reminders complete while stale power actions are only marked missed", 
 
   const due = await processDueSchedules(root, new Date("2026-08-08T09:20:00+08:00"));
   assert.deepEqual(due.map((item) => item.id), [reminder.id]);
+  assert.equal(due[0].delivery.status, "pending");
   assert.equal((await listSchedules(root, { includeHistory: true })).find((item) => item.type === "power").status, "missed");
 });
 
@@ -98,6 +104,34 @@ test("a scheduled item can be cancelled by id", async (t) => {
   const cancelled = await cancelSchedule(root, reminder.id);
   assert.equal(cancelled.status, "cancelled");
   assert.equal((await listSchedules(root)).length, 0);
+});
+
+test("reminder delivery uses a persistent claim lease and delivered marker", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-delivery-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const createdAt = new Date("2026-08-08T09:00:00.000Z");
+  const dueAt = new Date("2026-08-08T09:01:00.000Z");
+  const reminder = await createReminder(root, { dueAt: dueAt.toISOString(), message: "delivery" }, createdAt);
+  await processDueSchedules(root, dueAt);
+  assert.deepEqual((await listPendingReminderDeliveries(root, dueAt)).map((item) => item.id), [reminder.id]);
+  assert.ok(await claimReminderDelivery(root, reminder.id, dueAt));
+  assert.equal((await listPendingReminderDeliveries(root, new Date(dueAt.getTime() + 30_000))).length, 0);
+  assert.equal((await listPendingReminderDeliveries(root, new Date(dueAt.getTime() + 60_001))).length, 1);
+  await releaseReminderDelivery(root, reminder.id, "retry", new Date(dueAt.getTime() + 60_001));
+  assert.equal((await listPendingReminderDeliveries(root, new Date(dueAt.getTime() + 60_001))).length, 1);
+  await claimReminderDelivery(root, reminder.id, new Date(dueAt.getTime() + 60_001));
+  await markReminderDelivered(root, reminder.id, new Date(dueAt.getTime() + 60_002));
+  assert.equal((await listPendingReminderDeliveries(root, new Date(dueAt.getTime() + 120_000))).length, 0);
+});
+
+test("legacy completed reminders without delivery metadata are not replayed", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-delivery-legacy-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await saveScheduleStore(root, { items: [{
+    id: "legacy", type: "reminder", status: "completed", title: "old", message: "old",
+    dueAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T00:00:00.000Z"
+  }] });
+  assert.deepEqual(await listPendingReminderDeliveries(root, new Date("2026-08-16T00:00:00.000Z")), []);
 });
 
 test("an executing power action is only persisted as cancelled after abort succeeds", async (t) => {
@@ -198,6 +232,18 @@ test("power confirmation tool rejects a generic confirmation", async (t) => {
   const accepted = await executeTool("confirm_power_action", { action: "shutdown" }, { baseDir: root, currentUserMessage: "确认定时关机" });
   assert.equal(accepted.ok, true);
   assert.equal(accepted.item.status, "scheduled");
+});
+
+test("schedule update reports Windows synchronization failure without claiming success", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-schedule-sync-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await createReminder(root, { dueAt: new Date(Date.now() + 2 * 3600000).toISOString(), message: "喝水" });
+  const result = await handleScheduleMessage("把提醒改到30分钟后", {
+    baseDir: root,
+    scheduleClient: { afterMutation: async () => ({ integrationResults: [{ ok: false, error: "offline" }] }) }
+  });
+  assert.match(result.reply, /Windows 后台任务同步失败/);
+  assert.doesNotMatch(result.reply, /已一并更新/);
 });
 
 test("natural-language and model-tool cancellation both preserve executing power state when abort fails", async (t) => {
