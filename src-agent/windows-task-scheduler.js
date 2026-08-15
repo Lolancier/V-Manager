@@ -27,7 +27,7 @@ export async function registerWindowsScheduleTask(item, launchSpec, options = {}
     return { ok: false, supported: false, error: "Windows 任务计划仅支持 Windows。" };
   }
   const dueAt = new Date(item.dueAt);
-  if (!Number.isFinite(dueAt.getTime()) || dueAt <= new Date()) {
+  if (!Number.isFinite(dueAt.getTime()) || dueAt <= (options.now || new Date())) {
     return { ok: false, supported: true, error: "计划时间已经过去。" };
   }
   const taskName = windowsTaskName(item.id);

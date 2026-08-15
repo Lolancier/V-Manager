@@ -54,21 +54,6 @@ import {
   saveLifeState
 } from "../src-agent/proactive-engine.js";
 import {
-  abortWindowsPowerAction,
-  cancelSchedule,
-  executeWindowsPowerAction,
-  listSchedulesForDay,
-  listSchedules,
-  markPowerResult,
-  processDueSchedules,
-  updateScheduleIntegration
-} from "../src-agent/schedule-engine.js";
-import {
-  buildScheduledLaunchSpec,
-  registerWindowsScheduleTask,
-  unregisterWindowsScheduleTask
-} from "../src-agent/windows-task-scheduler.js";
-import {
   cleanupInterestSandbox,
   generatePlaytestReflection,
   getInterestActivity,
@@ -105,6 +90,7 @@ import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
 import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
 import { registerSpeechServiceIpc } from "./services/speech-service.js";
+import { createScheduleService } from "./services/schedule-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -138,6 +124,24 @@ const trustedIpc = createTrustedIpcRegistrar(ipcMain, {
   isDev,
   devServerUrl,
   rendererRoot: path.join(app.getAppPath(), "dist")
+});
+const scheduleService = createScheduleService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  isHostReady: () => app.isReady(),
+  platform: process.platform,
+  getExecutablePath: () => process.execPath,
+  getAppPath: () => app.getAppPath(),
+  isPackaged: () => app.isPackaged,
+  resolveCommitmentsByText,
+  loadCompanionMemory,
+  publishProactiveEvent: (event) => publishProactiveEvent(event),
+  broadcastSchedules: (items) => {
+    for (const win of [settingsWindow, chatWindow]) {
+      if (win && !win.isDestroyed()) win.webContents.send("agent:schedules-updated", items);
+    }
+  },
+  onError: (scope, error) => console.error(`[schedule] ${scope} failed:`, error)
 });
 const isBackgroundScheduleLaunch = process.argv.includes("--vivi-background-schedule");
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -177,9 +181,6 @@ let currentLifeState = null;
 let proactiveTickRunning = false;
 let ownerInteractionRevision = 0;
 let ownerInteractionUpdateRunning = false;
-let scheduleTimer = null;
-let scheduleTickRunning = false;
-let reminderCommitmentsReconciled = false;
 let interestTimer = null;
 let interestTickRunning = false;
 let currentInterestActivity = null;
@@ -1296,77 +1297,11 @@ function broadcastLifeState(state) {
   }
 }
 
-async function broadcastSchedules() {
-  const items = await listSchedules(app.getPath("userData"));
-  for (const win of [settingsWindow, chatWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:schedules-updated", items);
-  }
-  return items;
-}
-
-async function reconcileCompletedReminderCommitments() {
-  const baseDir = app.getPath("userData");
-  if (reminderCommitmentsReconciled) return loadCompanionMemory(baseDir);
-  const completed = (await listSchedules(baseDir, { includeHistory: true }))
-    .filter((item) => item.type === "reminder" && item.status === "completed")
-    .slice(-100);
-  for (const item of completed) {
-    await resolveCommitmentsByText(baseDir, `${item.title || ""} ${item.message || ""}`, new Date(item.completedAt || item.dueAt));
-  }
-  reminderCommitmentsReconciled = true;
-  return loadCompanionMemory(baseDir);
-}
-
 function currentInterestSettings() {
   return normalizeInterestConfig({
     ...currentAgentConfig.interests,
     personaCardId: currentAgentConfig.activePersonaCard?.id || ""
   });
-}
-
-async function syncWindowsScheduleTasks() {
-  if (process.platform !== "win32") return [];
-  const baseDir = app.getPath("userData");
-  const items = await listSchedules(baseDir, { includeHistory: true });
-  const launchSpecFor = (id) => buildScheduledLaunchSpec({
-    executablePath: process.execPath,
-    appPath: app.getAppPath(),
-    isPackaged: app.isPackaged,
-    scheduleId: id
-  });
-  const results = [];
-
-  for (const item of items) {
-    const windowsState = item.integration?.windows || {};
-    const shouldRegister = item.status === "scheduled" && new Date(item.dueAt) > new Date();
-    if (shouldRegister) {
-      if (windowsState.status === "registered" && windowsState.dueAt === item.dueAt) continue;
-      const result = await registerWindowsScheduleTask(item, launchSpecFor(item.id));
-      await updateScheduleIntegration(baseDir, item.id, {
-        windows: {
-          status: result.ok ? "registered" : "failed",
-          taskName: result.taskName || "",
-          dueAt: item.dueAt,
-          error: result.error || ""
-        }
-      });
-      results.push({ id: item.id, ...result });
-      continue;
-    }
-
-    if (windowsState.status === "registered") {
-      const result = await unregisterWindowsScheduleTask(item.id);
-      await updateScheduleIntegration(baseDir, item.id, {
-        windows: { ...windowsState, status: result.ok ? "removed" : "remove_failed", error: result.error || "" }
-      });
-      results.push({ id: item.id, ...result });
-    }
-  }
-  return results;
-}
-
-async function syncScheduleIntegrations() {
-  return syncWindowsScheduleTasks();
 }
 
 function publishProactiveEvent(event) {
@@ -1402,23 +1337,6 @@ function publishProactiveEvent(event) {
   }
 }
 
-async function publishTodayAgendaOnStartup() {
-  const items = (await listSchedulesForDay(app.getPath("userData")))
-    .filter((item) => item.status === "scheduled")
-    .sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
-  if (!items.length) return;
-  const lines = items.slice(0, 5).map((item) => {
-    const time = new Date(item.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    return `${time} ${item.title}`;
-  });
-  const remaining = items.length > 5 ? `，另外还有 ${items.length - 5} 项` : "";
-  publishProactiveEvent({
-    kind: "today_agenda",
-    message: `今天有 ${items.length} 项安排：${lines.join("；")}${remaining}。我会按时通过 Windows 通知提醒你。`,
-    mood: "happy"
-  });
-}
-
 async function tickProactiveLife() {
   if (proactiveTickRunning || ownerInteractionUpdateRunning || !app.isReady()) return;
   proactiveTickRunning = true;
@@ -1426,7 +1344,7 @@ async function tickProactiveLife() {
     const interactionRevisionAtStart = ownerInteractionRevision;
     const now = new Date();
     const previous = currentLifeState ?? await loadLifeState(app.getPath("userData"), now);
-    await reconcileCompletedReminderCommitments();
+    await scheduleService.reconcileCompletedReminderCommitments();
     const companion = await getFollowUpCandidate(app.getPath("userData"), now);
     const relationship = await loadRelationshipProfile(app.getPath("userData"));
     const interestSettings = currentInterestSettings();
@@ -1484,58 +1402,8 @@ async function markOwnerInteraction(now = new Date()) {
   }
 }
 
-async function tickSchedules() {
-  if (scheduleTickRunning || !app.isReady()) return;
-  scheduleTickRunning = true;
-  try {
-    const due = await processDueSchedules(app.getPath("userData"));
-    for (const item of due) {
-      if (item.type === "reminder") {
-        await resolveCommitmentsByText(app.getPath("userData"), `${item.title || ""} ${item.message || ""}`, now);
-        publishProactiveEvent({
-          kind: "reminder",
-          message: `提醒时间到了：${item.message}`,
-          mood: "surprised"
-        });
-        continue;
-      }
-
-      try {
-        await executeWindowsPowerAction(item.action);
-        publishProactiveEvent({
-          kind: `power_${item.action}`,
-          message: `定时${item.action === "restart" ? "重启" : "关机"}将在 60 秒后执行。需要取消的话，请马上说“取消定时${item.action === "restart" ? "重启" : "关机"}”。`,
-          mood: "surprised"
-        });
-        setTimeout(() => { void markPowerResult(app.getPath("userData"), item.id, true).then(broadcastSchedules); }, 65_000);
-      } catch (error) {
-        await markPowerResult(app.getPath("userData"), item.id, false, error.message);
-        publishProactiveEvent({ kind: "power_failed", message: `定时电源操作没有执行成功：${error.message}`, mood: "sad" });
-      }
-    }
-    if (due.length) {
-      await syncScheduleIntegrations();
-      await broadcastSchedules();
-    }
-  } catch (error) {
-    console.error("[schedule] tick failed:", error);
-  } finally {
-    scheduleTickRunning = false;
-  }
-}
-
-function startScheduleEngine() {
-  if (scheduleTimer) return;
-  scheduleTimer = setInterval(() => { void tickSchedules(); }, 10_000);
-}
-
-function stopScheduleEngine() {
-  if (scheduleTimer) clearInterval(scheduleTimer);
-  scheduleTimer = null;
-}
-
 async function tickInterestSandbox() {
-  if (interestTickRunning || currentInterestActivity || agentTaskRunning || scheduleTickRunning || proactiveTickRunning || !app.isReady()) return;
+  if (interestTickRunning || currentInterestActivity || agentTaskRunning || scheduleService.snapshot().tickRunning || proactiveTickRunning || !app.isReady()) return;
   interestTickRunning = true;
   try {
     const settings = currentInterestSettings();
@@ -1845,7 +1713,7 @@ async function tryHandleInterestGameChat(message) {
 }
 
 async function executeInterestActivity(type, options = {}) {
-  if (agentTaskRunning || scheduleTickRunning) throw new Error("当前还有主人交代的任务正在执行，请稍后再开始创作。");
+  if (agentTaskRunning || scheduleService.snapshot().tickRunning) throw new Error("当前还有主人交代的任务正在执行，请稍后再开始创作。");
   if (currentInterestActivity) throw new Error("Vivi 正在进行另一项创作。");
   const controller = new AbortController();
   currentInterestActivity = { type, startedAt: new Date().toISOString(), controller };
@@ -2312,10 +2180,7 @@ app.whenReady().then(async () => {
   syncGlobalCursorTracking();
   currentLifeState = await loadLifeState(app.getPath("userData"));
   startProactiveLifeEngine();
-  await syncScheduleIntegrations();
-  await tickSchedules();
-  if (!isBackgroundScheduleLaunch) await publishTodayAgendaOnStartup();
-  startScheduleEngine();
+  await scheduleService.start({ publishAgenda: !isBackgroundScheduleLaunch });
   startInterestSandbox();
   if (!isBackgroundScheduleLaunch) {
     publishStartupStatus({ phase: "renderer", progress: 90, title: "正在加载 Vivi", detail: "等待 Live2D 模型完成渲染…" });
@@ -2339,7 +2204,7 @@ app.on("window-all-closed", () => {
 app.on("second-instance", (_event, argv) => {
   if (!app.isReady()) return;
   if (argv.includes("--vivi-background-schedule")) {
-    void tickSchedules();
+    void scheduleService.tick().catch((error) => console.error("[schedule] background tick failed:", error));
     return;
   }
   showPetWindow();
@@ -2416,8 +2281,7 @@ ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   updateTitleBarOverlays();
   broadcastConfigUpdated(currentAgentConfig);
   refreshTrayMenu();
-  await syncScheduleIntegrations();
-  await broadcastSchedules();
+  await scheduleService.afterMutation();
   return currentAgentConfig;
 });
 
@@ -2463,7 +2327,7 @@ registerMemoryServiceIpc({
   ipcMain: trustedIpc,
   getBaseDir: () => app.getPath("userData"),
   getMemoryDatabaseStats,
-  reconcileCompletedReminderCommitments,
+  reconcileCompletedReminderCommitments: () => scheduleService.reconcileCompletedReminderCommitments(),
   getRagStatus,
   ragClient: ragTaskClient,
   testEmbeddingConnection,
@@ -2566,6 +2430,10 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     result = await buildAgentReply(app.getPath("userData"), {
       ...payload,
       ragClient: ragTaskClient,
+      scheduleClient: {
+        afterMutation: () => scheduleService.afterMutation(),
+        abortPowerAction: () => scheduleService.abortPowerAction()
+      },
       stream: true,
       onDelta: (partialReply) => {
         const nextMessages = [...chatState.messages];
@@ -2601,11 +2469,6 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
-  if (route.type === "schedule") {
-    await syncScheduleIntegrations();
-    await broadcastSchedules();
-  }
-
   if (result.meta?.relationship) {
     broadcastRelationshipProfile(result.meta.relationship);
   }
@@ -2688,7 +2551,7 @@ app.on("before-quit", (event) => {
   if (!shutdownCleanupDone) {
     shutdownCleanupDone = true;
     stopProactiveLifeEngine();
-    stopScheduleEngine();
+    scheduleService.dispose();
     stopInterestSandbox();
     stopGlobalCursorTracking();
     modelDirectoryWatcher?.close();
@@ -2775,16 +2638,6 @@ ipcMain.handle("agent:reset-work-session", async () => {
   currentLifeState = await resetWorkSession(app.getPath("userData"));
   broadcastLifeState(currentLifeState);
   return currentLifeState;
-});
-
-ipcMain.handle("agent:list-schedules", async () => listSchedules(app.getPath("userData")));
-
-ipcMain.handle("agent:cancel-schedule", async (_event, id) => {
-  const item = await cancelSchedule(app.getPath("userData"), id);
-  if (item.wasExecuting) await abortWindowsPowerAction();
-  await syncScheduleIntegrations();
-  await broadcastSchedules();
-  return item;
 });
 
 ipcMain.handle("agent:search-files", async (_event, query) => {

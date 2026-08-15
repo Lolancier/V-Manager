@@ -173,7 +173,7 @@ function analyzeBuildFiles(files, target) {
   return result;
 }
 
-export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [], ragSources = {} }) {
+export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [], ragSources = {}, scheduleService = "" }) {
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
     .map((file) => file.replaceAll("\\", "/"))
@@ -191,6 +191,10 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     appExecutor: ragClientPropagatedThroughCore && /context\.ragClient[\s\S]*context\.ragClient\.rebuild\s*\(/.test(ragSources.appExecutor || ""),
     toolExecutor: ragClientPropagatedThroughCore && /context\.ragClient[\s\S]*context\.ragClient\.rebuild\s*\(/.test(ragSources.toolExecutor || "")
   };
+  const normalizedElectronFiles = electronFiles.map((file) => file.replaceAll("\\", "/"));
+  const directMainScheduleOrchestration = countMatches(maskedMain, /\b(?:scheduleTimer|scheduleTickRunning|tickSchedules|syncScheduleIntegrations|syncWindowsScheduleTasks|publishTodayAgendaOnStartup)\b/g)
+    + countMatches(main, /from\s+["'][^"']*(?:schedule-engine|windows-task-scheduler)\.js["']/g)
+    + countMatches(main, /ipcMain\.(?:handle|on)\s*\(\s*["']agent:(?:list-schedules|cancel-schedule)["']/g);
   const metrics = {
     electronVersion: packageJson.devDependencies?.electron || packageJson.dependencies?.electron || "missing",
     mainLines: main.split(/\r?\n/).length,
@@ -207,13 +211,19 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     utilityProcessImported: /\butilityProcess\b/.test(maskedMain),
     utilitySupervisorConfigured: /createUtilityTaskSupervisor\s*\(/.test(maskedMain) && /utilityProcess\.fork\s*\(/.test(maskedMain),
     utilityEntryDerivedFromModuleUrl: /fileURLToPath\s*\(\s*import\.meta\.url\s*\)/.test(maskedMain) && /resolveUtilityEntryPoint\s*\(\s*__dirname\s*\)/.test(maskedMain),
-    utilityWorkerEntrypointPresent: electronFiles.map((file) => file.replaceAll("\\", "/")).includes("electron/workers/utility-entry.js"),
+    utilityWorkerEntrypointPresent: normalizedElectronFiles.includes("electron/workers/utility-entry.js"),
     utilityWorkerPackaged: utilityBuildFiles.included && !utilityBuildFiles.explicitlyExcluded && !utilityBuildFiles.uncertainFileSet,
     directMainRagIndexWrites: countMatches(maskedMain, /\b(?:ensureRagIndexFresh|rebuildKnowledgeIndex|rebuildRagIndex)\s*\(/g),
     mainDataBootstrapDefersRagFiles: /ensureDataFiles\s*\([\s\S]{0,160}?ensureRag\s*:\s*false/.test(maskedMain),
     ragClientPropagatedThroughCore,
     ragWriteRoutes: ragRoutes,
     ragWriteRoutesMigrated: Object.values(ragRoutes).filter(Boolean).length,
+    scheduleServicePresent: normalizedElectronFiles.includes("electron/services/schedule-service.js"),
+    scheduleServiceConfigured: /createScheduleService\s*\(/.test(maskedMain) && /scheduleService\.start\s*\(/.test(maskedMain) && /scheduleService\.dispose\s*\(/.test(maskedMain),
+    scheduleServiceOwnsIpc: /agent:list-schedules/.test(scheduleService) && /agent:cancel-schedule/.test(scheduleService) && /(?:options\.)?trustedIpc\.handle\s*\(/.test(scheduleService),
+    scheduleLifecycleOwnedByService: /\bfunction\s+tick\s*\(/.test(scheduleService) && /\bfunction\s+start\s*\(/.test(scheduleService) && /\bfunction\s+stop\s*\(/.test(scheduleService) && /\bfunction\s+snapshot\s*\(/.test(scheduleService) && /setIntervalImpl/.test(scheduleService),
+    directMainScheduleOrchestration,
+    scheduleClientPropagatedThroughCore: /scheduleClient\s*:\s*payload\.scheduleClient/.test(ragSources.core || "") && /scheduleClient\s*:/.test(maskedMain),
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
   const critical = [];
@@ -228,6 +238,8 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   if (metrics.directMainRagIndexWrites) critical.push(`主进程仍直接执行 ${metrics.directMainRagIndexWrites} 个 RAG 写索引调用`);
   if (!metrics.mainDataBootstrapDefersRagFiles) critical.push("主进程数据初始化仍可能直接创建 RAG 索引文件");
   if (metrics.ragWriteRoutesMigrated !== 4) critical.push(`Electron RAG 写索引路径仅迁移 ${metrics.ragWriteRoutesMigrated}/4`);
+  if (!metrics.scheduleServicePresent || !metrics.scheduleServiceConfigured || !metrics.scheduleServiceOwnsIpc || !metrics.scheduleLifecycleOwnedByService || !metrics.scheduleClientPropagatedThroughCore) critical.push("日程域服务、IPC、生命周期或聊天工具同步适配未完整迁移");
+  if (metrics.directMainScheduleOrchestration) critical.push(`主进程回流了 ${metrics.directMainScheduleOrchestration} 处日程 IPC、计时器或具体编排`);
   if (metrics.mainLines > 1500) warnings.push(`electron/main.js 仍有 ${metrics.mainLines} 行，需要按领域继续拆分`);
   if (metrics.directMainIpcHandlers > 30) warnings.push(`主文件仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
   if (metrics.singleRendererEntrypoint) warnings.push("所有窗口共用单一 React 入口，尚未按窗口进行代码分割");

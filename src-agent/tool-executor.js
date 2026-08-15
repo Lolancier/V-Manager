@@ -35,6 +35,7 @@ import {
   undoFileOperation
 } from "./safe-file-manager.js";
 import {
+  abortWindowsPowerAction,
   cancelSchedule,
   confirmLatestPowerDraft,
   createPowerDraft,
@@ -147,20 +148,26 @@ export async function executeTool(name, args = {}, context = {}) {
       // ---- Schedules ----
       case "create_reminder": {
         const item = await createReminder(baseDir, { dueAt: args.due_at, message: args.message });
+        await context.scheduleClient?.afterMutation?.();
         return { ok: true, item };
       }
       case "list_schedules":
         return { ok: true, items: await listSchedules(baseDir) };
       case "update_reminder": {
         const item = await updateReminder(baseDir, args.id, { dueAt: args.due_at, message: args.message });
+        await context.scheduleClient?.afterMutation?.();
         return { ok: true, item };
       }
       case "cancel_schedule": {
-        const item = await cancelSchedule(baseDir, args.id);
+        const item = await cancelSchedule(baseDir, args.id, new Date(), {
+          beforeCancel: () => context.scheduleClient?.abortPowerAction?.() || abortWindowsPowerAction()
+        });
+        await context.scheduleClient?.afterMutation?.();
         return { ok: true, item };
       }
       case "create_power_action_draft": {
         const item = await createPowerDraft(baseDir, { action: args.action, dueAt: args.due_at, message: args.message });
+        await context.scheduleClient?.afterMutation?.();
         return { ok: true, requiresConfirmation: true, item };
       }
       case "confirm_power_action": {
@@ -169,6 +176,7 @@ export async function executeTool(name, args = {}, context = {}) {
           return { ok: false, requiresConfirmation: true, error: `只有用户当前消息单独为“${expectedText}”时才能确认。` };
         }
         const item = await confirmLatestPowerDraft(baseDir, args.action);
+        await context.scheduleClient?.afterMutation?.();
         return { ok: true, item };
       }
 

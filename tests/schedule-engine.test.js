@@ -100,6 +100,40 @@ test("a scheduled item can be cancelled by id", async (t) => {
   assert.equal((await listSchedules(root)).length, 0);
 });
 
+test("an executing power action is only persisted as cancelled after abort succeeds", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-schedule-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const createdAt = new Date("2026-08-08T09:00:00+08:00");
+  const draft = await createPowerDraft(root, { action: "shutdown", dueAt: "2026-08-08T09:01:00+08:00" }, createdAt);
+  await confirmLatestPowerDraft(root, "shutdown", createdAt);
+  await processDueSchedules(root, new Date("2026-08-08T09:01:00+08:00"));
+
+  await assert.rejects(() => cancelSchedule(root, draft.id, new Date(), {
+    beforeCancel: async () => { throw new Error("abort failed"); }
+  }), /abort failed/);
+  assert.equal((await listSchedules(root, { includeHistory: true }))[0].status, "executing");
+
+  let aborted = 0;
+  const cancelled = await cancelSchedule(root, draft.id, new Date("2026-08-08T09:02:00+08:00"), {
+    beforeCancel: async () => { aborted += 1; }
+  });
+  assert.equal(aborted, 1);
+  assert.equal(cancelled.status, "cancelled");
+});
+
+test("concurrent schedule writes for one base directory do not overwrite each other", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-schedule-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const now = new Date("2026-08-08T09:00:00+08:00");
+  await Promise.all(Array.from({ length: 12 }, (_, index) => createReminder(root, {
+    dueAt: new Date(now.getTime() + (index + 1) * 60_000).toISOString(),
+    message: `reminder-${index}`
+  }, now)));
+  const items = await listSchedules(root);
+  assert.equal(items.length, 12);
+  assert.deepEqual(new Set(items.map((item) => item.message)), new Set(Array.from({ length: 12 }, (_, index) => `reminder-${index}`)));
+});
+
 test("a reminder can be rescheduled without losing its integration identity", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-schedule-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -164,4 +198,25 @@ test("power confirmation tool rejects a generic confirmation", async (t) => {
   const accepted = await executeTool("confirm_power_action", { action: "shutdown" }, { baseDir: root, currentUserMessage: "确认定时关机" });
   assert.equal(accepted.ok, true);
   assert.equal(accepted.item.status, "scheduled");
+});
+
+test("natural-language and model-tool cancellation both preserve executing power state when abort fails", async (t) => {
+  for (const route of ["language", "tool"]) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `v-manager-schedule-${route}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const createdAt = new Date(Date.now() - 60_000);
+    const draft = await createPowerDraft(root, { action: "shutdown", dueAt: new Date(Date.now() - 1_000).toISOString() }, createdAt);
+    await confirmLatestPowerDraft(root, "shutdown", createdAt);
+    await processDueSchedules(root, new Date());
+    const scheduleClient = { abortPowerAction: async () => { throw new Error("系统撤销失败"); }, afterMutation: async () => {} };
+    if (route === "language") {
+      const result = await handleScheduleMessage("取消定时关机", { baseDir: root, scheduleClient });
+      assert.match(result.reply, /系统撤销失败/);
+    } else {
+      const result = await executeTool("cancel_schedule", { id: draft.id }, { baseDir: root, scheduleClient });
+      assert.equal(result.ok, false);
+      assert.match(result.error, /系统撤销失败/);
+    }
+    assert.equal((await listSchedules(root, { includeHistory: true }))[0].status, "executing");
+  }
 });

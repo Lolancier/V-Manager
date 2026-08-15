@@ -19,6 +19,10 @@ function actionLabel(action) {
   return action === "restart" ? "重启" : "关机";
 }
 
+async function afterMutation(context) {
+  await context.scheduleClient?.afterMutation?.();
+}
+
 export async function handle(message, context = {}) {
   const text = String(message || "").trim();
   const baseDir = context.baseDir;
@@ -28,6 +32,7 @@ export async function handle(message, context = {}) {
   if (confirm) {
     try {
       const item = await confirmLatestPowerDraft(baseDir, confirm[1] === "重启" ? "restart" : "shutdown");
+      await afterMutation(context);
       return {
         reply: `已确认：电脑将在 ${formatTime(item.dueAt)} ${actionLabel(item.action)}。执行前 Windows 会再提供约 60 秒取消时间。`,
         meta: { responseMode: "local_tool", localTool: "power_schedule_confirm" }
@@ -41,6 +46,7 @@ export async function handle(message, context = {}) {
   if (snooze) {
     try {
       const item = await snoozeLatestReminder(baseDir, Number(snooze[1]));
+      await afterMutation(context);
       return { reply: `好，${snooze[1]} 分钟后再提醒你“${item.message}”。`, meta: { responseMode: "local_tool", localTool: "reminder_snooze" } };
     } catch (error) {
       return { reply: error.message, meta: { responseMode: "local_tool", localTool: "reminder_snooze" } };
@@ -53,8 +59,10 @@ export async function handle(message, context = {}) {
       const candidates = await listSchedules(baseDir);
       const target = action ? [...candidates].reverse().find((item) => item.type === "power" && item.action === action) : null;
       if (action && !target) throw new Error(`当前没有可取消的定时${actionLabel(action)}计划。`);
-      const item = await cancelSchedule(baseDir, target?.id);
-      if (item.wasExecuting) await abortWindowsPowerAction();
+      const item = await cancelSchedule(baseDir, target?.id, new Date(), {
+        beforeCancel: () => context.scheduleClient?.abortPowerAction?.() || abortWindowsPowerAction()
+      });
+      await afterMutation(context);
       return { reply: `已取消“${item.title}”（原定 ${formatTime(item.dueAt)}）。`, meta: { responseMode: "local_tool", localTool: "schedule_cancel" } };
     } catch (error) {
       return { reply: error.message, meta: { responseMode: "local_tool", localTool: "schedule_cancel" } };
@@ -84,6 +92,7 @@ export async function handle(message, context = {}) {
         dueAt: parsedUpdate.dueAt,
         message: contentMatch?.[1]?.trim()
       });
+      await afterMutation(context);
       return { reply: `已经把“${item.message}”改到 ${formatTime(item.dueAt)}，本地日程表和 Windows 后台任务已一并更新。`, meta: { responseMode: "local_tool", localTool: "reminder_update" } };
     } catch (error) {
       return { reply: error.message, meta: { responseMode: "local_tool", localTool: "reminder_update" } };
@@ -95,12 +104,14 @@ export async function handle(message, context = {}) {
   try {
     if (parsed.type === "power") {
       const item = await createPowerDraft(baseDir, parsed);
+      await afterMutation(context);
       return {
         reply: `我先创建了待确认计划：${formatTime(item.dueAt)} ${actionLabel(item.action)}电脑。\n这可能导致未保存内容丢失；请检查时间，确认无误后单独回复“确认定时${actionLabel(item.action)}”。`,
         meta: { responseMode: "local_tool", localTool: "power_schedule_draft" }
       };
     }
     const item = await createReminder(baseDir, parsed);
+    await afterMutation(context);
     return {
       reply: `记好了：${formatTime(item.dueAt)} 提醒你“${item.message}”。`,
       meta: { responseMode: "local_tool", localTool: "reminder_create" }

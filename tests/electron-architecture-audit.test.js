@@ -11,7 +11,10 @@ const utilityTaskSupervisor = createUtilityTaskSupervisor({ fork: () => utilityP
 const ragTaskClient = createRagTaskClient({ supervisor: utilityTaskSupervisor });
 await ensureDataFiles(baseDir, { ensureRag: false });
 void ragTaskClient.ensure(baseDir);
-registerMemoryServiceIpc({ ragClient: ragTaskClient });`;
+registerMemoryServiceIpc({ ragClient: ragTaskClient });
+const scheduleService = createScheduleService({ trustedIpc, scheduleClient: payload.scheduleClient });
+scheduleService.start();
+scheduleService.dispose();`;
 const baseMain = `${canonicalDeclaration}\n${utilityConfiguration}\n${Array.from({ length: 9 }, () => canonicalWindow).join("\n")}`;
 const basePackage = {
   main: "electron/main.js",
@@ -21,18 +24,26 @@ const basePackage = {
 
 const baseRagSources = {
   memoryService: "options.ragClient.rebuild(baseDir())",
-  core: "ragClient: payload.ragClient",
+  core: "ragClient: payload.ragClient, scheduleClient: payload.scheduleClient",
   appExecutor: "context.ragClient ? context.ragClient.rebuild(baseDir) : fallback()",
   toolExecutor: "context.ragClient ? context.ragClient.rebuild(baseDir) : fallback()"
 };
+const baseScheduleService = `
+const channels = ["agent:list-schedules", "agent:cancel-schedule"];
+for (const channel of channels) trustedIpc.handle(channel, handler);
+function tick() {}
+function start() { setIntervalImpl(tick, 10_000); }
+function stop() {}
+function snapshot() {}`;
 
 function audit(main = baseMain, packageJson = basePackage, ragSources = baseRagSources) {
   return analyzeElectronArchitecture({
     main,
-    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js"],
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js"],
     packageJson,
     indexHtml: '<script type="module" src="/src/main.tsx"></script>',
-    ragSources
+    ragSources,
+    scheduleService: baseScheduleService
   });
 }
 
@@ -133,4 +144,22 @@ test("architecture audit rejects a utility entry resolved from the current worki
   const result = audit(main);
   assert.equal(result.metrics.utilityEntryDerivedFromModuleUrl, false);
   assert.match(result.critical.join("\n"), /import\.meta\.url/);
+});
+
+test("architecture audit rejects schedule IPC and timer orchestration returning to main", () => {
+  const result = audit(`${baseMain}\nipcMain.handle("agent:list-schedules", handler);\nlet scheduleTimer;\nfunction tickSchedules() {}`);
+  assert.ok(result.metrics.directMainScheduleOrchestration >= 3);
+  assert.match(result.critical.join("\n"), /主进程回流/);
+});
+
+test("architecture audit requires the schedule service source and lifecycle", () => {
+  const result = analyzeElectronArchitecture({
+    main: baseMain,
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js"],
+    packageJson: basePackage,
+    indexHtml: '<script type="module" src="/src/main.tsx"></script>',
+    ragSources: baseRagSources,
+    scheduleService: ""
+  });
+  assert.match(result.critical.join("\n"), /日程域服务/);
 });

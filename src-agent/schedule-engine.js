@@ -7,6 +7,17 @@ import { promisify } from "node:util";
 const STORE_VERSION = 1;
 const ACTIVE_STATUSES = new Set(["scheduled", "pending_confirmation", "executing"]);
 const execFileAsync = promisify(execFile);
+const scheduleWriteQueues = new Map();
+
+function withScheduleWriteLock(baseDir, operation) {
+  const key = path.resolve(baseDir);
+  const previous = scheduleWriteQueues.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  scheduleWriteQueues.set(key, current);
+  return current.finally(() => {
+    if (scheduleWriteQueues.get(key) === current) scheduleWriteQueues.delete(key);
+  });
+}
 
 function schedulePath(baseDir) {
   return path.join(baseDir, "agent-data", "schedules.json");
@@ -27,11 +38,15 @@ export async function loadScheduleStore(baseDir) {
   }
 }
 
-export async function saveScheduleStore(baseDir, store) {
+async function writeScheduleStore(baseDir, store) {
   const target = schedulePath(baseDir);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, JSON.stringify(normalizeStore(store), null, 2), "utf8");
   return normalizeStore(store);
+}
+
+export async function saveScheduleStore(baseDir, store) {
+  return withScheduleWriteLock(baseDir, () => writeScheduleStore(baseDir, store));
 }
 
 function validFutureDate(value, now = new Date()) {
@@ -42,26 +57,24 @@ function validFutureDate(value, now = new Date()) {
 }
 
 export async function createReminder(baseDir, input, now = new Date()) {
-  const dueAt = validFutureDate(input.dueAt, now);
-  const message = String(input.message || input.title || "提醒事项").trim();
-  if (!message) throw new Error("提醒内容不能为空。");
-  const store = await loadScheduleStore(baseDir);
-  const item = {
-    id: randomUUID(),
-    type: "reminder",
-    title: String(input.title || message).trim().slice(0, 80),
-    message: message.slice(0, 500),
-    dueAt: dueAt.toISOString(),
-    status: "scheduled",
-    createdAt: now.toISOString(),
-    completedAt: null
-  };
-  store.items.push(item);
-  await saveScheduleStore(baseDir, store);
-  return item;
+  return withScheduleWriteLock(baseDir, async () => {
+    const dueAt = validFutureDate(input.dueAt, now);
+    const message = String(input.message || input.title || "提醒事项").trim();
+    if (!message) throw new Error("提醒内容不能为空。");
+    const store = await loadScheduleStore(baseDir);
+    const item = {
+      id: randomUUID(), type: "reminder", title: String(input.title || message).trim().slice(0, 80),
+      message: message.slice(0, 500), dueAt: dueAt.toISOString(), status: "scheduled",
+      createdAt: now.toISOString(), completedAt: null
+    };
+    store.items.push(item);
+    await writeScheduleStore(baseDir, store);
+    return item;
+  });
 }
 
 export async function updateReminder(baseDir, id, input, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const item = store.items.find((entry) => entry.id === id && entry.type === "reminder");
   if (!item || item.status !== "scheduled") throw new Error("没有找到可修改的提醒。");
@@ -73,11 +86,13 @@ export async function updateReminder(baseDir, id, input, now = new Date()) {
     item.title = String(input.title || message).trim().slice(0, 80);
   }
   item.updatedAt = now.toISOString();
-  await saveScheduleStore(baseDir, store);
+  await writeScheduleStore(baseDir, store);
   return item;
+  });
 }
 
 export async function createPowerDraft(baseDir, input, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const dueAt = validFutureDate(input.dueAt, now);
   const action = input.action === "restart" ? "restart" : input.action === "shutdown" ? "shutdown" : null;
   if (!action) throw new Error("电源操作只能是关机或重启。");
@@ -98,22 +113,30 @@ export async function createPowerDraft(baseDir, input, now = new Date()) {
     completedAt: null
   };
   store.items.push(item);
-  await saveScheduleStore(baseDir, store);
+  await writeScheduleStore(baseDir, store);
   return item;
+  });
 }
 
 export async function snoozeLatestReminder(baseDir, minutes = 10, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const source = [...store.items].reverse().find((item) => item.type === "reminder" && ["completed", "scheduled"].includes(item.status));
   if (!source) throw new Error("没有找到可以稍后提醒的事项。");
-  return createReminder(baseDir, {
-    title: source.title,
-    message: source.message,
-    dueAt: new Date(now.getTime() + Math.max(1, Number(minutes) || 10) * 60000).toISOString()
-  }, now);
+  const message = source.message;
+  const item = {
+    id: randomUUID(), type: "reminder", title: source.title, message,
+    dueAt: new Date(now.getTime() + Math.max(1, Number(minutes) || 10) * 60000).toISOString(),
+    status: "scheduled", createdAt: now.toISOString(), completedAt: null
+  };
+  store.items.push(item);
+  await writeScheduleStore(baseDir, store);
+  return item;
+  });
 }
 
 export async function confirmLatestPowerDraft(baseDir, expectedAction, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const draft = [...store.items].reverse().find((item) => item.type === "power" && item.status === "pending_confirmation");
   if (!draft) throw new Error("当前没有等待确认的关机或重启计划。");
@@ -121,8 +144,9 @@ export async function confirmLatestPowerDraft(baseDir, expectedAction, now = new
   if (new Date(draft.dueAt) <= now) throw new Error("计划时间已经过去，请重新设置。");
   draft.status = "scheduled";
   draft.confirmedAt = now.toISOString();
-  await saveScheduleStore(baseDir, store);
+  await writeScheduleStore(baseDir, store);
   return draft;
+  });
 }
 
 export async function listSchedules(baseDir, options = {}) {
@@ -143,17 +167,23 @@ export async function listSchedulesForDay(baseDir, day = new Date()) {
   });
 }
 
-export async function cancelSchedule(baseDir, id) {
+export async function cancelSchedule(baseDir, id, now = new Date(), options = {}) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const item = id
     ? store.items.find((entry) => entry.id === id)
     : [...store.items].reverse().find((entry) => ACTIVE_STATUSES.has(entry.status));
   if (!item || !ACTIVE_STATUSES.has(item.status)) throw new Error("没有找到可取消的计划。");
   const wasExecuting = item.status === "executing";
+  if (wasExecuting) {
+    if (typeof options.beforeCancel !== "function") throw new Error("电源操作正在执行，未确认系统撤销前不能标记为已取消。");
+    await options.beforeCancel(item);
+  }
   item.status = "cancelled";
-  item.completedAt = new Date().toISOString();
-  await saveScheduleStore(baseDir, store);
+  item.completedAt = now.toISOString();
+  await writeScheduleStore(baseDir, store);
   return { ...item, wasExecuting };
+  });
 }
 
 export async function executeWindowsPowerAction(action) {
@@ -173,6 +203,7 @@ export async function abortWindowsPowerAction() {
 }
 
 export async function processDueSchedules(baseDir, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const due = [];
   let changed = false;
@@ -190,29 +221,34 @@ export async function processDueSchedules(baseDir, now = new Date()) {
     due.push({ ...item });
     changed = true;
   }
-  if (changed) await saveScheduleStore(baseDir, store);
+  if (changed) await writeScheduleStore(baseDir, store);
   return due;
+  });
 }
 
-export async function markPowerResult(baseDir, id, ok, error = "") {
+export async function markPowerResult(baseDir, id, ok, error = "", now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const item = store.items.find((entry) => entry.id === id);
   if (!item) return null;
   if (item.status === "cancelled") return item;
   item.status = ok ? "completed" : "failed";
   item.error = error || undefined;
-  item.completedAt = new Date().toISOString();
-  await saveScheduleStore(baseDir, store);
+  item.completedAt = now.toISOString();
+  await writeScheduleStore(baseDir, store);
   return item;
+  });
 }
 
-export async function updateScheduleIntegration(baseDir, id, patch) {
+export async function updateScheduleIntegration(baseDir, id, patch, now = new Date()) {
+  return withScheduleWriteLock(baseDir, async () => {
   const store = await loadScheduleStore(baseDir);
   const item = store.items.find((entry) => entry.id === id);
   if (!item) return null;
-  item.integration = { ...(item.integration || {}), ...(patch || {}), updatedAt: new Date().toISOString() };
-  await saveScheduleStore(baseDir, store);
+  item.integration = { ...(item.integration || {}), ...(patch || {}), updatedAt: now.toISOString() };
+  await writeScheduleStore(baseDir, store);
   return item;
+  });
 }
 
 function parseChineseAmount(value) {

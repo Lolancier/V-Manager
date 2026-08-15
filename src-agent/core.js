@@ -1226,6 +1226,7 @@ export async function buildAgentReply(baseDir, payload) {
     config,
     workspaceDir: activeWorkspaceDir,
     ragClient: payload.ragClient,
+    scheduleClient: payload.scheduleClient,
     codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message),
     currentUserMessage: payload.message
   };
