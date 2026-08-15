@@ -1,5 +1,4 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray } from "electron";
-import { createHash } from "node:crypto";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -16,7 +15,6 @@ import {
   getFileManagerSnapshot,
   getRagStatus,
   getSystemResourceSnapshot,
-  generateAsmrScript,
   listKnowledgeFiles,
   loadConfig,
   rebuildAppRegistry,
@@ -28,22 +26,6 @@ import {
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
-import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
-import {
-  installLocalTtsPack,
-  listLocalTtsPacks,
-  synthesizeLocalSpeech
-} from "../src-agent/local-tts.js";
-import {
-  importGptSovitsProfile,
-  installGptSovitsProfile,
-  listGptSovitsProfiles,
-  synthesizeGptSovitsSpeech
-} from "../src-agent/gpt-sovits.js";
-import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
-import { pruneAudioCache, touchAudioCacheFile } from "../src-agent/audio-cache.js";
-import { sanitizeSpeechText } from "../src-agent/speech-text.js";
-import { ensureGptSovitsService, isGptSovitsServiceReady, stopGptSovitsService } from "../src-agent/gpt-sovits-runtime.js";
 import { classifyDiaryRequest, diaryOpenReply, diaryStatusReply } from "../src-agent/diary-privacy.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
@@ -124,6 +106,7 @@ import { generateStartupGreeting } from "../src-agent/startup-greeting.js";
 import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
 import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
+import { registerSpeechServiceIpc } from "./services/speech-service.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -242,63 +225,6 @@ function mergeAgentConfig(nextConfig = {}) {
   };
 }
 
-async function synthesizeSpeechWithCache(voiceConfig, text, asmr) {
-  const cacheDir = path.join(app.getPath("userData"), "agent-data", "audio-cache");
-  const speechText = sanitizeSpeechText(text);
-  if (!speechText) throw new Error("回复中只有舞台动作或内心独白，没有可朗读的正文。");
-  await fs.mkdir(cacheDir, { recursive: true });
-  await pruneAudioCache(cacheDir);
-  const cacheKey = createHash("sha256").update(JSON.stringify({
-    text: speechText,
-    asmr,
-    provider: voiceConfig.provider,
-    localPackId: voiceConfig.localPackId,
-    localSpeakerId: voiceConfig.localSpeakerId,
-    localSpeed: voiceConfig.localSpeed,
-    localSilenceScale: voiceConfig.localSilenceScale,
-    gptSovitsBaseUrl: voiceConfig.gptSovitsBaseUrl,
-    gptSovitsProfileId: voiceConfig.gptSovitsProfileId,
-    gptSovitsSpeed: voiceConfig.gptSovitsSpeed,
-    baseUrl: voiceConfig.baseUrl,
-    model: voiceConfig.model,
-    voice: voiceConfig.voice,
-    outputFormat: voiceConfig.outputFormat,
-    speed: voiceConfig.speed,
-    stability: voiceConfig.stability,
-    similarityBoost: voiceConfig.similarityBoost
-  })).digest("hex");
-  const usesWav = voiceConfig.provider === "local" || voiceConfig.provider === "gpt_sovits";
-  const audioPath = path.join(cacheDir, `${cacheKey}.${usesWav ? "wav" : "mp3"}`);
-  const cached = await fs.readFile(audioPath).catch(() => null);
-  if (cached) {
-    await touchAudioCacheFile(audioPath);
-    await pruneAudioCache(cacheDir, { preserve: [audioPath] });
-    return { audioBase64: cached.toString("base64"), mimeType: usesWav ? "audio/wav" : "audio/mpeg", requestId: "cache", characterCost: "0", cached: true };
-  }
-
-  if (voiceConfig.provider === "gpt_sovits") {
-    if (voiceConfig.gptSovitsAutoStart !== false) {
-      await ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl);
-    } else if (!await isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl)) {
-      throw new Error("GPT-SoVITS 当前未运行。请到“设置 → 语音与 ASMR”手动启动，或开启“随 V-Manager 启动”。");
-    }
-  }
-  const result = voiceConfig.provider === "local"
-    ? await synthesizeLocalSpeech(app.getPath("userData"), voiceConfig, speechText)
-    : voiceConfig.provider === "gpt_sovits"
-      ? await synthesizeGptSovitsSpeech(app.getPath("userData"), voiceConfig, speechText)
-      : await synthesizeElevenLabsSpeech(voiceConfig, speechText, { asmr });
-  await fs.writeFile(audioPath, Buffer.from(result.audioBase64, "base64"));
-  await pruneAudioCache(cacheDir, { preserve: [audioPath] });
-  return { ...result, cached: false };
-}
-
-function broadcastSttProgress(progress) {
-  for (const win of [settingsWindow, chatWindow, composerWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:local-stt-progress", progress);
-  }
-}
-
 function getLive2DModelsDirectory() {
   return path.join(app.getPath("userData"), "agent-data", "models");
 }
@@ -409,17 +335,6 @@ function getModelContentType(filePath) {
   return "application/octet-stream";
 }
 
-function broadcastLocalTtsProgress(progress) {
-  for (const win of [settingsWindow, chatWindow, composerWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:local-tts-progress", progress);
-  }
-}
-
-function broadcastGptSovitsProgress(progress) {
-  for (const win of [settingsWindow, chatWindow, composerWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:gpt-sovits-progress", progress);
-  }
-}
 let chatState = {
   messages: [],
   knowledge: [],
@@ -1312,20 +1227,26 @@ function broadcastMoodUpdate(payload) {
   chatWindow?.webContents.send("agent:mood-updated", payload);
 }
 
-function broadcastSpeechSignal(signal) {
-  const payload = {
-    active: Boolean(signal?.active),
-    level: Math.max(0, Math.min(1, Number(signal?.level) || 0)),
-    phase: ["start", "end", "fallback"].includes(signal?.phase) ? signal.phase : undefined,
-    text: typeof signal?.text === "string" ? signal.text : undefined,
-    durationMs: Number.isFinite(Number(signal?.durationMs)) ? Number(signal.durationMs) : undefined,
-    finalSegment: Boolean(signal?.finalSegment),
-    mood: typeof signal?.mood === "string" ? signal.mood : undefined,
-    faceParams: signal?.faceParams && typeof signal.faceParams === "object" ? signal.faceParams : undefined
-  };
-  petWindow?.webContents.send("agent:speech-signal-updated", payload);
-  chatWindow?.webContents.send("agent:speech-signal-updated", payload);
+function broadcastToWindows(windows, channel, payload) {
+  for (const win of windows) {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  }
 }
+
+const speechService = registerSpeechServiceIpc({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getCurrentConfig: () => currentAgentConfig,
+  loadConfig,
+  mergeConfig: mergeAgentConfig,
+  showOpenDialog: (options) => dialog.showOpenDialog(settingsWindow ?? undefined, options),
+  openPath: (target) => shell.openPath(target),
+  fetch: (url, options) => net.fetch(url, options),
+  broadcastSpeechSignal: (payload) => broadcastToWindows([petWindow, chatWindow], "agent:speech-signal-updated", payload),
+  broadcastSttProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:local-stt-progress", progress),
+  broadcastLocalTtsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:local-tts-progress", progress),
+  broadcastGptSovitsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:gpt-sovits-progress", progress)
+});
 
 async function resolveLocationLabel(location) {
   try {
@@ -2296,7 +2217,7 @@ app.whenReady().then(async () => {
   if (!isBackgroundScheduleLaunch && currentAgentConfig.voice?.enabled && currentAgentConfig.voice?.provider === "gpt_sovits" && currentAgentConfig.voice?.gptSovitsAutoStart !== false) {
     publishStartupStatus({ phase: "voice", progress: 22, title: "正在准备声音", detail: "启动 GPT-SoVITS 本地语音服务，首次加载可能需要一会儿。" });
     try {
-      const voiceRuntime = await ensureGptSovitsService(currentAgentConfig.voice.gptSovitsBaseUrl);
+      const voiceRuntime = await speechService.ensureGptSovitsRuntime(currentAgentConfig.voice.gptSovitsBaseUrl);
       publishStartupStatus({
         phase: "voice",
         progress: 50,
@@ -2577,102 +2498,6 @@ ipcMain.handle("agent:open-live2d-models-folder", async () => {
   return shell.openPath(modelsDirectory);
 });
 
-ipcMain.handle("agent:select-asmr-text-file", async () => {
-  const result = await dialog.showOpenDialog(settingsWindow ?? undefined, {
-    title: "导入 ASMR 文本",
-    properties: ["openFile"],
-    filters: [{ name: "文本", extensions: ["txt", "md"] }]
-  });
-  if (result.canceled || !result.filePaths[0]) return null;
-  const content = await fs.readFile(result.filePaths[0], "utf8");
-  return { path: result.filePaths[0], content: content.slice(0, 200000) };
-});
-
-ipcMain.handle("agent:generate-asmr-script", async (_event, payload) => {
-  return generateAsmrScript(app.getPath("userData"), payload ?? {});
-});
-
-ipcMain.handle("agent:list-elevenlabs-voices", async (_event, voiceOverride) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return listElevenLabsVoices({ ...config.voice, ...(voiceOverride ?? {}) });
-});
-
-ipcMain.handle("agent:synthesize-speech", async (_event, payload) => {
-  const baseDir = app.getPath("userData");
-  const config = mergeAgentConfig(await loadConfig(baseDir));
-  const voiceConfig = { ...config.voice, ...(payload?.voiceConfig ?? {}) };
-  return synthesizeSpeechWithCache(voiceConfig, payload?.text, Boolean(payload?.asmr));
-});
-
-ipcMain.on("agent:speech-signal", (_event, signal) => {
-  broadcastSpeechSignal(signal);
-});
-
-ipcMain.handle("agent:list-local-tts-packs", async () => listLocalTtsPacks(app.getPath("userData")));
-ipcMain.handle("agent:install-local-tts-pack", async (_event, packId) => installLocalTtsPack(
-  app.getPath("userData"),
-  packId,
-  (progress) => broadcastLocalTtsProgress(progress)
-));
-ipcMain.handle("agent:open-local-tts-folder", async () => {
-  const target = path.join(app.getPath("userData"), "agent-data", "tts-models");
-  await fs.mkdir(target, { recursive: true });
-  await shell.openPath(target);
-  return target;
-});
-ipcMain.handle("agent:list-gpt-sovits-profiles", async () => listGptSovitsProfiles(app.getPath("userData")));
-ipcMain.handle("agent:install-gpt-sovits-profile", async (_event, profileId) => installGptSovitsProfile(
-  app.getPath("userData"), profileId, (progress) => broadcastGptSovitsProgress(progress)
-));
-ipcMain.handle("agent:import-gpt-sovits-profile", async (_event, input) => {
-  const result = await dialog.showOpenDialog(settingsWindow ?? undefined, {
-    title: "选择 GPT、SoVITS 权重和参考音频（共 3 个文件）",
-    properties: ["openFile", "multiSelections"],
-    filters: [
-      { name: "GPT-SoVITS 声线文件", extensions: ["ckpt", "pth", "wav", "mp3", "flac", "ogg", "m4a"] }
-    ]
-  });
-  if (result.canceled) return null;
-  return importGptSovitsProfile(app.getPath("userData"), input, result.filePaths);
-});
-
-ipcMain.handle("agent:get-gpt-sovits-runtime-status", async (_event, baseUrl) => ({
-  ready: await isGptSovitsServiceReady(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl)
-}));
-
-ipcMain.handle("agent:start-gpt-sovits-runtime", async (_event, baseUrl) => {
-  return ensureGptSovitsService(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl);
-});
-
-ipcMain.handle("agent:stop-gpt-sovits-runtime", async (_event, baseUrl) => {
-  return stopGptSovitsService(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl);
-});
-
-ipcMain.handle("agent:get-local-stt-status", async (_event, modelId) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return getLocalSttStatus(app.getPath("userData"), modelId || config.speechInput.model);
-});
-
-ipcMain.handle("agent:install-local-stt", async (_event, modelId) => {
-  return installLocalStt(
-    app.getPath("userData"),
-    modelId,
-    broadcastSttProgress,
-    (url, options) => net.fetch(url, options)
-  );
-});
-
-ipcMain.handle("agent:transcribe-local-speech", async (_event, audioBytes) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return transcribeLocalSpeech(app.getPath("userData"), audioBytes, config.speechInput);
-});
-
-ipcMain.handle("agent:open-local-stt-folder", async () => {
-  const status = await getLocalSttStatus(app.getPath("userData"), currentAgentConfig.speechInput.model);
-  await fs.mkdir(status.root, { recursive: true });
-  return shell.openPath(status.root);
-});
-
 ipcMain.handle("agent:chat", async (_event, payload) => {
   await markOwnerInteraction();
   if (currentInterestActivity) {
@@ -2859,13 +2684,14 @@ app.on("before-quit", (event) => {
     stopGlobalCursorTracking();
     modelDirectoryWatcher?.close();
     modelDirectoryWatcher = null;
+    speechService.dispose();
     tray?.destroy();
     tray = null;
   }
   if (gptSovitsShutdownStarted) return;
   event.preventDefault();
   gptSovitsShutdownStarted = true;
-  void stopGptSovitsService(currentAgentConfig.voice?.gptSovitsBaseUrl)
+  void speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
     .catch((error) => console.warn("[voice] GPT-SoVITS shutdown failed:", error))
     .finally(() => app.quit());
 });

@@ -4,7 +4,7 @@
 
 ## 结论
 
-项目应继续使用 Electron，但不能直接从 32 跳到最新大版本后再统一修复。升级前需要把“桌面宿主能力、业务服务、后台任务、窗口生命周期、渲染入口”分开。本轮已经建立第一批边界：Agent 核心不再直接导入 Electron Shell、记忆 IPC 已成为独立服务、辅助窗口关闭后释放 renderer，并加入可重复执行的架构审计。Phase 1 还将 `electron/preload.cjs` 固化为唯一 preload 源，开发与打包窗口都通过主进程的 `PRELOAD_PATH` 加载它。
+项目应继续使用 Electron，但不能直接从 32 跳到最新大版本后再统一修复。升级前需要把“桌面宿主能力、业务服务、后台任务、窗口生命周期、渲染入口”分开。本轮已经建立第一批边界：Agent 核心不再直接导入 Electron Shell、记忆 IPC 已成为独立服务、辅助窗口关闭后释放 renderer，并加入可重复执行的架构审计。Phase 1 还将 `electron/preload.cjs` 固化为唯一 preload 源，开发与打包窗口都通过主进程的 `PRELOAD_PATH` 加载它。Phase 2 已把完整语音域的 17 个 handle 与 `speech-signal` listener 迁入 `speech-service`，主进程只注入目录、配置、Dialog/Shell/Net 和窗口发布回调。
 
 同时已经加入惰性 utilityProcess 任务监督器和 RAG worker 入口，包含任务关联、超时、取消消息、进程退出时拒绝挂起任务及统一关闭能力。它目前作为迁移基础设施保留，尚未替换生产 RAG 调用；应在 Electron 32 上完成开发/打包冒烟后，再逐项切换生产任务，避免把“架构迁移”和“Electron 大版本升级”混成一次变更。
 
@@ -12,7 +12,7 @@
 
 | 区域 | 现状 | 风险 | 后续目标 |
 | --- | --- | --- | --- |
-| `electron/main.js` | 约 3200 行，窗口、托盘、协议、IPC、语音、日程、自主创作混合 | Electron 升级回归难定位；共享全局状态多 | 只保留应用启动、服务装配和生命周期 |
+| `electron/main.js` | 约 3040 行，窗口、托盘、协议、日程、自主创作仍混合；语音域已抽离 | Electron 升级回归范围仍大；共享全局状态多 | 只保留应用启动、服务装配和生命周期 |
 | `src/App.tsx` | 约 5300 行，所有窗口共用一个 React 入口 | 每个辅助 renderer 都加载整套 UI 和 Live2D 依赖 | 按 `startup/pet/bubble/settings/chat/code` 拆入口和动态 chunk |
 | `src/styles.css` | 约 4300 行 | 样式回归范围大，窗口间互相影响 | 按窗口和共享组件拆分 |
 | `src-agent/core.js` | 约 1500 行，模型请求、上下文、工具循环、配置混合 | 难以独立放入 utilityProcess | 拆成 model-client、prompt-builder、conversation-service、tool-loop |
@@ -30,7 +30,7 @@
 ## 高优先级风险
 
 1. Electron 32 已停止支持。升级期间必须逐大版本验证，不能只在最终版本运行一次测试。
-2. 大量 IPC 直接注册在主文件，并且多数尚未统一验证发送方。本轮已为记忆服务建立主 frame 与本地 URL 校验样板；剩余 IPC 仍需迁入该注册器，并继续补参数 schema 和调用窗口权限。
+2. 大量 IPC 仍直接注册在主文件，并且多数尚未统一验证发送方。记忆与语音服务已使用主 frame 与本地 URL 校验；剩余 IPC 仍需逐域迁入该注册器，并继续补参数 schema 和调用窗口权限。
 3. 启动链路在显示桌宠前执行语音服务准备、模型扫描、RAG 刷新、数据库恢复和日程同步，任何一项缓慢都会拖延可交互时间。
 4. `App.tsx` 的单入口意味着“懒创建窗口”并不等于“轻量窗口”；每个 renderer 仍会解析大部分相同代码。
 5. `src-agent` 之前直接使用 Electron Shell，使核心无法安全迁入 utilityProcess。本轮已经改成宿主适配器，但未来 worker 中的特权操作仍应通过主进程 RPC 返回执行。
@@ -55,13 +55,15 @@
 
 1. `memory-service`：记忆统计、长期记忆、RAG 状态/重建、清理。本轮已建立 IPC 服务样板。
 2. `schedule-service`：计时器、Windows Task Scheduler、提醒与承诺同步。
-3. `voice-service`：TTS/STT 包管理、语音缓存、GPT-SoVITS 服务生命周期。
+3. `speech-service`：TTS/STT 包管理、语音缓存、GPT-SoVITS 服务生命周期。Phase 2 已完成。
 4. `creation-service`：自主日程、日记/绘画/游戏生成与作品清理。
 5. `conversation-service`：模型请求、Prompt/Token 预算、工具调用循环和对话持久化。
 
 服务模块不得直接持有 BrowserWindow；通过事件发布器通知窗口。每个服务需返回 `start()`、`stop()`、`snapshot()`，并能在测试中注入时钟、文件根目录和宿主能力。
 
 迁移单个 IPC 域时，应把 `createTrustedIpcRegistrar(ipcMain, policy)` 注入该域 registrar，禁止把原始 `ipcMain` 继续传入服务。`handle/removeHandler` 用于 request/response：不可信 `invoke` 会以拒绝错误返回。renderer `send` 对应的接收侧使用 `on`：它会在每次事件进入业务 listener 前执行同一套主 frame 与 URL 校验，但对不可信单向事件只安全丢弃，不让校验异常从 EventEmitter 传播；可信业务 listener 自己抛出的异常仍保持原有传播语义。`on` 返回可重试且成功后幂等的 disposer；也可用原始 listener 调用 `removeListener`，registrar 会精确移除内部包装函数。先保持 renderer 的 channel、方法名、参数形状和返回值不变，再在服务边界增加参数 schema 与窗口级权限；对应测试至少覆盖受信主 frame 成功、外部 origin 或子 frame 在业务 handler 执行前被拒绝或丢弃，以及 dispose 移除全部 handler/listener。`memory-service` 与可信 registrar 的组合测试已覆盖这条装配路径，后续服务按相同模式逐域迁移，不在一次变更中批量搬移全部 IPC。
+
+`speech-service` 保持 preload 的 17 个语音 handle 与 1 个单向 signal channel 不变，服务本身不导入 Electron，也不持有 BrowserWindow。合成缓存按规范化文本、provider 与对应声线参数生成键；同键磁盘 miss 共享一个 in-flight Promise，不同键并行执行，失败不会进入缓存。GPT-SoVITS 安装或导入成功后会清空派生音频缓存并切换进程内缓存 generation，避免同 ID 声线更新后复用旧音频；旧 generation 的在途任务也不会写回。缓存使用临时文件后 rename，避免把半文件当作成功缓存。下一阶段仍应评估把本地 STT/TTS 原生推理迁入 utilityProcess，并为大模型下载与进程退出补更细的取消语义。
 
 ## utilityProcess 迁移矩阵
 
