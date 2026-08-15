@@ -296,6 +296,105 @@ test("profile invalidation prevents an older in-flight result from repopulating 
   assert.equal(providerCalls, 2);
 });
 
+test("delayed cache removal cannot delete a new generation write or let the old generation repopulate cache", async (t) => {
+  const baseDir = await temporaryBase(t);
+  let releaseOldProvider;
+  let markOldStarted;
+  let releaseRemoval;
+  let markRemovalStarted;
+  let markNewStarted;
+  let providerCalls = 0;
+  const oldStarted = new Promise((resolve) => { markOldStarted = resolve; });
+  const removalStarted = new Promise((resolve) => { markRemovalStarted = resolve; });
+  const newStarted = new Promise((resolve) => { markNewStarted = resolve; });
+  const synthesize = createSpeechSynthesizer({
+    getBaseDir: () => baseDir,
+    dependencies: synthesizerDependencies({
+      removeAudioCache: async (cacheDir) => {
+        markRemovalStarted();
+        await new Promise((resolve) => { releaseRemoval = resolve; });
+        await fs.rm(cacheDir, { recursive: true, force: true });
+      },
+      synthesizeLocalSpeech: async () => {
+        providerCalls += 1;
+        if (providerCalls === 1) {
+          markOldStarted();
+          return new Promise((resolve) => { releaseOldProvider = resolve; });
+        }
+        markNewStarted();
+        return audioResult("new-generation");
+      }
+    })
+  });
+  const config = { provider: "local", localPackId: "pack" };
+  const oldSynthesis = synthesize(config, "same text", false);
+  await oldStarted;
+  const invalidation = synthesize.invalidateCache();
+  await removalStarted;
+  const newSynthesis = synthesize(config, "same text", false);
+  await newStarted;
+  releaseRemoval();
+  await invalidation;
+  const newResult = await newSynthesis;
+  assert.equal(newResult.audioBase64, audioResult("new-generation").audioBase64);
+
+  releaseOldProvider(audioResult("old-generation"));
+  await oldSynthesis;
+  const cached = await synthesize(config, "same text", false);
+  assert.equal(cached.cached, true);
+  assert.equal(cached.audioBase64, audioResult("new-generation").audioBase64);
+  assert.equal(providerCalls, 2);
+  const cacheFiles = await fs.readdir(path.join(baseDir, "agent-data", "audio-cache"));
+  assert.equal(cacheFiles.filter((name) => !name.endsWith(".part")).length, 1);
+});
+
+test("the host fetch implementation reaches every speech-domain network entry", async (t) => {
+  const baseDir = await temporaryBase(t);
+  const handlers = new Map();
+  const sentinelFetch = async () => { throw new Error("sentinel fetch must be consumed by the injected dependency"); };
+  const received = [];
+  const capture = (label, fetchImpl) => {
+    received.push(label);
+    assert.equal(fetchImpl, sentinelFetch, `${label} did not receive the host fetch implementation`);
+  };
+  const options = serviceOptions(baseDir, {
+    handle: (channel, handler) => handlers.set(channel, handler),
+    removeHandler: () => {},
+    on: () => () => {}
+  }, { fetch: sentinelFetch });
+  options.dependencies.generateAsmrScript = async (_baseDir, _payload, fetchImpl) => { capture("asmr", fetchImpl); return "script"; };
+  options.dependencies.listElevenLabsVoices = async (_voice, fetchImpl) => { capture("eleven-list", fetchImpl); return []; };
+  options.dependencies.synthesizeElevenLabsSpeech = async (_voice, _text, synthesisOptions) => { capture("eleven-synthesize", synthesisOptions.fetchImpl); return audioResult("eleven"); };
+  options.dependencies.installLocalTtsPack = async (_baseDir, _packId, _progress, fetchImpl) => { capture("local-tts-install", fetchImpl); return {}; };
+  options.dependencies.installGptSovitsProfile = async (_baseDir, _profileId, _progress, fetchImpl) => { capture("gpt-profile-install", fetchImpl); return {}; };
+  options.dependencies.synthesizeGptSovitsSpeech = async (_baseDir, _voice, _text, fetchImpl) => { capture("gpt-synthesize", fetchImpl); return audioResult("gpt"); };
+  options.dependencies.isGptSovitsServiceReady = async (_baseUrl, fetchImpl) => { capture("gpt-ready", fetchImpl); return true; };
+  options.dependencies.ensureGptSovitsService = async (_baseUrl, runtimeOptions) => { capture("gpt-start", runtimeOptions.fetchImpl); return { ready: true }; };
+  options.dependencies.stopGptSovitsService = async (_baseUrl, fetchImpl) => { capture("gpt-stop", fetchImpl); return { ready: false }; };
+  options.dependencies.installLocalStt = async (_baseDir, _modelId, _progress, fetchImpl) => { capture("local-stt-install", fetchImpl); return {}; };
+  const service = registerSpeechServiceIpc(options);
+
+  await handlers.get("agent:generate-asmr-script")({}, {});
+  await handlers.get("agent:list-elevenlabs-voices")({}, {});
+  await handlers.get("agent:install-local-tts-pack")({}, "pack");
+  await handlers.get("agent:install-gpt-sovits-profile")({}, "profile");
+  await handlers.get("agent:get-gpt-sovits-runtime-status")({}, "http://127.0.0.1:9880");
+  await handlers.get("agent:start-gpt-sovits-runtime")({}, "http://127.0.0.1:9880");
+  await handlers.get("agent:stop-gpt-sovits-runtime")({}, "http://127.0.0.1:9880");
+  await handlers.get("agent:install-local-stt")({}, "small-q5_1");
+  await handlers.get("agent:synthesize-speech")({}, { text: "eleven", voiceConfig: { provider: "elevenlabs", voice: "voice" } });
+  await handlers.get("agent:synthesize-speech")({}, { text: "gpt", voiceConfig: { provider: "gpt_sovits", gptSovitsProfileId: "profile" } });
+  await service.ensureGptSovitsRuntime();
+  await service.stopGptSovitsRuntime();
+
+  assert.deepEqual(received, [
+    "asmr", "eleven-list", "local-tts-install", "gpt-profile-install",
+    "gpt-ready", "gpt-start", "gpt-stop", "local-stt-install",
+    "eleven-synthesize", "gpt-start", "gpt-synthesize", "gpt-start", "gpt-stop"
+  ]);
+  service.dispose();
+});
+
 test("speech service composes with trusted registrar and normalizes trusted signals", async (t) => {
   const baseDir = await temporaryBase(t);
   const handlers = new Map();

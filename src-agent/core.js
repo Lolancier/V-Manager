@@ -532,9 +532,9 @@ function mergeModelUsage(current, next) {
   return { ...merged, cacheHitRate: merged.promptTokens > 0 ? merged.cacheHitTokens / merged.promptTokens : 0 };
 }
 
-async function requestDeepSeek(config, messages, onUsage) {
+async function requestDeepSeek(config, messages, onUsage, fetchImpl = fetch) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const response = await fetch(endpoint, {
+  const response = await fetchImpl(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -558,7 +558,7 @@ async function requestDeepSeek(config, messages, onUsage) {
   return normalizeModelContent(data.choices?.[0]?.message?.content).trim() || EMPTY_MODEL_REPLY;
 }
 
-export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}) {
+export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}, fetchImpl = fetch) {
   const config = await loadConfig(baseDir);
   if (!config.deepseek.apiKey) throw new Error("请先配置 DeepSeek API Key。");
   const scene = mode === "sleep" ? "温柔哄睡" : mode === "casual" ? "放松休闲谈话" : "用户指定主题";
@@ -573,7 +573,7 @@ export async function generateAsmrScript(baseDir, { mode = "custom", prompt = ""
       ].join("\n")
     },
     { role: "user", content: prompt.trim() || `生成一段约 3 分钟的${scene}文本。` }
-  ]);
+  ], undefined, fetchImpl);
   return content.replace(/^\s*\[(?:mood|face):.*\]\s*$/gim, "").trim();
 }
 

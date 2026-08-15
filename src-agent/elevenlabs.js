@@ -28,9 +28,9 @@ function requireVoiceConfig(voiceConfig) {
   if (!voiceConfig?.voice) throw new Error("请先选择 ElevenLabs 音色。");
 }
 
-export async function listElevenLabsVoices(voiceConfig) {
+export async function listElevenLabsVoices(voiceConfig, fetchImpl = fetch) {
   if (!voiceConfig?.apiKey) throw new Error("请先填写 ElevenLabs API Key。");
-  const response = await fetch(getVoicesUrl(voiceConfig.baseUrl), {
+  const response = await fetchImpl(getVoicesUrl(voiceConfig.baseUrl), {
     headers: { "xi-api-key": voiceConfig.apiKey, accept: "application/json" },
     signal: AbortSignal.timeout(30000)
   });
@@ -47,7 +47,7 @@ export async function listElevenLabsVoices(voiceConfig) {
     }));
 }
 
-export async function synthesizeElevenLabsSpeech(voiceConfig, text, { asmr = false } = {}) {
+export async function synthesizeElevenLabsSpeech(voiceConfig, text, { asmr = false, fetchImpl = fetch } = {}) {
   requireVoiceConfig(voiceConfig);
   const cleanText = String(text || "").trim();
   if (!cleanText) throw new Error("没有可合成的文本。");
@@ -66,7 +66,7 @@ export async function synthesizeElevenLabsSpeech(voiceConfig, text, { asmr = fal
 
   const baseUrl = normalizeBaseUrl(voiceConfig.baseUrl);
   const outputFormat = voiceConfig.outputFormat || "mp3_44100_128";
-  const response = await fetch(
+  const response = await fetchImpl(
     `${baseUrl}/text-to-speech/${encodeURIComponent(voiceConfig.voice)}?output_format=${encodeURIComponent(outputFormat)}`,
     {
       method: "POST",

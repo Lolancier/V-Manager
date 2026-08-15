@@ -54,6 +54,8 @@ const defaultDependencies = {
   stopGptSovitsService
 };
 
+const removeAudioCache = (cacheDir) => fs.rm(cacheDir, { recursive: true, force: true });
+
 function normalizeProvider(value) {
   if (["local", "gpt_sovits", "elevenlabs"].includes(value)) return value;
   throw new Error("语音 provider 必须明确选择 local、gpt_sovits 或 elevenlabs。");
@@ -129,17 +131,18 @@ export function createSpeechSynthesizer(options) {
         result = await dependencies.synthesizeLocalSpeech(baseDir, voiceConfig, descriptor.speechText);
       } else if (descriptor.provider === "gpt_sovits") {
         if (voiceConfig.gptSovitsAutoStart !== false) {
-          await dependencies.ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl);
-        } else if (!await dependencies.isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl)) {
+          await dependencies.ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl, { fetchImpl: options.fetch });
+        } else if (!await dependencies.isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl, options.fetch)) {
           throw new Error("GPT-SoVITS 当前未运行。请到“设置 → 语音与 ASMR”手动启动，或开启“随 V-Manager 启动”。");
         }
-        result = await dependencies.synthesizeGptSovitsSpeech(baseDir, voiceConfig, descriptor.speechText);
+        result = await dependencies.synthesizeGptSovitsSpeech(baseDir, voiceConfig, descriptor.speechText, options.fetch);
       } else {
-        result = await dependencies.synthesizeElevenLabsSpeech(voiceConfig, descriptor.speechText, { asmr: descriptor.asmr });
+        result = await dependencies.synthesizeElevenLabsSpeech(voiceConfig, descriptor.speechText, { asmr: descriptor.asmr, fetchImpl: options.fetch });
       }
 
       await mutateCache(async () => {
         if (generation !== taskGeneration) return;
+        await fs.mkdir(cacheDir, { recursive: true });
         const temporaryPath = `${audioPath}.part`;
         await fs.unlink(temporaryPath).catch(() => {});
         try {
@@ -161,7 +164,7 @@ export function createSpeechSynthesizer(options) {
   synthesizeSpeechWithCache.invalidateCache = async () => {
     generation += 1;
     const cacheDir = path.join(options.getBaseDir(), "agent-data", "audio-cache");
-    await mutateCache(() => fs.rm(cacheDir, { recursive: true, force: true }));
+    await mutateCache(() => (dependencies.removeAudioCache || removeAudioCache)(cacheDir));
   };
   return synthesizeSpeechWithCache;
 }
@@ -181,7 +184,7 @@ function normalizeSpeechSignal(signal) {
 
 export function registerSpeechServiceIpc(options) {
   const dependencies = { ...defaultDependencies, ...(options.dependencies || {}) };
-  const synthesizeSpeech = createSpeechSynthesizer({ getBaseDir: options.getBaseDir, dependencies });
+  const synthesizeSpeech = createSpeechSynthesizer({ getBaseDir: options.getBaseDir, fetch: options.fetch, dependencies });
   const getConfig = async () => options.mergeConfig(await options.loadConfig(options.getBaseDir()));
   const currentVoiceConfig = () => options.getCurrentConfig().voice;
   const currentSpeechInputConfig = () => options.getCurrentConfig().speechInput;
@@ -196,17 +199,17 @@ export function registerSpeechServiceIpc(options) {
       const content = await fs.readFile(result.filePaths[0], "utf8");
       return { path: result.filePaths[0], content: content.slice(0, 200000) };
     }],
-    ["agent:generate-asmr-script", async (_event, payload) => dependencies.generateAsmrScript(options.getBaseDir(), payload ?? {})],
+    ["agent:generate-asmr-script", async (_event, payload) => dependencies.generateAsmrScript(options.getBaseDir(), payload ?? {}, options.fetch)],
     ["agent:list-elevenlabs-voices", async (_event, voiceOverride) => {
       const config = await getConfig();
-      return dependencies.listElevenLabsVoices({ ...config.voice, ...(voiceOverride ?? {}) });
+      return dependencies.listElevenLabsVoices({ ...config.voice, ...(voiceOverride ?? {}) }, options.fetch);
     }],
     ["agent:synthesize-speech", async (_event, payload) => {
       const config = await getConfig();
       return synthesizeSpeech({ ...config.voice, ...(payload?.voiceConfig ?? {}) }, payload?.text, Boolean(payload?.asmr));
     }],
     ["agent:list-local-tts-packs", async () => dependencies.listLocalTtsPacks(options.getBaseDir())],
-    ["agent:install-local-tts-pack", async (_event, packId) => dependencies.installLocalTtsPack(options.getBaseDir(), packId, options.broadcastLocalTtsProgress)],
+    ["agent:install-local-tts-pack", async (_event, packId) => dependencies.installLocalTtsPack(options.getBaseDir(), packId, options.broadcastLocalTtsProgress, options.fetch)],
     ["agent:open-local-tts-folder", async () => {
       const target = path.join(options.getBaseDir(), "agent-data", "tts-models");
       await fs.mkdir(target, { recursive: true });
@@ -215,7 +218,7 @@ export function registerSpeechServiceIpc(options) {
     }],
     ["agent:list-gpt-sovits-profiles", async () => dependencies.listGptSovitsProfiles(options.getBaseDir())],
     ["agent:install-gpt-sovits-profile", async (_event, profileId) => {
-      const result = await dependencies.installGptSovitsProfile(options.getBaseDir(), profileId, options.broadcastGptSovitsProgress);
+      const result = await dependencies.installGptSovitsProfile(options.getBaseDir(), profileId, options.broadcastGptSovitsProgress, options.fetch);
       await synthesizeSpeech.invalidateCache();
       return result;
     }],
@@ -230,9 +233,9 @@ export function registerSpeechServiceIpc(options) {
       await synthesizeSpeech.invalidateCache();
       return result;
     }],
-    ["agent:get-gpt-sovits-runtime-status", async (_event, baseUrl) => ({ ready: await dependencies.isGptSovitsServiceReady(baseUrl || currentVoiceConfig().gptSovitsBaseUrl) })],
-    ["agent:start-gpt-sovits-runtime", async (_event, baseUrl) => dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl)],
-    ["agent:stop-gpt-sovits-runtime", async (_event, baseUrl) => dependencies.stopGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl)],
+    ["agent:get-gpt-sovits-runtime-status", async (_event, baseUrl) => ({ ready: await dependencies.isGptSovitsServiceReady(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, options.fetch) })],
+    ["agent:start-gpt-sovits-runtime", async (_event, baseUrl) => dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, { fetchImpl: options.fetch })],
+    ["agent:stop-gpt-sovits-runtime", async (_event, baseUrl) => dependencies.stopGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, options.fetch)],
     ["agent:get-local-stt-status", async (_event, modelId) => {
       const config = await getConfig();
       return dependencies.getLocalSttStatus(options.getBaseDir(), modelId || config.speechInput.model);
@@ -267,10 +270,10 @@ export function registerSpeechServiceIpc(options) {
   let disposed = false;
   return {
     ensureGptSovitsRuntime(baseUrl) {
-      return dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl);
+      return dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, { fetchImpl: options.fetch });
     },
     stopGptSovitsRuntime(baseUrl) {
-      return dependencies.stopGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl);
+      return dependencies.stopGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, options.fetch);
     },
     dispose() {
       if (disposed) return;
