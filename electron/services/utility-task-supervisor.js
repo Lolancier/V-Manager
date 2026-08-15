@@ -14,6 +14,7 @@ function toError(payload, fallback = "后台任务失败。") {
 
 export function createUtilityTaskSupervisor(options) {
   const pending = new Map();
+  const terminating = new Set();
   let child = null;
   let closed = false;
 
@@ -27,9 +28,9 @@ export function createUtilityTaskSupervisor(options) {
     }
   };
 
-  const handleMessage = (message) => {
+  const handleMessage = (message, sourceProcess) => {
     const task = pending.get(message?.taskId);
-    if (!task) return;
+    if (!task || task.process !== sourceProcess || task.terminationPending) return;
     pending.delete(message.taskId);
     clearTimeout(task.timer);
     if (message?.cancelled) {
@@ -47,7 +48,10 @@ export function createUtilityTaskSupervisor(options) {
   };
 
   const ensureChild = () => {
-    if (child) return child;
+    if (child) {
+      if (terminating.has(child)) throw new Error("后台任务进程正在终止，暂不接受新任务。");
+      return child;
+    }
     if (closed) throw new Error("后台任务服务已经关闭。");
     const spawned = options.fork(options.entryPoint, [], {
       cwd: options.cwd,
@@ -55,12 +59,14 @@ export function createUtilityTaskSupervisor(options) {
       stdio: "pipe"
     });
     child = spawned;
-    spawned.on("message", handleMessage);
+    spawned.on("message", (message) => handleMessage(message, spawned));
     spawned.on("exit", (code) => {
+      terminating.delete(spawned);
       if (child === spawned) child = null;
       if (!closed) rejectPending(new Error(`后台任务进程意外退出（${code ?? "unknown"}）。`), spawned);
     });
     spawned.on("error", (error) => {
+      terminating.delete(spawned);
       if (child === spawned) child = null;
       rejectPending(error instanceof Error ? error : new Error(String(error)), spawned);
     });
@@ -92,15 +98,19 @@ export function createUtilityTaskSupervisor(options) {
           try {
             process.postMessage({ kind: "cancel", taskId });
           } catch (error) {
-            pending.delete(taskId);
             clearTimeout(timer);
-            if (child === process) child = null;
+            terminating.add(process);
+            for (const pendingTask of pending.values()) {
+              if (pendingTask.process !== process) continue;
+              pendingTask.terminationPending = true;
+              clearTimeout(pendingTask.timer);
+              pendingTask.reject(error);
+            }
             try { process.kill(); } catch { /* clearing the task must not surface a second failure */ }
-            rejectCompletion(error);
           }
           reject(new Error(`后台任务 ${type} 超时。`));
         }, timeoutMs);
-        pending.set(taskId, { resolve, reject, resolveCompletion, rejectCompletion, timer, type, process, timedOut: false });
+        pending.set(taskId, { resolve, reject, resolveCompletion, rejectCompletion, timer, type, process, timedOut: false, terminationPending: false });
         try {
           process.postMessage({ kind: "run", taskId, type, payload });
         } catch (error) {
@@ -120,6 +130,7 @@ export function createUtilityTaskSupervisor(options) {
       rejectPending(new Error("后台任务服务正在关闭。"));
       const process = child;
       child = null;
+      if (process) terminating.add(process);
       try { return process?.kill() ?? false; }
       catch { return false; }
     },

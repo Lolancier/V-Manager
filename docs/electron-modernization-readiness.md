@@ -78,7 +78,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 
 后台协议只传结构化可克隆数据，不传函数、BrowserWindow、Session、数据库连接或 AbortSignal。开发和打包均从主模块的 `import.meta.url` 推导 `electron/workers/utility-entry.js`，不依赖当前工作目录；`electron/**/*` 打包规则包含该入口。
 
-同一个规范化 `baseDir` 的 RAG 写任务使用单一互斥队列：同类型请求共享 Promise；显式 rebuild 在正在执行的 ensure 之后排队，后续 ensure 遇到 rebuild 时复用 rebuild，避免两个任务同时写 `rag-index.json`。不同目录可以并行。最终索引先写同目录临时文件再 rename，主进程状态读取或检索不会看到半份 JSON。超时只拒绝调用方并发送 cancel，底层 RAG 当前不支持 AbortSignal，因此扫描、Embedding 和写文件不会被伪装成真正中止；worker 会抑制迟到业务结果，并在底层工作真实结束后发送取消完成确认。在此之前该目录锁保持占用，后续任务不得开始。worker 退出或消息发送失败会拒绝并清理相应任务；应用退出时 supervisor 永久关闭，排队任务不会再启动。
+同一个规范化 `baseDir` 的 RAG 写任务使用单一互斥队列：同类型请求共享 Promise；显式 rebuild 在正在执行的 ensure 之后排队，后续 ensure 遇到 rebuild 时复用 rebuild，避免两个任务同时写 `rag-index.json`。不同目录可以并行。最终索引先写同目录临时文件再 rename，主进程状态读取或检索不会看到半份 JSON。超时只拒绝调用方并发送 cancel，底层 RAG 当前不支持 AbortSignal，因此扫描、Embedding 和写文件不会被伪装成真正中止；worker 会抑制迟到业务结果，并在底层工作真实结束后发送取消完成确认。在此之前该目录锁保持占用，后续任务不得开始。若首次结果回传同步失败，worker 会暂存有界终态供 timeout cancel 换取完成确认；终态再次回传失败、超时或超限会让 worker 可观察退出。若父进程连 cancel 都无法发送，则 supervisor 进入 fail-closed：结果 Promise 及时失败，但 completion 与目录锁必须等该 worker 的 exit/error，kill 返回本身不视为停止。应用退出时 supervisor 永久关闭，排队任务不会再启动。
 
 ## 窗口与渲染器策略
 

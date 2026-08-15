@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "../electron/services/utility-task-supervisor.js";
 import { createRagTaskClient } from "../electron/services/rag-task-client.js";
+import { createUtilityMessageHandler } from "../electron/workers/utility-entry.js";
 
 const flushTasks = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -129,15 +130,69 @@ test("a timed-out RAG task keeps the base-directory lock until the worker confir
   supervisor.close();
 });
 
-test("a synchronous cancel postMessage failure clears the timed-out task without an uncaught error", async () => {
-  const child = new FakeUtilityProcess();
-  child.postMessage = function postMessage(message) {
+test("cancel postMessage failure keeps the worker and directory lock until that worker exits", async () => {
+  const firstChild = new FakeUtilityProcess();
+  const secondChild = new FakeUtilityProcess();
+  firstChild.postMessage = function postMessage(message) {
     if (message.kind === "cancel") throw new Error("cancel post failed");
     this.messages.push(message);
   };
+  let forks = 0;
+  const supervisor = createUtilityTaskSupervisor({
+    entryPoint: "worker.js",
+    fork: () => (++forks === 1 ? firstChild : secondChild),
+    timeoutMs: 5
+  });
+  const client = createRagTaskClient({ supervisor });
+  await assert.rejects(client.ensure("data"), /cancel post failed|超时/);
+  const rebuild = client.rebuild("data");
+  await flushTasks();
+  assert.equal(firstChild.killed, true);
+  assert.equal(forks, 1);
+  assert.deepEqual(supervisor.snapshot().pending, ["rag:ensure"]);
+  firstChild.emit("message", { taskId: firstChild.messages[0].taskId, ok: true, result: { late: true } });
+  await flushTasks();
+  assert.equal(forks, 1);
+  firstChild.emit("exit", 1);
+  await flushTasks();
+  assert.equal(forks, 2);
+  assert.equal(secondChild.messages[0].type, "rag:rebuild");
+  secondChild.emit("message", { taskId: secondChild.messages[0].taskId, ok: true, result: { files: [], chunks: [] } });
+  await rebuild;
+  supervisor.close();
+});
+
+test("worker result post failure is recovered by timeout cancel in a real supervisor-handler bridge", async () => {
+  class HandlerBackedProcess extends FakeUtilityProcess {
+    resultPosts = 0;
+    constructor() {
+      super();
+      this.handler = createUtilityMessageHandler({
+        handlers: {
+          "rag:ensure": async () => ({ rebuilt: false }),
+          "rag:rebuild": async () => ({ files: [], chunks: [] })
+        },
+        postMessage: (message) => {
+          this.resultPosts += 1;
+          if (this.resultPosts === 1) throw new Error("first result post failed");
+          this.emit("message", message);
+        }
+      });
+    }
+    postMessage(message) {
+      this.messages.push(message);
+      void this.handler(message);
+    }
+  }
+  const child = new HandlerBackedProcess();
   const supervisor = createUtilityTaskSupervisor({ entryPoint: "worker.js", fork: () => child, timeoutMs: 5 });
-  await assert.rejects(supervisor.run("rag:ensure", {}), /超时/);
+  const client = createRagTaskClient({ supervisor });
+  await assert.rejects(client.ensure("data"), /超时/);
+  assert.equal(child.handler.snapshot().terminal, 0);
   assert.deepEqual(supervisor.snapshot().pending, []);
+  const rebuild = client.rebuild("data");
+  assert.deepEqual(await rebuild, { files: [], chunks: [] });
+  assert.equal(child.messages.filter((message) => message.kind === "run").length, 2);
   supervisor.close();
 });
 

@@ -50,10 +50,16 @@ test("utility cancellation suppresses a late result without claiming to abort un
   assert.deepEqual(messages, [{ taskId: "delayed-1", cancelled: true }]);
 });
 
-test("utility entry contains synchronous parent postMessage failures", async () => {
+test("utility entry escalates an unrecoverable terminal acknowledgement failure", async () => {
+  const failures = [];
   const handle = createUtilityMessageHandler({
     handlers: { success: async () => ({ ok: true }) },
-    postMessage: () => { throw new Error("parent closed"); }
+    postMessage: () => { throw new Error("parent closed"); },
+    onProtocolFailure: (error) => failures.push(error.message)
   });
   await assert.doesNotReject(handle({ kind: "run", taskId: "post-failure", type: "success", payload: {} }));
+  assert.equal(handle.snapshot().terminal, 1);
+  await handle({ kind: "cancel", taskId: "post-failure" });
+  assert.deepEqual(failures, ["parent closed"]);
+  assert.deepEqual(handle.snapshot(), { active: 0, terminal: 0, protocolFailed: true });
 });
