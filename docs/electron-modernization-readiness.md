@@ -61,7 +61,7 @@
 
 服务模块不得直接持有 BrowserWindow；通过事件发布器通知窗口。每个服务需返回 `start()`、`stop()`、`snapshot()`，并能在测试中注入时钟、文件根目录和宿主能力。
 
-迁移单个 IPC 域时，应把 `createTrustedIpcRegistrar(ipcMain, policy)` 注入该域 registrar，禁止把原始 `ipcMain` 继续传入服务。`handle/removeHandler` 用于 request/response；renderer `send` 对应的接收侧使用 `on`，它会在每次事件进入业务 listener 前执行同一套主 frame 与 URL 校验，并返回幂等 disposer；也可用原始 listener 调用 `removeListener`，registrar 会精确移除内部包装函数。先保持 renderer 的 channel、方法名、参数形状和返回值不变，再在服务边界增加参数 schema 与窗口级权限；对应测试至少覆盖受信主 frame 成功、外部 origin 或子 frame 在业务 handler 执行前被拒绝，以及 dispose 移除全部 handler/listener。`memory-service` 与可信 registrar 的组合测试已覆盖这条装配路径，后续服务按相同模式逐域迁移，不在一次变更中批量搬移全部 IPC。
+迁移单个 IPC 域时，应把 `createTrustedIpcRegistrar(ipcMain, policy)` 注入该域 registrar，禁止把原始 `ipcMain` 继续传入服务。`handle/removeHandler` 用于 request/response：不可信 `invoke` 会以拒绝错误返回。renderer `send` 对应的接收侧使用 `on`：它会在每次事件进入业务 listener 前执行同一套主 frame 与 URL 校验，但对不可信单向事件只安全丢弃，不让校验异常从 EventEmitter 传播；可信业务 listener 自己抛出的异常仍保持原有传播语义。`on` 返回可重试且成功后幂等的 disposer；也可用原始 listener 调用 `removeListener`，registrar 会精确移除内部包装函数。先保持 renderer 的 channel、方法名、参数形状和返回值不变，再在服务边界增加参数 schema 与窗口级权限；对应测试至少覆盖受信主 frame 成功、外部 origin 或子 frame 在业务 handler 执行前被拒绝或丢弃，以及 dispose 移除全部 handler/listener。`memory-service` 与可信 registrar 的组合测试已覆盖这条装配路径，后续服务按相同模式逐域迁移，不在一次变更中批量搬移全部 IPC。
 
 ## utilityProcess 迁移矩阵
 
@@ -108,4 +108,4 @@ Electron 官方建议一次迁移一个大版本并逐项检查 Breaking Changes
 npm run audit:architecture
 ```
 
-该命令会输出 Electron 版本、主文件行数、直接 IPC 数、窗口数、Agent 核心是否重新直接导入 Electron、安全窗口配置、preload 源清单、使用 canonical preload 的窗口数、生产打包覆盖和单入口状态。以下 preload 回归会作为 critical 直接失败，而不是 warning：新增第二份 preload、删除 `electron/preload.cjs`、移除 `PRELOAD_PATH`、任一 BrowserWindow 绕过该路径，或生产入口/文件清单不再打包 `electron/**/*`。API 表面、代表性参数转发与事件解绑另由 `tests/preload.test.js` 固化；其余尚待拆分的结构问题继续作为 warning 展示。
+该命令会输出 Electron 版本、主文件行数、直接 IPC 数、窗口数、Agent 核心是否重新直接导入 Electron、安全窗口配置、preload 源清单、使用 canonical preload 的窗口数、生产打包覆盖和单入口状态。审计会先独立统计全部 `new BrowserWindow(` 调用，再逐个配对调用参数；变量 options、单行或多行非规范 preload，以及任何无法静态确认 `preload: PRELOAD_PATH` 的新窗口都会作为 critical，而不依赖固定的对象换行格式。以下 preload 回归同样会直接失败：新增第二份 preload、删除 `electron/preload.cjs`、移除 `PRELOAD_PATH`、生产入口/文件清单不再包含 canonical preload，或任一正向打包 pattern 之后又显式排除 `electron/preload.cjs`。API 表面、代表性参数转发与事件解绑另由 `tests/preload.test.js` 固化；审计规则的绕过场景由 `tests/electron-architecture-audit.test.js` 固化；其余尚待拆分的结构问题继续作为 warning 展示。

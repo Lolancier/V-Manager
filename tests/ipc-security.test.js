@@ -16,7 +16,7 @@ function eventFor(frameUrl, options = {}) {
   };
 }
 
-function createIpcMainDouble() {
+function createIpcMainDouble(options = {}) {
   const handlers = new Map();
   const listeners = new Map();
   const removed = [];
@@ -33,6 +33,10 @@ function createIpcMainDouble() {
         listeners.set(channel, channelListeners);
       },
       removeListener: (channel, listener) => {
+        if (options.failRemoveOnce) {
+          options.failRemoveOnce = false;
+          throw new Error("remove failed");
+        }
         removed.push([channel, listener]);
         const channelListeners = listeners.get(channel) || [];
         const index = channelListeners.lastIndexOf(listener);
@@ -42,18 +46,23 @@ function createIpcMainDouble() {
   };
 }
 
-test("development URL policy accepts only the configured renderer origin", () => {
+test("development URL policy accepts only the configured protocol, host, and port", () => {
   assert.equal(isTrustedRendererUrl("http://localhost:5173/?view=settings", devPolicy), true);
+  assert.equal(isTrustedRendererUrl("https://localhost:5173/?view=settings", devPolicy), false);
+  assert.equal(isTrustedRendererUrl("http://localhost:5174/?view=settings", devPolicy), false);
   assert.equal(isTrustedRendererUrl("https://example.com", devPolicy), false);
+  assert.equal(isTrustedRendererUrl("not a url", devPolicy), false);
 });
 
-test("production URL policy accepts dist files and rejects adjacent or escaped files", () => {
-  const inside = pathToFileURL(path.join(rendererRoot, "index.html")).toString();
+test("production URL policy accepts dist query/hash and rejects non-file, malformed, adjacent, or escaped files", () => {
+  const inside = `${pathToFileURL(path.join(rendererRoot, "index.html"))}?view=settings#panel`;
   const nested = pathToFileURL(path.join(rendererRoot, "assets", "index.js")).toString();
   const adjacent = pathToFileURL(path.resolve(`${rendererRoot}-adjacent`, "index.html")).toString();
-  const outside = pathToFileURL(path.resolve("outside.html")).toString();
+  const outside = pathToFileURL(path.join(rendererRoot, "..", "outside.html")).toString();
   assert.equal(isTrustedRendererUrl(inside, productionPolicy), true);
   assert.equal(isTrustedRendererUrl(nested, productionPolicy), true);
+  assert.equal(isTrustedRendererUrl("https://example.com/index.html", productionPolicy), false);
+  assert.equal(isTrustedRendererUrl("not a url", productionPolicy), false);
   assert.equal(isTrustedRendererUrl(adjacent, productionPolicy), false);
   assert.equal(isTrustedRendererUrl(outside, productionPolicy), false);
 });
@@ -76,7 +85,7 @@ test("trusted IPC handle rejects child frames, foreign main frames, and missing 
   assert.equal(calls, 1);
 });
 
-test("trusted IPC on validates every event and disposes the exact wrapped listener", () => {
+test("trusted IPC on silently drops foreign and child-frame events", () => {
   const double = createIpcMainDouble();
   const registrar = createTrustedIpcRegistrar(double.ipcMain, devPolicy);
   const received = [];
@@ -85,7 +94,9 @@ test("trusted IPC on validates every event and disposes the exact wrapped listen
   const wrapped = double.listeners.get("event")[0];
 
   wrapped(eventFor("http://localhost:5173/?view=pet"), "first");
-  assert.throws(() => wrapped(eventFor("https://example.com"), "blocked"), /拒绝/);
+  assert.doesNotThrow(() => wrapped(eventFor("https://example.com"), "foreign"));
+  const mainFrame = { url: "http://localhost:5173/?view=pet" };
+  assert.doesNotThrow(() => wrapped(eventFor(mainFrame.url, { mainFrame, senderFrame: { url: mainFrame.url } }), "child"));
   wrapped(eventFor("http://localhost:5173/?view=pet"), "second");
   assert.deepEqual(received, ["first", "second"]);
 
@@ -93,6 +104,27 @@ test("trusted IPC on validates every event and disposes the exact wrapped listen
   dispose();
   assert.equal(double.listeners.get("event").length, 0);
   assert.deepEqual(double.removed, [["event", wrapped]]);
+});
+
+test("trusted IPC on propagates trusted business listener failures", () => {
+  const double = createIpcMainDouble();
+  const registrar = createTrustedIpcRegistrar(double.ipcMain, devPolicy);
+  registrar.on("event", () => { throw new Error("business failed"); });
+  const wrapped = double.listeners.get("event")[0];
+  assert.throws(() => wrapped(eventFor("http://localhost:5173/?view=pet")), /business failed/);
+});
+
+test("trusted IPC disposer retries a failed removal and becomes idempotent after success", () => {
+  const options = { failRemoveOnce: true };
+  const double = createIpcMainDouble(options);
+  const registrar = createTrustedIpcRegistrar(double.ipcMain, devPolicy);
+  const dispose = registrar.on("event", () => {});
+  assert.throws(dispose, /remove failed/);
+  assert.equal(double.listeners.get("event").length, 1);
+  dispose();
+  dispose();
+  assert.equal(double.listeners.get("event").length, 0);
+  assert.equal(double.removed.length, 1);
 });
 
 test("trusted IPC removeListener resolves the original listener to its wrapper", () => {

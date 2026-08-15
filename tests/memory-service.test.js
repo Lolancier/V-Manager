@@ -59,8 +59,13 @@ test("memory service composes with the trusted IPC registrar", async () => {
   const mainFrame = { url: "http://localhost:5173/?view=settings" };
   const trustedEvent = { senderFrame: mainFrame, sender: { mainFrame } };
   assert.deepEqual(await handlers.get("agent:get-memory-database-stats")(trustedEvent), { ok: true });
+  const foreignMainFrame = { url: "https://example.com" };
   assert.throws(
-    () => handlers.get("agent:get-memory-database-stats")({ senderFrame: { url: "https://example.com" }, sender: { mainFrame } }),
+    () => handlers.get("agent:get-memory-database-stats")({ senderFrame: foreignMainFrame, sender: { mainFrame: foreignMainFrame } }),
+    /拒绝/
+  );
+  assert.throws(
+    () => handlers.get("agent:get-memory-database-stats")({ senderFrame: { url: mainFrame.url }, sender: { mainFrame } }),
     /拒绝/
   );
   assert.equal(serviceCalls, 1);

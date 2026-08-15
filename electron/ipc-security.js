@@ -24,11 +24,12 @@ export function isTrustedRendererUrl(rawUrl, options) {
 
 export function createTrustedIpcRegistrar(ipcMain, options) {
   const eventListeners = new Map();
-  const validate = (event) => {
+  const isTrustedEvent = (event) => {
     const frame = event?.senderFrame;
-    if (!frame || frame !== event.sender?.mainFrame || !isTrustedRendererUrl(frame.url, options)) {
-      throw new Error("拒绝来自非受信渲染页面的 IPC 调用。");
-    }
+    return Boolean(frame && frame === event.sender?.mainFrame && isTrustedRendererUrl(frame.url, options));
+  };
+  const validate = (event) => {
+    if (!isTrustedEvent(event)) throw new Error("拒绝来自非受信渲染页面的 IPC 调用。");
   };
   const forgetEventListener = (channel, listener, wrapped) => {
     const channelListeners = eventListeners.get(channel);
@@ -50,7 +51,7 @@ export function createTrustedIpcRegistrar(ipcMain, options) {
     },
     on(channel, listener) {
       const wrapped = (event, ...args) => {
-        validate(event);
+        if (!isTrustedEvent(event)) return;
         return listener(event, ...args);
       };
       ipcMain.on(channel, wrapped);
@@ -62,10 +63,13 @@ export function createTrustedIpcRegistrar(ipcMain, options) {
       let disposed = false;
       return () => {
         if (disposed) return;
-        disposed = true;
-        if (!eventListeners.get(channel)?.get(listener)?.has(wrapped)) return;
+        if (!eventListeners.get(channel)?.get(listener)?.has(wrapped)) {
+          disposed = true;
+          return;
+        }
         ipcMain.removeListener(channel, wrapped);
         forgetEventListener(channel, listener, wrapped);
+        disposed = true;
       };
     },
     removeListener(channel, listener) {
