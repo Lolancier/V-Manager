@@ -138,3 +138,22 @@ test("trusted IPC removeListener resolves the original listener to its wrapper",
   assert.equal(double.listeners.get("event").length, 0);
   assert.deepEqual(double.removed, [["event", wrapped]]);
 });
+
+test("trusted IPC duplicate listeners remove the newest wrapper and both disposers finish cleanup", () => {
+  const double = createIpcMainDouble();
+  const registrar = createTrustedIpcRegistrar(double.ipcMain, devPolicy);
+  const listener = () => {};
+  const disposeFirst = registrar.on("event", listener);
+  const firstWrapped = double.listeners.get("event")[0];
+  const disposeSecond = registrar.on("event", listener);
+  const secondWrapped = double.listeners.get("event")[1];
+
+  registrar.removeListener("event", listener);
+  assert.deepEqual(double.removed, [["event", secondWrapped]]);
+  assert.deepEqual(double.listeners.get("event"), [firstWrapped]);
+  disposeSecond();
+  disposeFirst();
+  disposeFirst();
+  assert.equal(double.listeners.get("event").length, 0);
+  assert.deepEqual(double.removed, [["event", secondWrapped], ["event", firstWrapped]]);
+});

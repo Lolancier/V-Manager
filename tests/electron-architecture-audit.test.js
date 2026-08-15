@@ -44,10 +44,46 @@ test("architecture audit rejects an unconfigured tenth BrowserWindow", () => {
   assert.match(result.critical.join("\n"), /1 个 BrowserWindow 无法确认/);
 });
 
+test("architecture audit ignores top-level preload when webPreferences uses another path", () => {
+  const result = audit(`${baseMain}\nnew BrowserWindow({ preload: PRELOAD_PATH, webPreferences: { preload: otherPreload } });`);
+  assert.match(result.critical.join("\n"), /1 个 BrowserWindow 无法确认/);
+});
+
+test("architecture audit ignores metadata preload decoys", () => {
+  const result = audit(`${baseMain}\nnew BrowserWindow({ metadata: { preload: PRELOAD_PATH }, webPreferences: { preload: otherPreload } });`);
+  assert.match(result.critical.join("\n"), /1 个 BrowserWindow 无法确认/);
+});
+
+test("architecture audit only analyzes the first BrowserWindow argument", () => {
+  const result = audit(`${baseMain}\nnew BrowserWindow(options, { preload: PRELOAD_PATH });`);
+  assert.match(result.critical.join("\n"), /1 个 BrowserWindow 无法确认/);
+});
+
+test("architecture audit does not count BrowserWindow text in top-level comments or strings", () => {
+  const result = audit(`${baseMain}\n// new BrowserWindow({ webPreferences: { preload: otherPreload } });\nconst example = "new BrowserWindow(options)";`);
+  assert.equal(result.metrics.browserWindowConstructors, 9);
+  assert.deepEqual(result.critical, []);
+});
+
 test("architecture audit rejects explicit canonical preload exclusions", () => {
   const packageJson = {
     ...basePackage,
     build: { files: ["dist/**/*", "electron/**/*", "!electron/preload.cjs"] }
+  };
+  const result = audit(baseMain, packageJson);
+  assert.equal(result.metrics.canonicalPreloadExplicitlyExcluded, true);
+  assert.match(result.critical.join("\n"), /显式排除了 electron\/preload\.cjs/);
+});
+
+test("architecture audit applies FileSet from/to/filter context", () => {
+  const packageJson = {
+    ...basePackage,
+    build: {
+      files: [
+        "dist/**/*",
+        { from: "electron", to: "electron", filter: ["**/*", "!preload.cjs"] }
+      ]
+    }
   };
   const result = audit(baseMain, packageJson);
   assert.equal(result.metrics.canonicalPreloadExplicitlyExcluded, true);

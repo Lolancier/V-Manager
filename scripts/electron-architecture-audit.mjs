@@ -43,6 +43,70 @@ function findClosingParenthesis(source, openingIndex) {
   return -1;
 }
 
+function findClosingBrace(source, openingIndex) {
+  let depth = 0;
+  for (let index = openingIndex; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function splitTopLevel(source) {
+  const parts = [];
+  let start = 0;
+  let braces = 0;
+  let brackets = 0;
+  let parentheses = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") braces += 1;
+    else if (char === "}") braces -= 1;
+    else if (char === "[") brackets += 1;
+    else if (char === "]") brackets -= 1;
+    else if (char === "(") parentheses += 1;
+    else if (char === ")") parentheses -= 1;
+    else if (char === "," && braces === 0 && brackets === 0 && parentheses === 0) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function readObjectLiteral(source) {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith("{")) return null;
+  const closingIndex = findClosingBrace(trimmed, 0);
+  if (closingIndex < 0 || trimmed.slice(closingIndex + 1).trim()) return null;
+  return trimmed.slice(1, closingIndex);
+}
+
+function getTopLevelProperty(objectBody, property) {
+  const matches = splitTopLevel(objectBody).flatMap((part) => {
+    const match = part.match(new RegExp(`^\\s*${property}\\s*:`));
+    return match ? [part.slice(match[0].length)] : [];
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function hasDynamicObjectProperties(objectBody) {
+  return splitTopLevel(objectBody).some((part) => /^\s*(?:\.\.\.|\[)/.test(part));
+}
+
+function usesCanonicalPreload(argumentsText) {
+  const firstArgument = splitTopLevel(argumentsText)[0] || "";
+  const optionsBody = readObjectLiteral(firstArgument);
+  if (optionsBody === null || hasDynamicObjectProperties(optionsBody)) return false;
+  const webPreferencesValue = getTopLevelProperty(optionsBody, "webPreferences");
+  if (webPreferencesValue === null) return false;
+  const webPreferencesBody = readObjectLiteral(webPreferencesValue);
+  if (webPreferencesBody === null || hasDynamicObjectProperties(webPreferencesBody)) return false;
+  const preloadValue = getTopLevelProperty(webPreferencesBody, "preload");
+  return preloadValue !== null && /^\s*PRELOAD_PATH\s*$/.test(preloadValue);
+}
+
 export function extractBrowserWindowArguments(main) {
   const maskedMain = maskCommentsAndStrings(main);
   const results = [];
@@ -69,12 +133,44 @@ function globMatchesPath(pattern, target) {
   return new RegExp(`^${expression}$`).test(target);
 }
 
-function collectBuildFilePatterns(files) {
-  if (!Array.isArray(files)) return [];
-  return files.flatMap((entry) => {
-    if (typeof entry === "string") return [entry];
-    return entry && Array.isArray(entry.filter) ? entry.filter.filter((item) => typeof item === "string") : [];
-  }).map((pattern) => pattern.replaceAll("\\", "/"));
+function normalizeBuildPath(value) {
+  return value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "") || ".";
+}
+
+function relativeBuildPath(from, target) {
+  if (from === ".") return target;
+  return target.startsWith(`${from}/`) ? target.slice(from.length + 1) : null;
+}
+
+function analyzeBuildFiles(files) {
+  const result = { included: false, explicitlyExcluded: false, uncertainFileSet: false };
+  if (!Array.isArray(files)) return result;
+  for (const entry of files) {
+    if (typeof entry === "string") {
+      const pattern = entry.replaceAll("\\", "/");
+      if (pattern.startsWith("!")) result.explicitlyExcluded ||= globMatchesPath(pattern.slice(1), "electron/preload.cjs");
+      else result.included ||= globMatchesPath(pattern, "electron/preload.cjs");
+      continue;
+    }
+    if (!entry || typeof entry !== "object" || typeof entry.from !== "string" || typeof entry.to !== "string" || !Array.isArray(entry.filter) || !entry.filter.length || entry.filter.some((item) => typeof item !== "string")) {
+      result.uncertainFileSet = true;
+      continue;
+    }
+    const from = normalizeBuildPath(entry.from);
+    const to = normalizeBuildPath(entry.to);
+    const relative = relativeBuildPath(from, "electron/preload.cjs");
+    if (relative === null) continue;
+    const destination = to === "." ? relative : `${to}/${relative}`;
+    if (destination !== "electron/preload.cjs") continue;
+    const filters = entry.filter.map((pattern) => pattern.replaceAll("\\", "/"));
+    const positives = filters.filter((pattern) => !pattern.startsWith("!"));
+    const negatives = filters.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
+    const includedByFileSet = positives.some((pattern) => globMatchesPath(pattern, relative));
+    const excludedByFileSet = negatives.some((pattern) => globMatchesPath(pattern, relative));
+    result.explicitlyExcluded ||= excludedByFileSet;
+    result.included ||= includedByFileSet && !excludedByFileSet;
+  }
+  return result;
 }
 
 export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [] }) {
@@ -84,12 +180,8 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     .sort();
   const windowArguments = extractBrowserWindowArguments(main);
   const insecureWindows = windowArguments.filter((args) => /nodeIntegration:\s*true|contextIsolation:\s*false|webSecurity:\s*false/.test(args));
-  const canonicalWindows = windowArguments.filter((args) => /\bpreload\s*:\s*PRELOAD_PATH\b/.test(args));
-  const buildPatterns = collectBuildFilePatterns(packageJson.build?.files);
-  const positiveBuildPatterns = buildPatterns.filter((pattern) => !pattern.startsWith("!"));
-  const negativeBuildPatterns = buildPatterns.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
-  const canonicalPreloadIncluded = positiveBuildPatterns.some((pattern) => globMatchesPath(pattern, "electron/preload.cjs"));
-  const canonicalPreloadExcluded = negativeBuildPatterns.some((pattern) => globMatchesPath(pattern, "electron/preload.cjs"));
+  const canonicalWindows = windowArguments.filter(usesCanonicalPreload);
+  const buildFiles = analyzeBuildFiles(packageJson.build?.files);
   const metrics = {
     electronVersion: packageJson.devDependencies?.electron || packageJson.dependencies?.electron || "missing",
     mainLines: main.split(/\r?\n/).length,
@@ -100,8 +192,9 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     insecureWindowDefinitions: insecureWindows.length,
     preloadSources,
     browserWindowsUsingCanonicalPreload: canonicalWindows.length,
-    canonicalPreloadPackaged: packageJson.main === "electron/main.js" && canonicalPreloadIncluded && !canonicalPreloadExcluded,
-    canonicalPreloadExplicitlyExcluded: canonicalPreloadExcluded,
+    canonicalPreloadPackaged: packageJson.main === "electron/main.js" && buildFiles.included && !buildFiles.explicitlyExcluded && !buildFiles.uncertainFileSet,
+    canonicalPreloadExplicitlyExcluded: buildFiles.explicitlyExcluded,
+    canonicalPreloadFileSetUncertain: buildFiles.uncertainFileSet,
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
   const critical = [];
@@ -111,7 +204,7 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   if (preloadSources.length !== 1 || preloadSources[0] !== "electron/preload.cjs") critical.push(`preload 必须只有 electron/preload.cjs 一个源，当前为：${preloadSources.join(", ") || "无"}`);
   if (!/const PRELOAD_PATH = path\.join\(__dirname, ["']preload\.cjs["']\);/.test(main)) critical.push("主进程未声明 canonical PRELOAD_PATH");
   if (metrics.browserWindowsUsingCanonicalPreload !== metrics.browserWindowConstructors) critical.push(`${metrics.browserWindowConstructors - metrics.browserWindowsUsingCanonicalPreload} 个 BrowserWindow 无法确认使用 canonical PRELOAD_PATH`);
-  if (!metrics.canonicalPreloadPackaged) critical.push(metrics.canonicalPreloadExplicitlyExcluded ? "生产打包清单显式排除了 electron/preload.cjs" : "生产打包入口或文件清单未包含 canonical preload");
+  if (!metrics.canonicalPreloadPackaged) critical.push(metrics.canonicalPreloadExplicitlyExcluded ? "生产打包清单显式排除了 electron/preload.cjs" : metrics.canonicalPreloadFileSetUncertain ? "生产打包 FileSet 无法可靠确认包含 canonical preload" : "生产打包入口或文件清单未包含 canonical preload");
   if (metrics.mainLines > 1500) warnings.push(`electron/main.js 仍有 ${metrics.mainLines} 行，需要按领域继续拆分`);
   if (metrics.directMainIpcHandlers > 30) warnings.push(`主文件仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
   if (metrics.singleRendererEntrypoint) warnings.push("所有窗口共用单一 React 入口，尚未按窗口进行代码分割");
