@@ -7,6 +7,7 @@ import { initializeLocalDatabase } from "../src-agent/local-database.js";
 import {
   activatePersonaCard,
   archivePersonaCard,
+  applyPersonaCardToConfig,
   buildPersonaCardPrompt,
   createPersonaCard,
   ensureDefaultPersonaCard,
@@ -43,6 +44,17 @@ test("persona cards version, switch and archive without deleting history", async
   cards = await listPersonaCards(baseDir);
   assert.equal(cards.find((card) => card.id === original.id)?.status, "archived");
   assert.equal(cards.find((card) => card.id === created.id)?.version, 2);
+});
+
+test("persona voice pack selects exactly one provider and voice", () => {
+  const base = { personaName: "Vivi", appearance: {}, voice: { provider: "gpt_sovits", gptSovitsProfileId: "old", localPackId: "old", localSpeakerId: 0 } };
+  const local = applyPersonaCardToConfig(base, { id: "a", version: 1, name: "A", payload: { identityName: "A", voicePackId: "sherpa-zh:2" } });
+  assert.equal(local.voice.provider, "local");
+  assert.equal(local.voice.localPackId, "sherpa-zh");
+  assert.equal(local.voice.localSpeakerId, 2);
+  const sovits = applyPersonaCardToConfig(base, { id: "b", version: 1, name: "B", payload: { identityName: "B", voicePackId: "gpt-sovits:shorekeeper" } });
+  assert.equal(sovits.voice.provider, "gpt_sovits");
+  assert.equal(sovits.voice.gptSovitsProfileId, "shorekeeper");
 });
 
 test("explicit chat commands can update the active persona while vague requests cannot", async (t) => {

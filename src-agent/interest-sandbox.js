@@ -365,7 +365,8 @@ export async function getInterestSandboxSnapshot(baseDir, now = new Date(), conf
   const paths = await ensureSandbox(baseDir);
   const activities = await readActivities(paths);
   const today = dayKey(now);
-  const todayActivities = activities.filter((item) => item.day === today);
+  const personaCardId = String(config?.personaCardId || "");
+  const todayActivities = activities.filter((item) => item.day === today && (!personaCardId || item.personaCardId === personaCardId));
   const sizes = { diary: 0, drawing: 0, mini_game: 0, life: 0 };
   const seenArtifacts = new Set();
   for (const activity of activities) {
@@ -421,6 +422,17 @@ export async function cleanupInterestSandbox(baseDir, mode = "failed_logs") {
     }
     await ensureSandbox(baseDir);
     return { mode, removedLogs: activities.length, removedFiles: -1, reclaimedBytes: Math.max(0, before - await directorySize(paths.root)) };
+  }
+  if (mode === "game_content") {
+    const before = await directorySize(paths.gamesDir);
+    const gameTypes = new Set(["mini_game", "play_existing_game", "improve_existing_game"]);
+    const retained = activities.filter((item) => !gameTypes.has(item.type)).reverse();
+    const relative = path.relative(paths.root, paths.gamesDir);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("游戏清理目标未通过沙盒边界检查。");
+    await fs.rm(paths.gamesDir, { recursive: true, force: true });
+    await fs.mkdir(paths.gamesDir, { recursive: true });
+    await writeActivities(paths, retained);
+    return { mode, removedLogs: activities.length - retained.length, removedFiles: -1, reclaimedBytes: before };
   }
   throw new Error("不支持的兴趣空间清理方式。");
 }
@@ -655,10 +667,11 @@ async function generateWithModel(type, context, agentConfig, timeoutMinutes, fet
     mini_game: '{"title":"标题","description":"玩法","html":"body 内 HTML","css":"样式","js":"离线原生 JavaScript，禁止网络、存储、eval 和导航"}'
   };
   const prompt = [
-    `你是 ${agentConfig.personaName || "Vivi"}，在完全隔离的个人兴趣沙盒里进行一次 ${type} 创作。`,
+    agentConfig.personaPrompt || `你是 ${agentConfig.personaName || "Vivi"}。`,
+    `请严格保持当前人物卡的身份、审美、措辞和兴趣取向，在完全隔离的个人兴趣沙盒里进行一次 ${type} 创作。`,
     "你可以有拟人化的主观心情与感受，但不得杜撰今天没有发生的具体事件；不确定的内容要表达为联想或想象。",
     "只返回一个 JSON 对象，不要 Markdown 代码围栏。所有作品必须离线、无外链、无追踪、无系统操作。",
-    type === "mini_game" ? '优先生成文字冒险、选项剧情、答题、按键节奏或简单计分类游戏；所有关键状态和操作必须能通过文字、按钮或公开状态读取，不得依赖图像识别、拖拽精度或隐藏画面信息。小游戏的 html 只写 body 内元素；正常的 function 声明、事件监听和动画循环可以使用，但禁止 eval、Function 构造器、网络、存储与页面跳转。必须暴露 window.__VIVI_GAME__，其中 getState() 返回 {status, score, highestScore, message, recommendedActions}；recommendedActions 只能使用 Enter、Space、ArrowLeft、ArrowRight、ArrowUp、ArrowDown。' : "",
+    type === "mini_game" ? '优先生成低操作难度的文字冒险、选项剧情或答题游戏；所有关键状态和操作必须能通过文字、按钮或公开状态读取，不得依赖图像识别、拖拽精度、快速反应或隐藏画面信息。小游戏的 html 只写 body 内元素；正常的 function 声明、事件监听和动画循环可以使用，但禁止 eval、Function 构造器、网络、存储与页面跳转。必须暴露 window.__VIVI_GAME__，其中 getState() 返回 {status, score, highestScore, message, recommendedActions}；recommendedActions 可使用 Enter、Space、方向键，或当前可点击按钮的完整文字。试玩代理必须能仅靠这些公开信息取得有效进展和非零分数。' : "",
     type === "diary" && context.todayDrawings?.length ? "今天已经画过画，请在日记正文中自然提到画画这件事；应用会在文末自动附上画作链接。" : "",
     `格式严格为：${schemas[type]}`,
     `今天可用的只读上下文：${JSON.stringify(context).slice(0, 14000)}`
@@ -745,7 +758,7 @@ async function generateAutonomousLifeNote(type, context, agentConfig, fetchImpl,
 
 export async function runAutonomousLifeActivity(baseDir, agentConfig, type, options = {}) {
   const now = options.now ?? new Date();
-  const settings = normalizeInterestConfig(agentConfig.interests);
+  const settings = normalizeInterestConfig({ ...agentConfig.interests, personaCardId: options.persona?.cardId || "" });
   const snapshot = await getInterestSandboxSnapshot(baseDir, now, settings);
   const decision = selectInterestActivity(settings, snapshot, now, { manualType: options.manual ? type : undefined });
   if (!decision.allowed || decision.type !== type || !AUTONOMOUS_ACTIVITY_TYPES.has(type)) throw new Error(decision.reason || "当前不允许执行这项自主生活活动。");
@@ -878,7 +891,7 @@ async function saveCreation(paths, type, data, now, relatedDrawings = []) {
 
 export async function runInterestActivity(baseDir, agentConfig, type, options = {}) {
   const now = options.now ?? new Date();
-  const settings = normalizeInterestConfig(agentConfig.interests);
+  const settings = normalizeInterestConfig({ ...agentConfig.interests, personaCardId: options.persona?.cardId || "" });
   const snapshot = await getInterestSandboxSnapshot(baseDir, now, settings);
   const decision = selectInterestActivity(settings, snapshot, now, {
     manualType: options.manual ? type : undefined,

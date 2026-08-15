@@ -37,6 +37,17 @@ function chooseKey(state, index) {
   return ["Enter", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"][index % 6];
 }
 
+function chooseButton(state, index) {
+  const buttons = Array.isArray(state?.buttons) ? state.buttons : [];
+  if (!buttons.length) return null;
+  const recommended = Array.isArray(state?.recommendedActions) ? state.recommendedActions.map(String) : [];
+  const exact = buttons.find((button) => recommended.some((action) => action.trim() === String(button.text || "").trim()));
+  if (exact) return exact;
+  const useful = buttons.filter((button) => !/(?:规则|说明|帮助|重新开始|重置|退出|关闭)/.test(String(button.text || "")));
+  const candidates = useful.length ? useful : buttons;
+  return candidates[index % candidates.length];
+}
+
 async function withTimeout(promise, milliseconds, message, signal) {
   let timer;
   let abortHandler;
@@ -95,7 +106,11 @@ export async function runGamePlaytest(options = {}) {
       outcome = inferOutcome(lastState);
       if (outcome === "won" || outcome === "lost") break;
 
-      if (lastState?.canvas && actions % 4 === 3) {
+      const button = chooseButton(lastState, actions);
+      if (button) {
+        if (actions % 3 === 0) progress("playing", `正在选择“${button.text || "选项"}”`, { message: String(lastState?.message || "").slice(0, 160) });
+        await withTimeout(driver.click(button.x, button.y), 2_000, "游戏选项点击超时。", options.signal);
+      } else if (lastState?.canvas && actions % 4 === 3) {
         const column = (actions % 3 + 1) / 4;
         if (actions % 4 === 3) progress("playing", `正在试玩 · 第 ${actions + 1}/${limits.maxActions} 次操作`, { message: String(lastState?.message || "").slice(0, 160) });
         await withTimeout(driver.click(lastState.canvas.x + lastState.canvas.width * column, lastState.canvas.y + lastState.canvas.height * 0.55), 2_000, "游戏点击操作超时。", options.signal);

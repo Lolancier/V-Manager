@@ -67,6 +67,25 @@ test("fatal renderer errors mark a playtest as failed", async () => {
   assert.equal(result.outcome, "failed");
 });
 
+test("text games advance by clicking visible answer buttons", async () => {
+  let score = 0;
+  let clicks = 0;
+  const result = await runGamePlaytest({
+    artifactPath: "C:/sandbox/text-game/index.html", maxSeconds: 5, maxActions: 8,
+    createDriver: async () => ({
+      load: async () => {},
+      readState: async () => score >= 2
+        ? { bodyText: "通关 得分 20", status: "won", score: 20, buttons: [] }
+        : { bodyText: `第 ${score + 1} 题 分数 ${score * 10}`, score: score * 10, recommendedActions: ["选择 A"], buttons: [{ text: "选择 A", x: 30, y: 40 }, { text: "选择 B", x: 80, y: 40 }] },
+      key: async () => {}, click: async () => { clicks += 1; score += 1; }, wait: async () => {},
+      screenshot: async () => "", errors: () => [], close: async () => {}
+    })
+  });
+  assert.equal(result.outcome, "won");
+  assert.equal(result.highestScore, 20);
+  assert.ok(clicks >= 2);
+});
+
 test("a stop request cancels a blocked playtest promptly and keeps a timeline", async () => {
   const controller = new AbortController();
   const stages = [];

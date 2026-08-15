@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { estimateTokens, truncateToTokenBudget } from "./token-budget.js";
 
 const VERSION = 1;
 const CATEGORIES = ["facts", "episodes", "habits", "commitments"];
@@ -58,17 +59,56 @@ function addUnique(store, category, content, now) {
 export function extractMemoryCandidates(message) {
   const text = clean(message);
   const result = [];
+  const push = (category, content) => {
+    const value = clean(content)
+      .replace(/^(?:把|将|请|麻烦|帮我|你要|你得|你可以)\s*/u, "")
+      .replace(/(?:记住|记下来|记录下来|写入|写进|存进|加入)(?:到|进)?(?:长期)?记忆(?:里|中)?$/u, "")
+      .trim();
+    if (value.length >= 2 && !result.some((item) => item.category === category && item.content === value)) {
+      result.push({ category, content: value });
+    }
+  };
   const patterns = [
     ["facts", /(?:我叫|我的名字是|我是)([^，。！？]{2,40})/],
-    ["habits", /(?:我习惯|我通常|我一般|我每天|我经常)([^，。！？]{2,80})/],
+    ["habits", /(?:我习惯|我通常|我一般|我每天|我经常|我喜欢|我偏好|我不喜欢)([^，。！？]{2,80})/],
     ["commitments", /(?:我要|我会|我得|我打算|我准备|我答应)([^，。！？]{2,100})/],
     ["episodes", /(?:今天|昨天|刚才|最近)([^，。！？]{2,120})/]
   ];
   for (const [category, regex] of patterns) {
+    if (category === "commitments" && /(?:提醒我|叫我|通知我)/.test(text)) continue;
     const match = text.match(regex);
-    if (match?.[1]) result.push({ category, content: match[1].trim() });
+    if (match?.[1]) push(category, match[1]);
+  }
+  const explicitHabit = text.match(/(?:把|将)?\s*(.{2,100}?)\s*(?:记到|写进|存进|加入)(?:我的)?(?:长期记忆里的)?(?:习惯|偏好|梗点)(?:里|中)?/u);
+  if (explicitHabit?.[1]) push("habits", explicitHabit[1]);
+  const explicitMemory = text.match(/(?:请|麻烦|你要|你得|帮我)?\s*(?:记住|记下来|记录下来|写入长期记忆)\s*[：:，,]?\s*(.{2,120})/u);
+  if (explicitMemory?.[1]) {
+    const content = explicitMemory[1].replace(/(?:可以吗|好吗|行吗|别忘了)$/u, "").trim();
+    push(/(?:习惯|偏好|喜欢|不喜欢|口味|梗|口癖)/.test(content) ? "habits" : "facts", content);
   }
   return result;
+}
+
+function overlapScore(left, right) {
+  const a = clean(left).replace(/\s+/g, "");
+  const b = clean(right).replace(/\s+/g, "");
+  if (!a || !b) return 0;
+  if (a.includes(b) || b.includes(a)) return 1;
+  const parts = new Set(Array.from({ length: Math.max(0, a.length - 1) }, (_, index) => a.slice(index, index + 2)));
+  if (!parts.size) return 0;
+  return [...parts].filter((part) => b.includes(part)).length / parts.size;
+}
+
+export async function resolveCommitmentsByText(baseDir, text, now = new Date()) {
+  const store = await loadCompanionMemory(baseDir);
+  const matches = store.commitments.filter((item) => item.status === "open" && overlapScore(item.content, text) >= 0.3);
+  for (const item of matches) {
+    item.status = "resolved";
+    item.resolvedAt = now.toISOString();
+    item.resolution = "related_reminder_completed";
+  }
+  if (matches.length) await save(baseDir, store);
+  return { store, resolved: matches };
 }
 
 export async function recordConversationMemory(baseDir, message, now = new Date()) {
@@ -122,9 +162,63 @@ export async function markCommitmentFollowedUp(baseDir, id, now = new Date()) {
   return item;
 }
 
-export function buildCompanionMemoryPrompt(store) {
-  const sections = [
-    ["事实", store.facts], ["近期经历", store.episodes], ["习惯", store.habits], ["未完成承诺", store.commitments.filter((item) => item.status === "open")]
-  ].map(([label, items]) => `${label}：${items.slice(-5).map((item) => item.content).join("；") || "暂无"}`);
-  return `本地陪伴记忆（只在相关时自然使用，不要逐条复述）：\n${sections.join("\n")}\n打扰倾向分数：${Number(store.feedback.interruptionScore || 0).toFixed(2)}。表达应结合时间、关系和近期经历，避免固定台词与连续重复。`;
+function relevanceScore(item, query, category) {
+  const content = clean(item.content).toLocaleLowerCase();
+  const normalizedQuery = clean(query).toLocaleLowerCase();
+  let score = Math.min(4, Number(item.mentions || 1) * 0.35);
+  if (category === "commitments") score += 8;
+  if (category === "facts" || category === "habits") score += 1.5;
+  if (normalizedQuery && (content.includes(normalizedQuery) || normalizedQuery.includes(content))) score += 10;
+  const queryParts = new Set([
+    ...normalizedQuery.split(/[\s，。！？、,:：；;]+/).filter((part) => part.length >= 2),
+    ...Array.from({ length: Math.max(0, normalizedQuery.length - 1) }, (_, index) => normalizedQuery.slice(index, index + 2))
+  ]);
+  for (const part of queryParts) if (content.includes(part)) score += part.length >= 3 ? 2 : 0.7;
+  const ageDays = Math.max(0, (Date.now() - Date.parse(item.lastSeenAt || item.createdAt || 0)) / 86400000);
+  score += Math.max(0, 2 - ageDays / 30);
+  return score;
+}
+
+export function selectCompanionMemories(store, query = "", options = {}) {
+  const budget = Math.max(160, Math.min(4000, Number(options.tokenBudget) || 1000));
+  const sources = [
+    ["commitments", store.commitments.filter((item) => item.status === "open")],
+    ["facts", store.facts], ["habits", store.habits], ["episodes", store.episodes]
+  ];
+  const candidates = sources.flatMap(([category, items]) => items.map((item) => ({ ...item, category, score: relevanceScore(item, query, category) })));
+  const pinned = candidates
+    .filter((item) => item.category === "commitments")
+    .sort((a, b) => Date.parse(b.lastSeenAt || b.createdAt || 0) - Date.parse(a.lastSeenAt || a.createdAt || 0))
+    .slice(0, 6);
+  const core = candidates
+    .filter((item) => ["facts", "habits"].includes(item.category))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4);
+  const ranked = [...pinned, ...core, ...candidates.sort((a, b) => b.score - a.score)];
+  const selected = [];
+  const seen = new Set();
+  let used = 40;
+  for (const item of ranked) {
+    if (seen.has(item.id) || used >= budget) continue;
+    const available = budget - used - 8;
+    if (available < 16) break;
+    const content = truncateToTokenBudget(item.content, available);
+    selected.push({ ...item, content });
+    seen.add(item.id);
+    used += 8 + estimateTokens(content);
+  }
+  return { items: selected, estimatedTokens: used, budget };
+}
+
+export function buildCompanionMemoryPrompt(store, query = "", options = {}) {
+  const selection = selectCompanionMemories(store, query, options);
+  const labels = { facts: "事实", episodes: "近期经历", habits: "习惯/偏好", commitments: "未完成承诺" };
+  const sections = Object.entries(labels).map(([category, label]) => {
+    const items = selection.items.filter((item) => item.category === category);
+    return `${label}：${items.map((item) => item.content).join("；") || "本轮无相关内容"}`;
+  });
+  return {
+    prompt: `本地陪伴记忆（仅在相关时自然使用，不要逐条复述）：\n${sections.join("\n")}\n打扰倾向分数：${Number(store.feedback.interruptionScore || 0).toFixed(2)}。避免固定台词与连续重复。`,
+    selection
+  };
 }

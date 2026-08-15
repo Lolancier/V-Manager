@@ -20,6 +20,7 @@ interface AgentConfig {
   appName: string;
   personaName: string;
   personaPrompt: string;
+  activePersonaCard?: { id: string; version: number; name: string } | null;
   deepseek: {
     apiKey: string;
     baseUrl: string;
@@ -132,6 +133,10 @@ interface AgentConfig {
   memory: {
     maxMessages: number;
     knowledgeTopK: number;
+    maxInputTokens: number;
+    historyTokenBudget: number;
+    companionTokenBudget: number;
+    knowledgeTokenBudget: number;
   };
 }
 
@@ -331,6 +336,8 @@ interface ChatResult {
     relationship?: RelationshipProfile;
     codeMode?: CodeAgentMode;
     toolUseCount?: number;
+    usage?: { promptTokens: number; completionTokens: number; totalTokens: number; cacheHitTokens: number; cacheMissTokens: number; cacheHitRate: number } | null;
+    inputBudget?: { maxInputTokens: number; estimatedInputTokens: number; historyTokens: number; companionTokens: number; knowledgeTokens: number; toolTokens: number; selectedMemoryCount: number };
   };
 }
 
@@ -636,7 +643,7 @@ interface Window {
     getCompanionMemory: () => Promise<CompanionMemoryStore>;
     getInterestSandbox: () => Promise<InterestSandboxSnapshot>;
     getInterestState: () => Promise<InterestRuntimeState>;
-    cleanupInterestSandbox: (mode: "failed_logs" | "all_content") => Promise<{ result: { removedLogs: number; removedFiles: number; reclaimedBytes: number }; snapshot: InterestSandboxSnapshot }>;
+    cleanupInterestSandbox: (mode: "failed_logs" | "game_content" | "all_content") => Promise<{ result: { removedLogs: number; removedFiles: number; reclaimedBytes: number }; snapshot: InterestSandboxSnapshot }>;
     updateInterestLocation: (location: { latitude: number; longitude: number; accuracy: number }) => Promise<InterestSandboxSnapshot>;
     runInterestActivity: (type: InterestActivityType) => Promise<{ activity: InterestSandboxActivity; snapshot: InterestSandboxSnapshot; playtest?: InterestGamePlaytest }>;
     playInterestGame: (activityId: string) => Promise<{ activity: InterestSandboxActivity; playtest: InterestGamePlaytest; snapshot: InterestSandboxSnapshot }>;

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import electron from "electron";
+import { getDesktopShell } from "../platform/desktop-shell.js";
 import {
   extractQuotedPath,
   normalizeText,
@@ -11,8 +11,6 @@ import {
   stripWrappingQuotes
 } from "../shared/utils.js";
 
-const { shell } = electron;
-
 // ---- File operations ----
 
 async function openLocalTarget(targetPath) {
@@ -21,7 +19,7 @@ async function openLocalTarget(targetPath) {
     throw new Error(`没有找到 ${targetPath}`);
   }
 
-  const result = await shell.openPath(targetPath);
+  const result = await getDesktopShell().openPath(targetPath);
   if (result) {
     throw new Error(result);
   }
@@ -121,7 +119,7 @@ async function deleteLocalTarget(targetPath) {
   if (!await statPath(targetPath)) {
     throw new Error(`没有找到 ${targetPath}`);
   }
-  await shell.trashItem(targetPath);
+  await getDesktopShell().trashItem(targetPath);
   return targetPath;
 }
 

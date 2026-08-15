@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import electron from "electron";
+import { getDesktopShell } from "../platform/desktop-shell.js";
 import { loadAppRegistry, findAppRegistryEntry, getBuiltinAppLaunchMap } from "../app-registry.js";
 import { closeRunningProcesses, findRunningProcesses } from "./system-executor.js";
 import {
@@ -20,7 +20,6 @@ import {
 } from "../shared/utils.js";
 
 const execFileAsync = promisify(execFile);
-const { shell } = electron;
 
 // ---- Preset map ----
 
@@ -250,7 +249,7 @@ async function launchAppByTarget(baseDir, target) {
         launcherPid: launchInfo.launcherPid
       };
     } else {
-      const openResult = await shell.openPath(directPath);
+      const openResult = await getDesktopShell().openPath(directPath);
       if (openResult) {
         throw new Error(openResult);
       }
@@ -278,7 +277,7 @@ async function launchAppByTarget(baseDir, target) {
 
     const shortcutPath = await findShortcutForApp(target);
     if (shortcutPath) {
-      const openResult = await shell.openPath(shortcutPath);
+      const openResult = await getDesktopShell().openPath(shortcutPath);
       if (openResult) {
         throw new Error(openResult);
       }
@@ -335,7 +334,7 @@ async function launchAppByTarget(baseDir, target) {
           launcherPid: launchInfo.launcherPid
         };
       } else {
-        const openResult = await shell.openPath(command);
+        const openResult = await getDesktopShell().openPath(command);
         if (openResult) {
           throw new Error(openResult);
         }
@@ -365,7 +364,7 @@ async function launchAppByTarget(baseDir, target) {
 
   const shortcutPath = await findShortcutForApp(target);
   if (shortcutPath) {
-    const openResult = await shell.openPath(shortcutPath);
+    const openResult = await getDesktopShell().openPath(shortcutPath);
     if (!openResult) {
       return {
         label: path.basename(shortcutPath, ".lnk") || preset.label,

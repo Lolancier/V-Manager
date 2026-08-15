@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildRecentHistoryMessages, filterHistoryForPersona } from "../src-agent/core.js";
+import { estimateMessageTokens } from "../src-agent/token-budget.js";
 
 const toolCall = (id) => ({ id, type: "function", function: { name: "list_schedules", arguments: "{}" } });
 
@@ -70,4 +71,17 @@ test("persona history keeps continuity without leaking replies from another card
     filterHistoryForPersona(history, { id: "mashiro", version: 1 }),
     history.slice(1)
   );
+});
+
+test("history uses a token budget while preserving the newest conversational turn", () => {
+  const history = Array.from({ length: 12 }, (_, index) => ({
+    user: `问题 ${index} ${"内容".repeat(80)}`,
+    assistant: `回答 ${index} ${"说明".repeat(80)}`
+  }));
+  const messages = buildRecentHistoryMessages(history, 100, false, 420);
+  const tokens = messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+  assert.ok(tokens <= 430);
+  assert.match(messages.at(-2).content, /问题 11/);
+  assert.match(messages.at(-1).content, /回答 11/);
+  assert.ok(messages.length < history.length * 2);
 });
