@@ -227,7 +227,7 @@ function getPaths(baseDir) {
 
 // ---- Data bootstrap / config IO ----
 
-export async function ensureDataFiles(baseDir) {
+export async function ensureDataFiles(baseDir, { ensureRag = true } = {}) {
   const { dataDir, configPath, memoryPath, knowledgeDir } = getPaths(baseDir);
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(path.dirname(memoryPath), { recursive: true });
@@ -370,7 +370,7 @@ export async function ensureDataFiles(baseDir) {
   }
 
   await ensureAppRegistry(baseDir);
-  await ensureRagFiles(baseDir);
+  if (ensureRag) await ensureRagFiles(baseDir);
   await loadRelationshipProfile(baseDir);
   await initializeLocalDatabase(baseDir);
   await ensureDefaultPersonaCard(baseDir, await loadConfig(baseDir));
@@ -1225,6 +1225,7 @@ export async function buildAgentReply(baseDir, payload) {
     history: personaHistory,
     config,
     workspaceDir: activeWorkspaceDir,
+    ragClient: payload.ragClient,
     codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message),
     currentUserMessage: payload.message
   };

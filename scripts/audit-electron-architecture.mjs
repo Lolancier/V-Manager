@@ -15,11 +15,15 @@ async function listFiles(directory) {
   return result;
 }
 
-const [main, electronFiles, packageJson, indexHtml] = await Promise.all([
+const [main, electronFiles, packageJson, indexHtml, memoryService, core, appExecutor, toolExecutor] = await Promise.all([
   read("electron/main.js"),
   listFiles("electron"),
   read("package.json").then(JSON.parse),
-  read("index.html")
+  read("index.html"),
+  read("electron/services/memory-service.js"),
+  read("src-agent/core.js"),
+  read("src-agent/executors/app-executor.js"),
+  read("src-agent/tool-executor.js")
 ]);
 const agentFiles = (await listFiles("src-agent")).filter((file) => /\.(?:c?js|mjs)$/.test(file));
 const directElectronImports = [];
@@ -28,6 +32,13 @@ for (const file of agentFiles) {
   if (/from\s+["']electron["']|require\(["']electron["']\)/.test(content)) directElectronImports.push(file);
 }
 
-const result = analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports });
+const result = analyzeElectronArchitecture({
+  main,
+  electronFiles,
+  packageJson,
+  indexHtml,
+  directElectronImports,
+  ragSources: { memoryService, core, appExecutor, toolExecutor }
+});
 console.log(JSON.stringify(result, null, 2));
 if (result.critical.length) process.exitCode = 1;

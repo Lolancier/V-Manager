@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, utilityProcess } from "electron";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -8,7 +8,6 @@ import {
   clearConversationHistory,
   defaultConfig,
   ensureDataFiles,
-  ensureRagIndexFresh,
   getAppRegistrySnapshot,
   getActiveWorkspaceDir,
   getConfigPath,
@@ -18,7 +17,6 @@ import {
   listKnowledgeFiles,
   loadConfig,
   rebuildAppRegistry,
-  rebuildKnowledgeIndex,
   saveConfig,
   setActiveWorkspaceDir,
   searchLocalFiles,
@@ -107,11 +105,21 @@ import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
 import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
 import { registerSpeechServiceIpc } from "./services/speech-service.js";
+import { createRagTaskClient } from "./services/rag-task-client.js";
+import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PRELOAD_PATH = path.join(__dirname, "preload.cjs");
+const UTILITY_ENTRY_PATH = resolveUtilityEntryPoint(__dirname);
+const utilityTaskSupervisor = createUtilityTaskSupervisor({
+  entryPoint: UTILITY_ENTRY_PATH,
+  fork: (entryPoint, args, options) => utilityProcess.fork(entryPoint, args, options),
+  serviceName: "Vivi RAG Index",
+  timeoutMs: 10 * 60 * 1000
+});
+const ragTaskClient = createRagTaskClient({ supervisor: utilityTaskSupervisor });
 
 configureDesktopShell({
   openExternal: (...args) => shell.openExternal(...args),
@@ -2187,7 +2195,7 @@ function buildPetContextMenu() {
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
-  await ensureDataFiles(app.getPath("userData"));
+  await ensureDataFiles(app.getPath("userData"), { ensureRag: false });
   session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
     if (permission === "geolocation") {
       return currentAgentConfig.interests?.enabled === true
@@ -2291,7 +2299,7 @@ app.whenReady().then(async () => {
   startLive2DModelWatcher();
   publishStartupStatus({ phase: "data", progress: 72, title: "正在整理本地状态", detail: "恢复工作区、日程与陪伴记忆…" });
   try {
-    startupDiagnostics.rag = await ensureRagIndexFresh(app.getPath("userData"));
+    startupDiagnostics.rag = await ragTaskClient.ensure(app.getPath("userData"));
   } catch (error) {
     startupDiagnostics.rag = { error: String(error?.message || error) };
   }
@@ -2457,7 +2465,7 @@ registerMemoryServiceIpc({
   getMemoryDatabaseStats,
   reconcileCompletedReminderCommitments,
   getRagStatus,
-  rebuildKnowledgeIndex,
+  ragClient: ragTaskClient,
   testEmbeddingConnection,
   clearConversationHistory,
   clearCompanionMemory,
@@ -2557,6 +2565,7 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   try {
     result = await buildAgentReply(app.getPath("userData"), {
       ...payload,
+      ragClient: ragTaskClient,
       stream: true,
       onDelta: (partialReply) => {
         const nextMessages = [...chatState.messages];
@@ -2684,6 +2693,7 @@ app.on("before-quit", (event) => {
     stopGlobalCursorTracking();
     modelDirectoryWatcher?.close();
     modelDirectoryWatcher = null;
+    utilityTaskSupervisor.close();
     speechService.dispose();
     tray?.destroy();
     tray = null;

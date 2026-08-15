@@ -267,7 +267,9 @@ export async function executeTool(name, args = {}, context = {}) {
         return { ok: true, files: snapshot.status.indexedFileCount, chunks: snapshot.status.indexedChunkCount, updatedAt: snapshot.status.updatedAt };
       }
       case "rebuild_rag_index": {
-        const index = await rebuildRagIndex(baseDir);
+        const index = context.ragClient
+          ? await context.ragClient.rebuild(baseDir)
+          : await rebuildRagIndex(baseDir);
         return { ok: true, files: index.files.length, chunks: index.chunks.length };
       }
 

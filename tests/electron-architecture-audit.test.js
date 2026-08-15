@@ -4,19 +4,35 @@ import { analyzeElectronArchitecture } from "../scripts/electron-architecture-au
 
 const canonicalDeclaration = 'const PRELOAD_PATH = path.join(__dirname, "preload.cjs");';
 const canonicalWindow = "new BrowserWindow({ webPreferences: { preload: PRELOAD_PATH, contextIsolation: true } });";
-const baseMain = `${canonicalDeclaration}\n${Array.from({ length: 9 }, () => canonicalWindow).join("\n")}`;
+const utilityConfiguration = `
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const UTILITY_ENTRY_PATH = resolveUtilityEntryPoint(__dirname);
+const utilityTaskSupervisor = createUtilityTaskSupervisor({ fork: () => utilityProcess.fork(UTILITY_ENTRY_PATH) });
+const ragTaskClient = createRagTaskClient({ supervisor: utilityTaskSupervisor });
+await ensureDataFiles(baseDir, { ensureRag: false });
+void ragTaskClient.ensure(baseDir);
+registerMemoryServiceIpc({ ragClient: ragTaskClient });`;
+const baseMain = `${canonicalDeclaration}\n${utilityConfiguration}\n${Array.from({ length: 9 }, () => canonicalWindow).join("\n")}`;
 const basePackage = {
   main: "electron/main.js",
   devDependencies: { electron: "^32.3.0" },
   build: { files: ["dist/**/*", "electron/**/*"] }
 };
 
-function audit(main = baseMain, packageJson = basePackage) {
+const baseRagSources = {
+  memoryService: "options.ragClient.rebuild(baseDir())",
+  core: "ragClient: payload.ragClient",
+  appExecutor: "context.ragClient ? context.ragClient.rebuild(baseDir) : fallback()",
+  toolExecutor: "context.ragClient ? context.ragClient.rebuild(baseDir) : fallback()"
+};
+
+function audit(main = baseMain, packageJson = basePackage, ragSources = baseRagSources) {
   return analyzeElectronArchitecture({
     main,
-    electronFiles: ["electron/main.js", "electron/preload.cjs"],
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js"],
     packageJson,
-    indexHtml: '<script type="module" src="/src/main.tsx"></script>'
+    indexHtml: '<script type="module" src="/src/main.tsx"></script>',
+    ragSources
   });
 }
 
@@ -88,4 +104,33 @@ test("architecture audit applies FileSet from/to/filter context", () => {
   const result = audit(baseMain, packageJson);
   assert.equal(result.metrics.canonicalPreloadExplicitlyExcluded, true);
   assert.match(result.critical.join("\n"), /显式排除了 electron\/preload\.cjs/);
+});
+
+test("architecture audit reports direct main-process RAG index writes", () => {
+  const result = audit(`${baseMain}\nawait rebuildKnowledgeIndex(baseDir);`);
+  assert.equal(result.metrics.directMainRagIndexWrites, 1);
+  assert.match(result.critical.join("\n"), /主进程仍直接执行 1 个 RAG 写索引调用/);
+});
+
+test("architecture audit requires all four Electron RAG write routes", () => {
+  const result = audit(baseMain, basePackage, { ...baseRagSources, toolExecutor: "fallback()" });
+  assert.equal(result.metrics.ragWriteRoutesMigrated, 3);
+  assert.match(result.critical.join("\n"), /仅迁移 3\/4/);
+});
+
+test("architecture audit rejects an excluded utility worker entry", () => {
+  const packageJson = {
+    ...basePackage,
+    build: { files: ["dist/**/*", "electron/**/*", "!electron/workers/utility-entry.js"] }
+  };
+  const result = audit(baseMain, packageJson);
+  assert.equal(result.metrics.utilityWorkerPackaged, false);
+  assert.match(result.critical.join("\n"), /utilityProcess 生产入口/);
+});
+
+test("architecture audit rejects a utility entry resolved from the current working directory", () => {
+  const main = baseMain.replace("resolveUtilityEntryPoint(__dirname)", 'path.resolve("electron/workers/utility-entry.js")');
+  const result = audit(main);
+  assert.equal(result.metrics.utilityEntryDerivedFromModuleUrl, false);
+  assert.match(result.critical.join("\n"), /import\.meta\.url/);
 });

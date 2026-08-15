@@ -8,6 +8,7 @@ test("memory service owns a removable, domain-scoped IPC surface", async () => {
   const handlers = new Map();
   const removed = [];
   const calls = [];
+  const ragCalls = [];
   const dispose = registerMemoryServiceIpc({
     ipcMain: {
       handle: (channel, handler) => handlers.set(channel, handler),
@@ -17,7 +18,7 @@ test("memory service owns a removable, domain-scoped IPC surface", async () => {
     getMemoryDatabaseStats: async (baseDir) => ({ baseDir }),
     reconcileCompletedReminderCommitments: async () => ({ commitments: [] }),
     getRagStatus: async () => ({ ready: true }),
-    rebuildKnowledgeIndex: async () => ({ rebuilt: true }),
+    ragClient: { rebuild: async (baseDir) => { ragCalls.push(baseDir); return { rebuilt: true }; } },
     testEmbeddingConnection: async () => ({ ok: true }),
     clearConversationHistory: async (baseDir) => calls.push(["history", baseDir]),
     clearCompanionMemory: async (baseDir) => calls.push(["companion", baseDir]),
@@ -26,6 +27,8 @@ test("memory service owns a removable, domain-scoped IPC surface", async () => {
 
   assert.deepEqual([...handlers.keys()], [...MEMORY_IPC_CHANNELS]);
   assert.deepEqual(await handlers.get("agent:get-memory-database-stats")(), { baseDir: "memory-root" });
+  assert.deepEqual(await handlers.get("agent:rebuild-rag-index")(), { rebuilt: true });
+  assert.deepEqual(ragCalls, ["memory-root"]);
   assert.equal(await handlers.get("agent:clear-memory")(), true);
   assert.deepEqual(calls, [["history", "memory-root"], ["companion", "memory-root"]]);
   dispose();
@@ -49,7 +52,7 @@ test("memory service composes with the trusted IPC registrar", async () => {
     getMemoryDatabaseStats: async () => { serviceCalls += 1; return { ok: true }; },
     reconcileCompletedReminderCommitments: async () => ({}),
     getRagStatus: async () => ({}),
-    rebuildKnowledgeIndex: async () => ({}),
+    ragClient: { rebuild: async () => ({}) },
     testEmbeddingConnection: async () => ({}),
     clearConversationHistory: async () => {},
     clearCompanionMemory: async () => {},

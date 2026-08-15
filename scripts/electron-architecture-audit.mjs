@@ -142,14 +142,14 @@ function relativeBuildPath(from, target) {
   return target.startsWith(`${from}/`) ? target.slice(from.length + 1) : null;
 }
 
-function analyzeBuildFiles(files) {
+function analyzeBuildFiles(files, target) {
   const result = { included: false, explicitlyExcluded: false, uncertainFileSet: false };
   if (!Array.isArray(files)) return result;
   for (const entry of files) {
     if (typeof entry === "string") {
       const pattern = entry.replaceAll("\\", "/");
-      if (pattern.startsWith("!")) result.explicitlyExcluded ||= globMatchesPath(pattern.slice(1), "electron/preload.cjs");
-      else result.included ||= globMatchesPath(pattern, "electron/preload.cjs");
+      if (pattern.startsWith("!")) result.explicitlyExcluded ||= globMatchesPath(pattern.slice(1), target);
+      else result.included ||= globMatchesPath(pattern, target);
       continue;
     }
     if (!entry || typeof entry !== "object" || typeof entry.from !== "string" || typeof entry.to !== "string" || !Array.isArray(entry.filter) || !entry.filter.length || entry.filter.some((item) => typeof item !== "string")) {
@@ -158,10 +158,10 @@ function analyzeBuildFiles(files) {
     }
     const from = normalizeBuildPath(entry.from);
     const to = normalizeBuildPath(entry.to);
-    const relative = relativeBuildPath(from, "electron/preload.cjs");
+    const relative = relativeBuildPath(from, target);
     if (relative === null) continue;
     const destination = to === "." ? relative : `${to}/${relative}`;
-    if (destination !== "electron/preload.cjs") continue;
+    if (destination !== target) continue;
     const filters = entry.filter.map((pattern) => pattern.replaceAll("\\", "/"));
     const positives = filters.filter((pattern) => !pattern.startsWith("!"));
     const negatives = filters.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
@@ -173,7 +173,7 @@ function analyzeBuildFiles(files) {
   return result;
 }
 
-export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [] }) {
+export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [], ragSources = {} }) {
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
     .map((file) => file.replaceAll("\\", "/"))
@@ -181,7 +181,16 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   const windowArguments = extractBrowserWindowArguments(main);
   const insecureWindows = windowArguments.filter((args) => /nodeIntegration:\s*true|contextIsolation:\s*false|webSecurity:\s*false/.test(args));
   const canonicalWindows = windowArguments.filter(usesCanonicalPreload);
-  const buildFiles = analyzeBuildFiles(packageJson.build?.files);
+  const buildFiles = analyzeBuildFiles(packageJson.build?.files, "electron/preload.cjs");
+  const utilityBuildFiles = analyzeBuildFiles(packageJson.build?.files, "electron/workers/utility-entry.js");
+  const maskedMain = maskCommentsAndStrings(main);
+  const ragClientPropagatedThroughCore = /ragClient\s*:\s*payload\.ragClient/.test(ragSources.core || "");
+  const ragRoutes = {
+    startup: /ragTaskClient\.ensure\s*\(/.test(maskedMain),
+    memoryService: /ragClient\s*:\s*ragTaskClient/.test(maskedMain) && /options\.ragClient\.rebuild\s*\(/.test(ragSources.memoryService || ""),
+    appExecutor: ragClientPropagatedThroughCore && /context\.ragClient[\s\S]*context\.ragClient\.rebuild\s*\(/.test(ragSources.appExecutor || ""),
+    toolExecutor: ragClientPropagatedThroughCore && /context\.ragClient[\s\S]*context\.ragClient\.rebuild\s*\(/.test(ragSources.toolExecutor || "")
+  };
   const metrics = {
     electronVersion: packageJson.devDependencies?.electron || packageJson.dependencies?.electron || "missing",
     mainLines: main.split(/\r?\n/).length,
@@ -195,6 +204,16 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     canonicalPreloadPackaged: packageJson.main === "electron/main.js" && buildFiles.included && !buildFiles.explicitlyExcluded && !buildFiles.uncertainFileSet,
     canonicalPreloadExplicitlyExcluded: buildFiles.explicitlyExcluded,
     canonicalPreloadFileSetUncertain: buildFiles.uncertainFileSet,
+    utilityProcessImported: /\butilityProcess\b/.test(maskedMain),
+    utilitySupervisorConfigured: /createUtilityTaskSupervisor\s*\(/.test(maskedMain) && /utilityProcess\.fork\s*\(/.test(maskedMain),
+    utilityEntryDerivedFromModuleUrl: /fileURLToPath\s*\(\s*import\.meta\.url\s*\)/.test(maskedMain) && /resolveUtilityEntryPoint\s*\(\s*__dirname\s*\)/.test(maskedMain),
+    utilityWorkerEntrypointPresent: electronFiles.map((file) => file.replaceAll("\\", "/")).includes("electron/workers/utility-entry.js"),
+    utilityWorkerPackaged: utilityBuildFiles.included && !utilityBuildFiles.explicitlyExcluded && !utilityBuildFiles.uncertainFileSet,
+    directMainRagIndexWrites: countMatches(maskedMain, /\b(?:ensureRagIndexFresh|rebuildKnowledgeIndex|rebuildRagIndex)\s*\(/g),
+    mainDataBootstrapDefersRagFiles: /ensureDataFiles\s*\([\s\S]{0,160}?ensureRag\s*:\s*false/.test(maskedMain),
+    ragClientPropagatedThroughCore,
+    ragWriteRoutes: ragRoutes,
+    ragWriteRoutesMigrated: Object.values(ragRoutes).filter(Boolean).length,
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
   const critical = [];
@@ -205,6 +224,10 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   if (!/const PRELOAD_PATH = path\.join\(__dirname, ["']preload\.cjs["']\);/.test(main)) critical.push("主进程未声明 canonical PRELOAD_PATH");
   if (metrics.browserWindowsUsingCanonicalPreload !== metrics.browserWindowConstructors) critical.push(`${metrics.browserWindowConstructors - metrics.browserWindowsUsingCanonicalPreload} 个 BrowserWindow 无法确认使用 canonical PRELOAD_PATH`);
   if (!metrics.canonicalPreloadPackaged) critical.push(metrics.canonicalPreloadExplicitlyExcluded ? "生产打包清单显式排除了 electron/preload.cjs" : metrics.canonicalPreloadFileSetUncertain ? "生产打包 FileSet 无法可靠确认包含 canonical preload" : "生产打包入口或文件清单未包含 canonical preload");
+  if (!metrics.utilityProcessImported || !metrics.utilitySupervisorConfigured || !metrics.utilityEntryDerivedFromModuleUrl || !metrics.utilityWorkerEntrypointPresent || !metrics.utilityWorkerPackaged) critical.push("RAG utilityProcess 生产入口未完整配置、未从 import.meta.url 定位或未进入打包清单");
+  if (metrics.directMainRagIndexWrites) critical.push(`主进程仍直接执行 ${metrics.directMainRagIndexWrites} 个 RAG 写索引调用`);
+  if (!metrics.mainDataBootstrapDefersRagFiles) critical.push("主进程数据初始化仍可能直接创建 RAG 索引文件");
+  if (metrics.ragWriteRoutesMigrated !== 4) critical.push(`Electron RAG 写索引路径仅迁移 ${metrics.ragWriteRoutesMigrated}/4`);
   if (metrics.mainLines > 1500) warnings.push(`electron/main.js 仍有 ${metrics.mainLines} 行，需要按领域继续拆分`);
   if (metrics.directMainIpcHandlers > 30) warnings.push(`主文件仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
   if (metrics.singleRendererEntrypoint) warnings.push("所有窗口共用单一 React 入口，尚未按窗口进行代码分割");

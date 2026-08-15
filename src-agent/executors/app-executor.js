@@ -717,8 +717,9 @@ export async function handle(message, context = {}) {
   }
 
   if (wantsRebuildRagIndex && baseDir) {
-    const { rebuildRagIndex } = await import("../rag.js");
-    const ragIndex = await rebuildRagIndex(baseDir);
+    const ragIndex = context.ragClient
+      ? await context.ragClient.rebuild(baseDir)
+      : await import("../rag.js").then(({ rebuildRagIndex }) => rebuildRagIndex(baseDir));
     return {
       reply: `知识索引已经重建完成。这次一共写入了 ${ragIndex.files.length} 个文件、${ragIndex.chunks.length} 个片段。`,
       meta: {

@@ -14,7 +14,7 @@ export function registerMemoryServiceIpc(options) {
     ["agent:get-memory-database-stats", async () => options.getMemoryDatabaseStats(baseDir())],
     ["agent:get-companion-memory", async () => options.reconcileCompletedReminderCommitments()],
     ["agent:get-rag-status", async () => options.getRagStatus(baseDir())],
-    ["agent:rebuild-rag-index", async () => options.rebuildKnowledgeIndex(baseDir())],
+    ["agent:rebuild-rag-index", async () => options.ragClient.rebuild(baseDir())],
     ["agent:test-embedding", async () => options.testEmbeddingConnection(baseDir())],
     ["agent:clear-memory", async () => {
       await options.clearConversationHistory(baseDir());
