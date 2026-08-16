@@ -185,7 +185,9 @@ export function analyzeElectronArchitecture({
   autonomousCreationService = "",
   settingsService = "",
   personaCardService = "",
-  live2DModelService = ""
+  live2DModelService = "",
+  trustedDomainIpcService = "",
+  phase5eServices = {}
 }) {
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
@@ -216,6 +218,97 @@ export function analyzeElectronArchitecture({
     && /\bfunction\s+stop\s*\(/.test(source)
     && /\bfunction\s+dispose\s*\(/.test(source)
     && /\bfunction\s+snapshot\s*\(/.test(source);
+  const phase5eServiceSpecs = [
+    {
+      key: "systemResource",
+      file: "electron/services/system-resource-service.js",
+      factory: "createSystemResourceService",
+      variable: "systemResourceService",
+      channels: ["agent:get-auto-launch", "agent:set-auto-launch", "agent:search-files", "agent:get-app-registry", "agent:refresh-app-registry", "agent:get-system-resource-snapshot"]
+    },
+    {
+      key: "fileManager",
+      file: "electron/services/file-manager-service.js",
+      factory: "createFileManagerService",
+      variable: "fileManagerService",
+      channels: ["agent:get-file-manager-snapshot", "agent:scan-managed-directory", "agent:preview-file-organization", "agent:execute-file-organization", "agent:list-file-operations", "agent:undo-file-operation"]
+    },
+    {
+      key: "hostShell",
+      file: "electron/services/host-shell-service.js",
+      factory: "createHostShellService",
+      variable: "hostShellService",
+      channels: ["agent:open-external", "agent:get-data-path", "agent:open-data-folder", "agent:open-persona-folder"]
+    },
+    {
+      key: "companionLife",
+      file: "electron/services/companion-life-service.js",
+      factory: "createCompanionLifeService",
+      variable: "companionLifeService",
+      channels: ["agent:pet-touch", "agent:get-life-state", "agent:pause-proactive-today", "agent:reset-work-session"]
+    },
+    {
+      key: "windowIntent",
+      file: "electron/services/window-intent-service.js",
+      factory: "createWindowIntentService",
+      variable: "windowIntentService",
+      channels: ["agent:open-settings-window", "agent:open-composer-window", "agent:open-chat-window", "agent:open-code-window", "agent:open-scale-window", "agent:open-expression-window"]
+    },
+    {
+      key: "codeWorkspace",
+      file: "electron/services/code-workspace-service.js",
+      factory: "createCodeWorkspaceService",
+      variable: "codeWorkspaceService",
+      channels: ["agent:get-code-workspace", "agent:read-code-file", "agent:write-code-file", "agent:select-code-workspace"]
+    },
+    {
+      key: "expressionChatState",
+      file: "electron/services/expression-chat-state-service.js",
+      factory: "createExpressionChatStateService",
+      variable: "expressionChatStateService",
+      channels: ["agent:trigger-expression", "agent:clear-expressions", "agent:get-chat-state"]
+    },
+    {
+      key: "petWindowLayout",
+      file: "electron/services/pet-window-layout-service.js",
+      factory: "createPetWindowLayoutService",
+      variable: "petWindowLayoutService",
+      channels: ["agent:get-pet-scale", "agent:get-position-lock", "agent:set-position-lock", "agent:get-pet-window-bounds", "agent:set-pet-window-position", "agent:update-pet-window-layout", "agent:update-bubble-window-size", "agent:set-pet-mouse-passthrough", "agent:show-pet-context-menu"]
+    },
+    {
+      key: "rendererReady",
+      file: "electron/services/renderer-ready-service.js",
+      factory: "createRendererReadyService",
+      variable: "rendererReadyService",
+      channels: ["agent:renderer-ready"]
+    }
+  ];
+  const phase5eRecords = phase5eServiceSpecs.map((spec) => {
+    const source = phase5eServices[spec.key] || "";
+    return {
+      ...spec,
+      source,
+      present: normalizedElectronFiles.includes(spec.file),
+      configured: new RegExp(`const ${spec.variable} = ${spec.factory}\\s*\\(`).test(main)
+        && new RegExp(`${spec.variable}\\.registerIpc\\(\\)\\.start\\(\\)`).test(main)
+        && new RegExp(`${spec.variable}\\.dispose\\(\\)`).test(main),
+      ownsIpc: spec.channels.every((channel) => source.includes(channel)) && /trustedIpc:\s*options\.trustedIpc/.test(source),
+      lifecycleDelegated: /createTrustedDomainIpcService\s*\(/.test(source)
+    };
+  });
+  const phase5eChannels = phase5eServiceSpecs
+    .flatMap((spec) => spec.channels)
+    .map((channel) => channel.replace(/^agent:/, ""))
+    .join("|");
+  const directMainPhase5eIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase5eChannels})["']`, "g"));
+  const phase5eServiceSources = phase5eRecords.map((record) => record.source).join("\n");
+  const phase5eTrustedDomainRuntimeOwnsLifecycleAndRollback = /\bfunction\s+registerIpc\s*\(/.test(trustedDomainIpcService)
+    && /\bfunction\s+start\s*\(/.test(trustedDomainIpcService)
+    && /\bfunction\s+stop\s*\(/.test(trustedDomainIpcService)
+    && /\bfunction\s+dispose\s*\(/.test(trustedDomainIpcService)
+    && /\bfunction\s+snapshot\s*\(/.test(trustedDomainIpcService)
+    && /listenerDisposers/.test(trustedDomainIpcService)
+    && /registeredHandlers/.test(trustedDomainIpcService);
   const directMainPhase4cOrchestration = directMainPhase4cIpc
     + countMatches(maskedMain, /\b(?:currentInterestActivity|tickInterestSandbox|startInterestSandbox|stopInterestSandbox|runInterestActivity|runAutonomousLifeActivity|buildAgentReply|testDeepSeekConnection|generatePersonaCardDraft)\b/g);
   const metrics = {
@@ -272,6 +365,17 @@ export function analyzeElectronArchitecture({
     live2DModelLifecycleOwnedByService: hasPhase5dServiceLifecycle(live2DModelService),
     phase5dServicesElectronFree: !/from\s+["']electron["']|require\s*\(\s*["']electron["']/.test(`${settingsService}\n${personaCardService}\n${live2DModelService}`),
     directMainPhase5dIpc,
+    phase5eServiceCount: phase5eRecords.length,
+    phase5eServicesPresent: phase5eRecords.filter((record) => record.present).length,
+    phase5eServicesConfigured: phase5eRecords.filter((record) => record.configured).length,
+    phase5eServicesOwningIpc: phase5eRecords.filter((record) => record.ownsIpc).length,
+    phase5eServicesWithDelegatedLifecycle: phase5eRecords.filter((record) => record.lifecycleDelegated).length,
+    phase5eServicesElectronFree: !/from\s+["']electron["']|require\s*\(\s*["']electron["']/.test(phase5eServiceSources),
+    phase5eTrustedDomainRuntimePresent: normalizedElectronFiles.includes("electron/services/trusted-domain-ipc-service.js"),
+    phase5eTrustedDomainRuntimeOwnsLifecycleAndRollback,
+    phase5eOwnedChannels: phase5eRecords.filter((record) => record.present && record.ownsIpc).reduce((total, record) => total + record.channels.length, 0),
+    phase5eExpectedChannels: phase5eServiceSpecs.reduce((total, spec) => total + spec.channels.length, 0),
+    directMainPhase5eIpc,
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
   const critical = [];
@@ -297,9 +401,21 @@ export function analyzeElectronArchitecture({
   if (!metrics.live2DModelServicePresent || !metrics.live2DModelServiceConfigured || !metrics.live2DModelServiceOwnsIpc || !metrics.live2DModelLifecycleOwnedByService) critical.push("Phase 5D Live2D 服务、可信 IPC 或生命周期未完整迁移");
   if (!metrics.phase5dServicesElectronFree) critical.push("Phase 5D 服务不得直接导入 Electron");
   if (metrics.directMainPhase5dIpc) critical.push(`主进程回流了 ${metrics.directMainPhase5dIpc} 处 Phase 5D IPC`);
+  if (metrics.phase5eServicesPresent !== metrics.phase5eServiceCount
+    || metrics.phase5eServicesConfigured !== metrics.phase5eServiceCount
+    || metrics.phase5eServicesOwningIpc !== metrics.phase5eServiceCount
+    || metrics.phase5eServicesWithDelegatedLifecycle !== metrics.phase5eServiceCount
+    || !metrics.phase5eTrustedDomainRuntimePresent
+    || !metrics.phase5eTrustedDomainRuntimeOwnsLifecycleAndRollback) {
+    critical.push("Phase 5E 服务文件、main 装配、可信 IPC 或共享生命周期/回滚未完整迁移");
+  }
+  if (!metrics.phase5eServicesElectronFree) critical.push("Phase 5E 服务不得直接导入 Electron");
+  if (metrics.phase5eOwnedChannels !== metrics.phase5eExpectedChannels) critical.push(`Phase 5E channel 所有权为 ${metrics.phase5eOwnedChannels}/${metrics.phase5eExpectedChannels}`);
+  if (metrics.directMainIpcHandlers) critical.push(`主进程仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
+  if (metrics.directMainIpcListeners) critical.push(`主进程仍直接注册 ${metrics.directMainIpcListeners} 个 IPC listener`);
+  if (metrics.directMainPhase5eIpc) critical.push(`主进程回流了 ${metrics.directMainPhase5eIpc} 处 Phase 5E IPC`);
   if (metrics.mainLines > 2500) critical.push(`electron/main.js 为 ${metrics.mainLines} 行，超过 Phase 4C 的 2500 行门禁`);
   if (metrics.mainLines > 1500) warnings.push(`electron/main.js 仍有 ${metrics.mainLines} 行，需要按领域继续拆分`);
-  if (metrics.directMainIpcHandlers > 30) warnings.push(`主文件仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
   if (metrics.singleRendererEntrypoint) warnings.push("所有窗口共用单一 React 入口，尚未按窗口进行代码分割");
   return { metrics, critical, warnings };
 }

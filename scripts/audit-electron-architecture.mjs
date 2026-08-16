@@ -31,6 +31,21 @@ const [main, electronFiles, packageJson, indexHtml, memoryService, scheduleServi
   read("src-agent/executors/app-executor.js"),
   read("src-agent/tool-executor.js")
 ]);
+const phase5eServicePaths = {
+  systemResource: "electron/services/system-resource-service.js",
+  fileManager: "electron/services/file-manager-service.js",
+  hostShell: "electron/services/host-shell-service.js",
+  companionLife: "electron/services/companion-life-service.js",
+  windowIntent: "electron/services/window-intent-service.js",
+  codeWorkspace: "electron/services/code-workspace-service.js",
+  expressionChatState: "electron/services/expression-chat-state-service.js",
+  petWindowLayout: "electron/services/pet-window-layout-service.js",
+  rendererReady: "electron/services/renderer-ready-service.js"
+};
+const [trustedDomainIpcService, phase5eServices] = await Promise.all([
+  read("electron/services/trusted-domain-ipc-service.js"),
+  Object.fromEntries(await Promise.all(Object.entries(phase5eServicePaths).map(async ([key, relativePath]) => [key, await read(relativePath)])))
+]);
 const agentFiles = (await listFiles("src-agent")).filter((file) => /\.(?:c?js|mjs)$/.test(file));
 const directElectronImports = [];
 for (const file of agentFiles) {
@@ -50,7 +65,9 @@ const result = analyzeElectronArchitecture({
   autonomousCreationService,
   settingsService,
   personaCardService,
-  live2DModelService
+  live2DModelService,
+  trustedDomainIpcService,
+  phase5eServices
 });
 console.log(JSON.stringify(result, null, 2));
 if (result.critical.length) process.exitCode = 1;
