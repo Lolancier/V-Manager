@@ -1,8 +1,16 @@
 import { ensureRagIndexFresh, rebuildRagIndex } from "../../src-agent/rag.js";
+import { synthesizeElevenLabsSpeech } from "../../src-agent/elevenlabs.js";
+import { synthesizeLocalSpeech } from "../../src-agent/local-tts.js";
+import { synthesizeGptSovitsSpeech } from "../../src-agent/gpt-sovits.js";
+import { transcribeLocalSpeech } from "../../src-agent/local-stt.js";
 
 export const UTILITY_TASK_HANDLERS = Object.freeze({
   "rag:ensure": ({ baseDir }) => ensureRagIndexFresh(baseDir),
-  "rag:rebuild": ({ baseDir }) => rebuildRagIndex(baseDir)
+  "rag:rebuild": ({ baseDir }) => rebuildRagIndex(baseDir),
+  "speech:local-synthesize": ({ baseDir, voiceConfig, text }) => synthesizeLocalSpeech(baseDir, voiceConfig || {}, text),
+  "speech:gpt-synthesize": ({ baseDir, voiceConfig, text }) => synthesizeGptSovitsSpeech(baseDir, voiceConfig || {}, text),
+  "speech:elevenlabs-synthesize": ({ voiceConfig, text, asmr }) => synthesizeElevenLabsSpeech(voiceConfig || {}, text, { asmr: Boolean(asmr) }),
+  "speech:local-transcribe": ({ baseDir, audioBytes, speechInput }) => transcribeLocalSpeech(baseDir, audioBytes, speechInput || {})
 });
 
 function serializeError(error) {

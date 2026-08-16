@@ -95,6 +95,7 @@ function cacheDescriptor(voiceConfig, text, asmr, sanitize, generation) {
 
 export function createSpeechSynthesizer(options) {
   const dependencies = { ...defaultDependencies, ...(options.dependencies || {}) };
+  const runBackgroundTask = typeof options.runBackgroundTask === "function" ? options.runBackgroundTask : null;
   const inFlight = new Map();
   let generation = 0;
   let cacheMutation = Promise.resolve();
@@ -128,16 +129,22 @@ export function createSpeechSynthesizer(options) {
 
       let result;
       if (descriptor.provider === "local") {
-        result = await dependencies.synthesizeLocalSpeech(baseDir, voiceConfig, descriptor.speechText);
+        result = runBackgroundTask
+          ? await runBackgroundTask("speech:local-synthesize", { baseDir, voiceConfig, text: descriptor.speechText }, { timeoutMs: 10 * 60 * 1000 })
+          : await dependencies.synthesizeLocalSpeech(baseDir, voiceConfig, descriptor.speechText);
       } else if (descriptor.provider === "gpt_sovits") {
         if (voiceConfig.gptSovitsAutoStart !== false) {
           await dependencies.ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl, { fetchImpl: options.fetch });
         } else if (!await dependencies.isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl, options.fetch)) {
           throw new Error("GPT-SoVITS 当前未运行。请到“设置 → 语音与 ASMR”手动启动，或开启“随 V-Manager 启动”。");
         }
-        result = await dependencies.synthesizeGptSovitsSpeech(baseDir, voiceConfig, descriptor.speechText, options.fetch);
+        result = runBackgroundTask
+          ? await runBackgroundTask("speech:gpt-synthesize", { baseDir, voiceConfig, text: descriptor.speechText }, { timeoutMs: 4 * 60 * 1000 })
+          : await dependencies.synthesizeGptSovitsSpeech(baseDir, voiceConfig, descriptor.speechText, options.fetch);
       } else {
-        result = await dependencies.synthesizeElevenLabsSpeech(voiceConfig, descriptor.speechText, { asmr: descriptor.asmr, fetchImpl: options.fetch });
+        result = runBackgroundTask
+          ? await runBackgroundTask("speech:elevenlabs-synthesize", { voiceConfig, text: descriptor.speechText, asmr: descriptor.asmr }, { timeoutMs: 3 * 60 * 1000 })
+          : await dependencies.synthesizeElevenLabsSpeech(voiceConfig, descriptor.speechText, { asmr: descriptor.asmr, fetchImpl: options.fetch });
       }
 
       await mutateCache(async () => {
@@ -184,7 +191,8 @@ function normalizeSpeechSignal(signal) {
 
 export function registerSpeechServiceIpc(options) {
   const dependencies = { ...defaultDependencies, ...(options.dependencies || {}) };
-  const synthesizeSpeech = createSpeechSynthesizer({ getBaseDir: options.getBaseDir, fetch: options.fetch, dependencies });
+  const runBackgroundTask = typeof options.runBackgroundTask === "function" ? options.runBackgroundTask : null;
+  const synthesizeSpeech = createSpeechSynthesizer({ getBaseDir: options.getBaseDir, fetch: options.fetch, dependencies, runBackgroundTask });
   const getConfig = async () => options.mergeConfig(await options.loadConfig(options.getBaseDir()));
   const currentVoiceConfig = () => options.getCurrentConfig().voice;
   const currentSpeechInputConfig = () => options.getCurrentConfig().speechInput;
@@ -243,7 +251,13 @@ export function registerSpeechServiceIpc(options) {
     ["agent:install-local-stt", async (_event, modelId) => dependencies.installLocalStt(options.getBaseDir(), modelId, options.broadcastSttProgress, options.fetch)],
     ["agent:transcribe-local-speech", async (_event, audioBytes) => {
       const config = await getConfig();
-      return dependencies.transcribeLocalSpeech(options.getBaseDir(), audioBytes, config.speechInput);
+      return runBackgroundTask
+        ? runBackgroundTask("speech:local-transcribe", {
+          baseDir: options.getBaseDir(),
+          audioBytes,
+          speechInput: config.speechInput
+        }, { timeoutMs: 4 * 60 * 1000 })
+        : dependencies.transcribeLocalSpeech(options.getBaseDir(), audioBytes, config.speechInput);
     }],
     ["agent:open-local-stt-folder", async () => {
       const status = await dependencies.getLocalSttStatus(options.getBaseDir(), currentSpeechInputConfig().model);

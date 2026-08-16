@@ -137,6 +137,34 @@ test("provider selection is strict and calls exactly one provider", async (t) =>
   assert.deepEqual(calls, { local: 1, gpt: 1, eleven: 1 });
 });
 
+test("native speech synthesis routes through the background task supervisor when configured", async (t) => {
+  const baseDir = await temporaryBase(t);
+  const tasks = [];
+  const synthesize = createSpeechSynthesizer({
+    getBaseDir: () => baseDir,
+    runBackgroundTask: async (type, payload, options) => {
+      tasks.push({ type, payload, options });
+      return audioResult(type);
+    },
+    dependencies: synthesizerDependencies({
+      synthesizeLocalSpeech: async () => { throw new Error("主进程不应直接执行本地推理"); },
+      synthesizeGptSovitsSpeech: async () => { throw new Error("主进程不应直接执行 GPT 推理"); },
+      synthesizeElevenLabsSpeech: async () => { throw new Error("主进程不应直接执行云端语音"); }
+    })
+  });
+
+  await synthesize({ provider: "local", localPackId: "pack" }, "local text", false);
+  await synthesize({ provider: "gpt_sovits", gptSovitsProfileId: "profile" }, "gpt text", false);
+  await synthesize({ provider: "elevenlabs", voice: "voice" }, "eleven text", true);
+  assert.deepEqual(tasks.map((task) => task.type), [
+    "speech:local-synthesize",
+    "speech:gpt-synthesize",
+    "speech:elevenlabs-synthesize"
+  ]);
+  assert.equal(tasks[0].payload.baseDir, baseDir);
+  assert.equal(tasks[2].payload.asmr, true);
+});
+
 test("unknown provider is rejected before cache directory creation", async (t) => {
   const baseDir = await temporaryBase(t);
   const synthesize = createSpeechSynthesizer({ getBaseDir: () => baseDir, dependencies: synthesizerDependencies() });
@@ -205,6 +233,30 @@ test("service owns 17 handles and one listener with idempotent disposal", async 
   service.dispose();
   assert.deepEqual(removed, [...SPEECH_HANDLE_CHANNELS]);
   assert.deepEqual(listenerDisposals, [...SPEECH_EVENT_CHANNELS]);
+});
+
+test("local transcription routes through the background task supervisor when configured", async (t) => {
+  const baseDir = await temporaryBase(t);
+  const handlers = new Map();
+  const tasks = [];
+  const options = serviceOptions(baseDir, {
+    handle: (channel, handler) => handlers.set(channel, handler),
+    removeHandler: () => {},
+    on: () => () => {}
+  }, {
+    runBackgroundTask: async (type, payload, runOptions) => {
+      tasks.push({ type, payload, runOptions });
+      return { text: "你好", modelId: payload.speechInput.model };
+    }
+  });
+  options.dependencies.transcribeLocalSpeech = async () => { throw new Error("主进程不应直接执行 STT"); };
+  registerSpeechServiceIpc(options);
+  const audio = new Uint8Array([1, 2, 3]);
+  const result = await handlers.get("agent:transcribe-local-speech")({}, audio);
+  assert.deepEqual(result, { text: "你好", modelId: "small-q5_1" });
+  assert.equal(tasks[0].type, "speech:local-transcribe");
+  assert.equal(tasks[0].payload.baseDir, baseDir);
+  assert.deepEqual([...tasks[0].payload.audioBytes], [...audio]);
 });
 
 test("registration failure rolls back handles registered earlier", async (t) => {

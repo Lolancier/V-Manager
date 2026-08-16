@@ -173,7 +173,7 @@ function analyzeBuildFiles(files, target) {
   return result;
 }
 
-export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [], ragSources = {}, scheduleService = "" }) {
+export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [], ragSources = {}, scheduleService = "", modelConversationService = "", autonomousCreationService = "" }) {
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
     .map((file) => file.replaceAll("\\", "/"))
@@ -195,6 +195,10 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   const directMainScheduleOrchestration = countMatches(maskedMain, /\b(?:scheduleTimer|scheduleTickRunning|tickSchedules|syncScheduleIntegrations|syncWindowsScheduleTasks|publishTodayAgendaOnStartup)\b/g)
     + countMatches(main, /from\s+["'][^"']*(?:schedule-engine|windows-task-scheduler)\.js["']/g)
     + countMatches(main, /ipcMain\.(?:handle|on)\s*\(\s*["']agent:(?:list-schedules|cancel-schedule)["']/g);
+  const phase4cChannels = "chat|test-deepseek|generate-persona-card-draft|get-interest-sandbox|run-interest-activity|get-interest-state|cleanup-interest-sandbox|play-interest-game|interrupt-interest-activity|update-interest-location|open-interest-sandbox|open-interest-artifact|open-interest-category";
+  const directMainPhase4cIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase4cChannels})["']`, "g"));
+  const directMainPhase4cOrchestration = directMainPhase4cIpc
+    + countMatches(maskedMain, /\b(?:currentInterestActivity|tickInterestSandbox|startInterestSandbox|stopInterestSandbox|runInterestActivity|runAutonomousLifeActivity|buildAgentReply|testDeepSeekConnection|generatePersonaCardDraft)\b/g);
   const metrics = {
     electronVersion: packageJson.devDependencies?.electron || packageJson.dependencies?.electron || "missing",
     mainLines: main.split(/\r?\n/).length,
@@ -224,6 +228,17 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     scheduleLifecycleOwnedByService: /\bfunction\s+tick\s*\(/.test(scheduleService) && /\bfunction\s+start\s*\(/.test(scheduleService) && /\bfunction\s+stop\s*\(/.test(scheduleService) && /\bfunction\s+snapshot\s*\(/.test(scheduleService) && /setIntervalImpl/.test(scheduleService),
     directMainScheduleOrchestration,
     scheduleClientPropagatedThroughCore: /scheduleClient\s*:\s*payload\.scheduleClient/.test(ragSources.core || "") && /scheduleClient\s*:/.test(maskedMain),
+    modelConversationServicePresent: normalizedElectronFiles.includes("electron/services/model-conversation-service.js"),
+    modelConversationServiceConfigured: /createModelConversationService\s*\(/.test(maskedMain) && /modelConversationService\.registerIpc\s*\(/.test(maskedMain) && /modelConversationService\.dispose\s*\(/.test(maskedMain),
+    modelConversationServiceOwnsIpc: ["agent:chat", "agent:test-deepseek", "agent:generate-persona-card-draft"].every((channel) => modelConversationService.includes(channel)) && /trustedIpc\.handle\s*\(/.test(modelConversationService),
+    autonomousCreationServicePresent: normalizedElectronFiles.includes("electron/services/autonomous-creation-service.js"),
+    autonomousCreationServiceConfigured: /createAutonomousCreationService\s*\(/.test(maskedMain) && /autonomousCreationService\.registerIpc\s*\(/.test(maskedMain) && /autonomousCreationService\.start\s*\(/.test(maskedMain) && /autonomousCreationService\.dispose\s*\(/.test(maskedMain),
+    autonomousCreationServiceOwnsState: /let\s+currentTask\s*=\s*null/.test(autonomousCreationService) && /snapshotConfig\s*\(options\.getConfig\s*\(\s*\)\s*\)/.test(autonomousCreationService) && /personaFor\s*\(config\)/.test(autonomousCreationService),
+    autonomousCreationServiceOwnsIpc: ["agent:get-interest-sandbox", "agent:run-interest-activity", "agent:get-interest-state", "agent:cleanup-interest-sandbox", "agent:play-interest-game", "agent:interrupt-interest-activity", "agent:update-interest-location", "agent:open-interest-sandbox", "agent:open-interest-artifact", "agent:open-interest-category"].every((channel) => autonomousCreationService.includes(channel)) && /trustedIpc\.handle\s*\(/.test(autonomousCreationService),
+    phase4cServicesElectronFree: !/from\s+["']electron["']|require\s*\(\s*["']electron["']/.test(`${modelConversationService}\n${autonomousCreationService}`),
+    modelCancellationPropagated: /signal:\s*payload\.signal/.test(ragSources.core || "") || /payload\.signal/.test(ragSources.core || ""),
+    directMainPhase4cIpc,
+    directMainPhase4cOrchestration,
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
   const critical = [];
@@ -240,6 +255,11 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   if (metrics.ragWriteRoutesMigrated !== 4) critical.push(`Electron RAG 写索引路径仅迁移 ${metrics.ragWriteRoutesMigrated}/4`);
   if (!metrics.scheduleServicePresent || !metrics.scheduleServiceConfigured || !metrics.scheduleServiceOwnsIpc || !metrics.scheduleLifecycleOwnedByService || !metrics.scheduleClientPropagatedThroughCore) critical.push("日程域服务、IPC、生命周期或聊天工具同步适配未完整迁移");
   if (metrics.directMainScheduleOrchestration) critical.push(`主进程回流了 ${metrics.directMainScheduleOrchestration} 处日程 IPC、计时器或具体编排`);
+  if (!metrics.modelConversationServicePresent || !metrics.modelConversationServiceConfigured || !metrics.modelConversationServiceOwnsIpc || !metrics.modelCancellationPropagated) critical.push("Phase 4C 模型会话服务、可信 IPC 或取消传播未完整迁移");
+  if (!metrics.autonomousCreationServicePresent || !metrics.autonomousCreationServiceConfigured || !metrics.autonomousCreationServiceOwnsState || !metrics.autonomousCreationServiceOwnsIpc) critical.push("Phase 4C 自主创作状态、生命周期或可信 IPC 未完整迁移");
+  if (!metrics.phase4cServicesElectronFree) critical.push("Phase 4C 服务不得直接导入 Electron");
+  if (metrics.directMainPhase4cOrchestration) critical.push(`主进程回流了 ${metrics.directMainPhase4cOrchestration} 处 Phase 4C IPC 或领域编排`);
+  if (metrics.mainLines > 2500) critical.push(`electron/main.js 为 ${metrics.mainLines} 行，超过 Phase 4C 的 2500 行门禁`);
   if (metrics.mainLines > 1500) warnings.push(`electron/main.js 仍有 ${metrics.mainLines} 行，需要按领域继续拆分`);
   if (metrics.directMainIpcHandlers > 30) warnings.push(`主文件仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
   if (metrics.singleRendererEntrypoint) warnings.push("所有窗口共用单一 React 入口，尚未按窗口进行代码分割");

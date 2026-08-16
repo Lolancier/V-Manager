@@ -4,7 +4,7 @@
 
 ## 结论
 
-项目应继续使用 Electron，但不能直接从 32 跳到最新大版本后再统一修复。升级前需要把“桌面宿主能力、业务服务、后台任务、窗口生命周期、渲染入口”分开。本轮已经建立第一批边界：Agent 核心不再直接导入 Electron Shell、记忆 IPC 已成为独立服务、辅助窗口关闭后释放 renderer，并加入可重复执行的架构审计。Phase 1 还将 `electron/preload.cjs` 固化为唯一 preload 源，开发与打包窗口都通过主进程的 `PRELOAD_PATH` 加载它。Phase 2 已把完整语音域迁入 `speech-service`。Phase 3 已把 Electron 生产路径的 RAG 扫描、Embedding 和索引写入接到惰性 `utilityProcess`，主进程只保留状态读取和检索。Phase 4A 已把日程计时、提醒/电源处理、Windows Task Scheduler 同步、承诺完成回写和 2 个日程 IPC 迁入 `schedule-service`。
+项目应继续使用 Electron，但不能直接从 32 跳到最新大版本后再统一修复。升级前需要把“桌面宿主能力、业务服务、后台任务、窗口生命周期、渲染入口”分开。本轮已经建立第一批边界：Agent 核心不再直接导入 Electron Shell、记忆 IPC 已成为独立服务、辅助窗口关闭后释放 renderer，并加入可重复执行的架构审计。Phase 1 还将 `electron/preload.cjs` 固化为唯一 preload 源，开发与打包窗口都通过主进程的 `PRELOAD_PATH` 加载它。Phase 2 已把完整语音域迁入 `speech-service`；Phase 4B 已将三种语音合成及本地 STT 的原生/网络推理通过统一后台任务协议移出主进程，主进程只保留缓存、IPC 和生命周期管理。Phase 3 已把 Electron 生产路径的 RAG 扫描、Embedding 和索引写入接到惰性 `utilityProcess`，主进程只保留状态读取和检索。Phase 4A 已把日程计时、提醒/电源处理、Windows Task Scheduler 同步、承诺完成回写和 2 个日程 IPC 迁入 `schedule-service`。Phase 4C 已把模型会话和自主创作状态机分别迁入 `model-conversation-service` 与 `autonomous-creation-service`，对应 13 个 IPC 全部使用可信 registrar。
 
 RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，也不访问 BrowserWindow、app、ipcMain 或 Shell。启动刷新、memory-service 设置页手动重建、app-executor 自然语言重建和 tool-executor 模型工具重建这 4 条 Electron 写路径都注入同一个后台 adapter。`src-agent` 的两个 executor 仍保留直接调用 RAG 模块的兼容 fallback，供 CLI、测试或其他非 Electron 宿主使用；它们不是 Electron 生产主进程路径。
 
@@ -12,7 +12,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 
 | 区域 | 现状 | 风险 | 后续目标 |
 | --- | --- | --- | --- |
-| `electron/main.js` | 约 2900 行，窗口、托盘、协议和自主创作仍混合；语音、RAG 写索引与日程编排已抽离 | Electron 升级回归范围仍大；共享全局状态多 | 只保留应用启动、服务装配和生命周期 |
+| `electron/main.js` | 约 2430 行；窗口、托盘、协议与宿主发布仍在主文件，语音、RAG、日程、模型会话和自主创作已抽离 | Electron 升级回归范围仍大；窗口宿主状态仍多 | 继续按窗口宿主域拆分，只保留应用启动、服务装配和生命周期 |
 | `src/App.tsx` | 约 5300 行，所有窗口共用一个 React 入口 | 每个辅助 renderer 都加载整套 UI 和 Live2D 依赖 | 按 `startup/pet/bubble/settings/chat/code` 拆入口和动态 chunk |
 | `src/styles.css` | 约 4300 行 | 样式回归范围大，窗口间互相影响 | 按窗口和共享组件拆分 |
 | `src-agent/core.js` | 约 1500 行，模型请求、上下文、工具循环、配置混合 | 难以独立放入 utilityProcess | 拆成 model-client、prompt-builder、conversation-service、tool-loop |
@@ -35,7 +35,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 4. `App.tsx` 的单入口意味着“懒创建窗口”并不等于“轻量窗口”；每个 renderer 仍会解析大部分相同代码。
 5. `src-agent` 之前直接使用 Electron Shell，使核心无法安全迁入 utilityProcess。本轮已经改成宿主适配器，但未来 worker 中的特权操作仍应通过主进程 RPC 返回执行。
 6. 自定义资源协议返回 `Access-Control-Allow-Origin: *`。虽然文件路径有边界检查，仍应在升级时评估是否能限制为应用自己的 origin。
-7. 本地原生语音模块 `sherpa-onnx-node` 是 Electron/Node 大版本升级的重点兼容项；每个阶段都要做加载、转录、打包和卸载验证。
+7. 本地原生语音模块 `sherpa-onnx-node` 是 Electron/Node 大版本升级的重点兼容项；现在由 utilityProcess 加载，但每个阶段仍要做加载、转录、打包和卸载验证。
 8. 本地 `npm ls` 在 Windows 上发现 `sherpa-onnx-darwin-x64` 可选平台包状态异常。它不影响当前 Win x64 运行，但说明升级时不能只看安装成功，必须在干净目录重新安装并核对目标平台原生包。
 9. 当前 `vite build` 能通过，但严格 `tsc --noEmit` 不能通过。应用层已发现的活动人物卡类型和空值问题已修正；剩余错误集中在移植的 Live2D 官方源码与 `@framework` TypeScript 路径/严格空值兼容。Electron 升级前应把“生产构建”和“类型检查”拆成明确门禁，并为第三方 Live2D 源码建立独立 tsconfig 或稳定的类型适配层。
 
@@ -56,16 +56,20 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 1. `memory-service`：记忆统计、长期记忆、RAG 状态/重建、清理。本轮已建立 IPC 服务样板。
 2. `schedule-service`：计时器、Windows Task Scheduler、提醒与承诺同步。Phase 4A 已完成。
 3. `speech-service`：TTS/STT 包管理、语音缓存、GPT-SoVITS 服务生命周期。Phase 2 已完成。
-4. `creation-service`：自主日程、日记/绘画/游戏生成与作品清理。
-5. `conversation-service`：模型请求、Prompt/Token 预算、工具调用循环和对话持久化。
+4. `creation-service`：自主日程、日记/绘画/游戏生成与作品清理。Phase 4C 已完成 Electron 编排层抽离。
+5. `conversation-service`：模型请求、Prompt/Token 预算、工具调用循环和对话持久化。Phase 4C 已完成 Electron 编排层抽离；纯模型管线仍保留在 `src-agent/core.js`。
 
 服务模块不得直接持有 BrowserWindow；通过事件发布器通知窗口。每个服务需返回 `start()`、`stop()`、`snapshot()`，并能在测试中注入时钟、文件根目录和宿主能力。
 
 迁移单个 IPC 域时，应把 `createTrustedIpcRegistrar(ipcMain, policy)` 注入该域 registrar，禁止把原始 `ipcMain` 继续传入服务。`handle/removeHandler` 用于 request/response：不可信 `invoke` 会以拒绝错误返回。renderer `send` 对应的接收侧使用 `on`：它会在每次事件进入业务 listener 前执行同一套主 frame 与 URL 校验，但对不可信单向事件只安全丢弃，不让校验异常从 EventEmitter 传播；可信业务 listener 自己抛出的异常仍保持原有传播语义。`on` 返回可重试且成功后幂等的 disposer；也可用原始 listener 调用 `removeListener`，registrar 会精确移除内部包装函数。先保持 renderer 的 channel、方法名、参数形状和返回值不变，再在服务边界增加参数 schema 与窗口级权限；对应测试至少覆盖受信主 frame 成功、外部 origin 或子 frame 在业务 handler 执行前被拒绝或丢弃，以及 dispose 移除全部 handler/listener。`memory-service` 与可信 registrar 的组合测试已覆盖这条装配路径，后续服务按相同模式逐域迁移，不在一次变更中批量搬移全部 IPC。
 
-`speech-service` 保持 preload 的 17 个语音 handle 与 1 个单向 signal channel 不变，服务本身不导入 Electron，也不持有 BrowserWindow。合成缓存按规范化文本、provider 与对应声线参数生成键；同键磁盘 miss 共享一个 in-flight Promise，不同键并行执行，失败不会进入缓存。GPT-SoVITS 安装或导入成功后会清空派生音频缓存并切换进程内缓存 generation，避免同 ID 声线更新后复用旧音频；旧 generation 的在途任务也不会写回。缓存使用临时文件后 rename，避免把半文件当作成功缓存。下一阶段仍应评估把本地 STT/TTS 原生推理迁入 utilityProcess，并为大模型下载与进程退出补更细的取消语义。
+`speech-service` 保持 preload 的 17 个语音 handle 与 1 个单向 signal channel 不变，服务本身不导入 Electron，也不持有 BrowserWindow。合成缓存按规范化文本、provider 与对应声线参数生成键；同键磁盘 miss 共享一个 in-flight Promise，不同键并行执行，失败不会进入缓存。GPT-SoVITS 安装或导入成功后会清空派生音频缓存并切换进程内缓存 generation，避免同 ID 声线更新后复用旧音频；旧 generation 的在途任务也不会写回。缓存使用临时文件后 rename，避免把半文件当作成功缓存。Phase 4B 已将三种 TTS 与本地 STT 推理通过 utilityProcess 执行；语音包安装/管理和进程退出取消语义仍待继续细化。
 
 `schedule-service` 保持 preload 的 `agent:list-schedules` 与 `agent:cancel-schedule` 参数和返回形状不变，两个 handle 均由可信 registrar 注册。服务不导入 Electron：主进程只注入用户数据目录、时钟/计时器、平台与应用路径、主动事件发布器、窗口广播器和承诺存储能力。正常启动顺序固定为 Windows 同步、到期 tick、今日议程、10 秒 timer；后台 schedule launch 跳过今日议程但仍按原产品语义保持后台实例。`start/stop/dispose` 均幂等，并发 tick 共享同一 Promise；跨 stop/start 的每轮启动持有独立 Promise，旧轮完成不会清掉新轮状态。stop 会清除 10 秒 timer 和所有 65 秒电源结果 timer，用生命周期 generation 抑制在途 tick 的后续通知、电源动作与延迟结果。若电源系统调用已在 stop 前开始，服务只能抑制后续发布，不能声称撤回已经交给 Windows 的操作。
+
+`model-conversation-service` 拥有 `agent:chat`、DeepSeek 连通性和人物卡草稿 3 个 handle，并统一跟踪在途模型任务。它继续复用 `src-agent/core.js` 中已经验证的 Prompt/Token/记忆预算、工具循环、usage 缓存和按人物卡过滤的历史；流式 delta 由注入回调交给主进程广播。退出时 AbortSignal 会贯穿普通请求、流式请求、工具循环与连通性测试，服务等待在途调用收敛后移除 handler。主进程只保留聊天窗口占位消息、表情和窗口广播等 Electron 宿主表现。
+
+`autonomous-creation-service` 拥有 10 个兴趣/创作/试玩/中断/清理 handle、5 分钟 tick、互斥任务、取消与退出收敛。每次任务开始即深拷贝人物卡 id/version/name 和完整 config，后续切卡不会污染在途创作、修复、试玩或反思。进度回调与任务完成都按任务身份校验，旧任务不能覆盖新状态；取消后不会发布 completed 主动事件。试玩记录以 activity id 共享 in-flight Promise，成功后进程内去重、失败允许重试，避免并发完成重复扣减 Token。小游戏 BrowserWindow/Session 仍由允许依赖 Electron 的 `game-playtest-runtime` 宿主创建，状态服务本身不导入 Electron。
 
 日程 JSON 的所有 read-modify-write 按规范化 `baseDir` 串行，覆盖自然语言 executor、模型 tool、IPC 与 tick，避免并发覆盖。提醒到期时会在同一次原子写中记录 `completed` 和 `delivery.pending`；发送前持久化带 60 秒租约的 claim，通知成功后再标记 `delivered`。stop 或通知失败发生在发送前会释放回 pending，后续 start、tick 或 reconcile 会补投；旧版没有 delivery 字段的历史 completed 提醒视为已经投递，避免升级后重放。进程若恰在系统通知已发送、`delivered` 尚未落盘之间崩溃，租约过期后可能再次投递，这是持久化通知无法完全消除的 at-least-once 窗口。承诺回写以 reminder ID 共享 in-flight Promise，成功后进程内去重，失败则允许重试。执行中的电源计划取消会先调用 Windows abort，只有 abort 成功才持久化 `cancelled`；失败时保留 `executing`，IPC、自然语言和模型工具三条路径语义一致。Windows 注册失败和 `remove_failed` 会在后续同步重试，非 Windows 不写伪 integration 状态；遗留 `executing` 任务会恢复受跟踪的结果 timer，结果写回继续尊重已经取消的状态。主进程剩余的日程相关代码仅是服务装配、启动/second-instance tick、配置或聊天工具变更后的 adapter 调用、interest busy snapshot 查询和退出 dispose，不再包含 channel handler、timer 或 Windows/提醒业务编排。
 
@@ -74,7 +78,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 | 工作 | 目标进程 | 原因与边界 |
 | --- | --- | --- |
 | RAG 扫描、分块、Embedding、索引写入 | utilityProcess（Phase 3 已接入生产） | 文件和网络工作独立，输入输出可序列化；主进程继续读取索引与执行检索 |
-| 本地 STT/TTS 推理 | utilityProcess 或专用 sidecar | 原生模块、CPU/内存峰值不应影响 UI 主线程 |
+| 本地 STT/TTS 推理 | utilityProcess（Phase 4B 已接入）或专用 sidecar | 原生模块、CPU/内存峰值不应影响 UI 主线程；安装/管理路径仍待迁移 |
 | GPT-SoVITS 服务启动与健康检查 | 独立服务进程；主进程监督 | 已是外部进程模型，重点是生命周期和崩溃恢复 |
 | 小游戏策略生成、结果分析、反思 | utilityProcess | 纯模型/文本工作可迁移 |
 | BrowserWindow 试玩驱动、Session 拦截、截图和输入 | 主进程 Electron 服务 | 依赖 BrowserWindow/WebContents/Session，不能直接作为普通 Node worker 处理 |
@@ -88,7 +92,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 
 - 常驻：桌宠、气泡。它们承担实时交互，关闭按钮继续表示隐藏或由应用托盘管理。
 - 可释放：设置、缩放、输入框、完整聊天、代码、表情面板。现在首次打开时创建，关闭时销毁，下次重新创建。
-- 游戏试玩：每次任务创建隔离窗口，结束后清理 Session 和窗口；继续保持短生命周期。
+- 游戏试玩：统一由 `game-playtest-service` 管理，每次任务创建隔离 renderer；调用方取消或应用退出会中止在途试玩，结束后销毁窗口并等待 Session 存储和缓存清理完成。
 - 下一阶段应为不同窗口建立独立渲染入口，至少先拆出 `settings`、`code` 和 `pet/live2d`，避免每个窗口加载完整 `App.tsx`。
 
 ## Electron 分阶段升级门禁
@@ -116,4 +120,4 @@ Electron 官方建议一次迁移一个大版本并逐项检查 Breaking Changes
 npm run audit:architecture
 ```
 
-该命令会输出 Electron 版本、主文件行数、直接 IPC 数、窗口数、Agent 核心是否重新直接导入 Electron、安全窗口配置、preload 状态，以及 utilityProcess/RAG 和 schedule-service 迁移指标。RAG 门禁要求 worker 入口存在并进入生产打包、主进程不直接调用写索引函数、启动/memory-service/app-executor/tool-executor 四条写路径全部注入后台 adapter。日程门禁要求服务文件、可信 IPC、`start/stop/tick/snapshot` 生命周期和聊天工具 adapter 同时存在，并把日程 channel、timer 状态或 Windows/提醒具体编排回流主文件视为 critical。审计同时会独立统计全部 `new BrowserWindow(` 调用，再逐个配对调用参数；只认可第一个参数是可静态分析的对象 literal，且真实属性路径为 `webPreferences.preload: PRELOAD_PATH`。变量 options、第二参数或顶层/metadata preload 诱饵、动态 spread/computed 属性，以及任何无法静态确认的窗口都会作为 critical。preload 或 utility worker 被生产清单排除也会直接失败。API 表面、代表性参数转发与事件解绑另由 `tests/preload.test.js` 固化；审计规则的绕过场景由 `tests/electron-architecture-audit.test.js` 固化；其余尚待拆分的结构问题继续作为 warning 展示。
+该命令会输出 Electron 版本、主文件行数、直接 IPC 数、窗口数、Agent 核心是否重新直接导入 Electron、安全窗口配置、preload 状态，以及 utilityProcess/RAG、schedule-service 和 Phase 4C 迁移指标。RAG 门禁要求 worker 入口存在并进入生产打包、主进程不直接调用写索引函数、启动/memory-service/app-executor/tool-executor 四条写路径全部注入后台 adapter。日程门禁要求服务文件、可信 IPC、`start/stop/tick/snapshot` 生命周期和聊天工具 adapter 同时存在，并把日程 channel、timer 状态或 Windows/提醒具体编排回流主文件视为 critical。Phase 4C 门禁要求模型与自主创作服务存在、使用可信 IPC、持有人物卡快照和退出生命周期、禁止直接导入 Electron，并将 13 个 channel 或旧状态机回流 main、main 超过 2500 行视为 critical。审计同时会独立统计全部 `new BrowserWindow(` 调用，再逐个配对调用参数；只认可第一个参数是可静态分析的对象 literal，且真实属性路径为 `webPreferences.preload: PRELOAD_PATH`。变量 options、第二参数或顶层/metadata preload 诱饵、动态 spread/computed 属性，以及任何无法静态确认的窗口都会作为 critical。preload 或 utility worker 被生产清单排除也会直接失败。API 表面、代表性参数转发与事件解绑另由 `tests/preload.test.js` 固化；审计规则的绕过场景由 `tests/electron-architecture-audit.test.js` 固化；其余尚待拆分的结构问题继续作为 warning 展示。

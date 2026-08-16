@@ -15,13 +15,15 @@ async function listFiles(directory) {
   return result;
 }
 
-const [main, electronFiles, packageJson, indexHtml, memoryService, scheduleService, core, appExecutor, toolExecutor] = await Promise.all([
+const [main, electronFiles, packageJson, indexHtml, memoryService, scheduleService, modelConversationService, autonomousCreationService, core, appExecutor, toolExecutor] = await Promise.all([
   read("electron/main.js"),
   listFiles("electron"),
   read("package.json").then(JSON.parse),
   read("index.html"),
   read("electron/services/memory-service.js"),
   read("electron/services/schedule-service.js"),
+  read("electron/services/model-conversation-service.js"),
+  read("electron/services/autonomous-creation-service.js"),
   read("src-agent/core.js"),
   read("src-agent/executors/app-executor.js"),
   read("src-agent/tool-executor.js")
@@ -40,7 +42,9 @@ const result = analyzeElectronArchitecture({
   indexHtml,
   directElectronImports,
   ragSources: { memoryService, core, appExecutor, toolExecutor },
-  scheduleService
+  scheduleService,
+  modelConversationService,
+  autonomousCreationService
 });
 console.log(JSON.stringify(result, null, 2));
 if (result.critical.length) process.exitCode = 1;

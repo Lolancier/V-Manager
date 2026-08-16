@@ -14,7 +14,14 @@ void ragTaskClient.ensure(baseDir);
 registerMemoryServiceIpc({ ragClient: ragTaskClient });
 const scheduleService = createScheduleService({ trustedIpc, scheduleClient: payload.scheduleClient });
 scheduleService.start();
-scheduleService.dispose();`;
+scheduleService.dispose();
+const modelConversationService = createModelConversationService({ trustedIpc });
+modelConversationService.registerIpc(handleChat);
+modelConversationService.dispose();
+const autonomousCreationService = createAutonomousCreationService({ trustedIpc });
+autonomousCreationService.registerIpc();
+autonomousCreationService.start();
+autonomousCreationService.dispose();`;
 const baseMain = `${canonicalDeclaration}\n${utilityConfiguration}\n${Array.from({ length: 9 }, () => canonicalWindow).join("\n")}`;
 const basePackage = {
   main: "electron/main.js",
@@ -24,7 +31,7 @@ const basePackage = {
 
 const baseRagSources = {
   memoryService: "options.ragClient.rebuild(baseDir())",
-  core: "ragClient: payload.ragClient, scheduleClient: payload.scheduleClient",
+  core: "ragClient: payload.ragClient, scheduleClient: payload.scheduleClient, signal: payload.signal",
   appExecutor: "context.ragClient ? context.ragClient.rebuild(baseDir) : fallback()",
   toolExecutor: "context.ragClient ? context.ragClient.rebuild(baseDir) : fallback()"
 };
@@ -35,15 +42,26 @@ function tick() {}
 function start() { setIntervalImpl(tick, 10_000); }
 function stop() {}
 function snapshot() {}`;
+const baseModelService = `
+const channels = ["agent:chat", "agent:test-deepseek", "agent:generate-persona-card-draft"];
+for (const channel of channels) trustedIpc.handle(channel, handler);`;
+const baseAutonomousService = `
+const channels = ["agent:get-interest-sandbox", "agent:run-interest-activity", "agent:get-interest-state", "agent:cleanup-interest-sandbox", "agent:play-interest-game", "agent:interrupt-interest-activity", "agent:update-interest-location", "agent:open-interest-sandbox", "agent:open-interest-artifact", "agent:open-interest-category"];
+for (const channel of channels) trustedIpc.handle(channel, handler);
+let currentTask = null;
+const config = snapshotConfig(options.getConfig());
+const persona = personaFor(config);`;
 
 function audit(main = baseMain, packageJson = basePackage, ragSources = baseRagSources) {
   return analyzeElectronArchitecture({
     main,
-    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js"],
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js"],
     packageJson,
     indexHtml: '<script type="module" src="/src/main.tsx"></script>',
     ragSources,
-    scheduleService: baseScheduleService
+    scheduleService: baseScheduleService,
+    modelConversationService: baseModelService,
+    autonomousCreationService: baseAutonomousService
   });
 }
 
@@ -159,7 +177,30 @@ test("architecture audit requires the schedule service source and lifecycle", ()
     packageJson: basePackage,
     indexHtml: '<script type="module" src="/src/main.tsx"></script>',
     ragSources: baseRagSources,
-    scheduleService: ""
+    scheduleService: "",
+    modelConversationService: baseModelService,
+    autonomousCreationService: baseAutonomousService
   });
   assert.match(result.critical.join("\n"), /日程域服务/);
+});
+
+test("architecture audit rejects Phase 4C IPC or state orchestration returning to main", () => {
+  const result = audit(`${baseMain}\nipcMain.handle("agent:chat", handler);\nlet currentInterestActivity = null;`);
+  assert.equal(result.metrics.directMainPhase4cIpc, 1);
+  assert.match(result.critical.join("\n"), /Phase 4C IPC/);
+});
+
+test("architecture audit requires Electron-free Phase 4C services and persona snapshots", () => {
+  const result = analyzeElectronArchitecture({
+    main: baseMain,
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js"],
+    packageJson: basePackage,
+    indexHtml: "",
+    ragSources: baseRagSources,
+    scheduleService: baseScheduleService,
+    modelConversationService: `import { app } from "electron"; ${baseModelService}`,
+    autonomousCreationService: baseAutonomousService.replace("const config = snapshotConfig(options.getConfig());", "const config = options.getConfig();")
+  });
+  assert.match(result.critical.join("\n"), /自主创作状态/);
+  assert.match(result.critical.join("\n"), /不得直接导入 Electron/);
 });

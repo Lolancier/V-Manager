@@ -96,8 +96,10 @@ export async function createIsolatedGameDriver(artifactPath) {
     errors: () => errors,
     async close() {
       if (!playWindow.isDestroyed()) playWindow.destroy();
-      void isolatedSession.clearStorageData().catch(() => {});
-      void isolatedSession.clearCache().catch(() => {});
+      await Promise.allSettled([
+        isolatedSession.clearStorageData(),
+        isolatedSession.clearCache()
+      ]);
     }
   };
 }
