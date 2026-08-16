@@ -54,6 +54,7 @@ import { createWindowIntentService } from "./services/window-intent-service.js";
 import { createCodeWorkspaceService } from "./services/code-workspace-service.js";
 import { createExpressionChatStateService } from "./services/expression-chat-state-service.js";
 import { createPetWindowLayoutService } from "./services/pet-window-layout-service.js";
+import { createRendererReadyService } from "./services/renderer-ready-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -1273,6 +1274,13 @@ const petWindowLayoutService = createPetWindowLayoutService({
   }
 });
 
+const rendererReadyService = createRendererReadyService({
+  trustedIpc,
+  getStartupStatus: () => startupStatus,
+  setRendererModelStatus: (status) => { startupRendererModelStatus = status; },
+  releaseStartup: (status) => releaseStartupToApplication(status)
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1324,6 +1332,7 @@ windowIntentService.registerIpc().start();
 codeWorkspaceService.registerIpc().start();
 expressionChatStateService.registerIpc().start();
 petWindowLayoutService.registerIpc().start();
+rendererReadyService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1899,12 +1908,6 @@ app.on("second-instance", (_event, argv) => {
   showPetWindow();
 });
 
-ipcMain.on("agent:renderer-ready", (_event, payload) => {
-  if (payload?.view !== "pet") return;
-  startupRendererModelStatus = payload?.modelStatus === "error" ? "error" : "ready";
-  if (startupStatus.phase === "renderer") releaseStartupToApplication(startupRendererModelStatus);
-});
-
 registerMemoryServiceIpc({
   ipcMain: trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -2010,7 +2013,8 @@ app.on("before-quit", (event) => {
       windowIntentService.dispose(),
       codeWorkspaceService.dispose(),
       expressionChatStateService.dispose(),
-      petWindowLayoutService.dispose()
+      petWindowLayoutService.dispose(),
+      rendererReadyService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();

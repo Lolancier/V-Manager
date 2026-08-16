@@ -36,6 +36,10 @@ import {
   PET_WINDOW_LAYOUT_LISTENER_CHANNELS,
   createPetWindowLayoutService
 } from "../electron/services/pet-window-layout-service.js";
+import {
+  RENDERER_READY_LISTENER_CHANNELS,
+  createRendererReadyService
+} from "../electron/services/renderer-ready-service.js";
 
 function ipcDouble() {
   const handlers = new Map();
@@ -579,4 +583,44 @@ test("pet window layout service preserves bounds, sender checks, and listeners",
   service.dispose();
   assert.deepEqual(ipc.listeners.get("agent:set-pet-mouse-passthrough"), []);
   assert.deepEqual(ipc.listeners.get("agent:show-pet-context-menu"), []);
+});
+
+test("renderer ready service filters pet payloads and cleans listeners", async () => {
+  const calls = [];
+  let startupStatus = { phase: "renderer" };
+  let rendererModelStatus = null;
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createRendererReadyService({
+    trustedIpc,
+    getStartupStatus: () => startupStatus,
+    setRendererModelStatus: (status) => { rendererModelStatus = status; },
+    releaseStartup: (status) => calls.push(["release", status])
+  });
+  service.registerIpc().start();
+  const listener = ipc.listeners.get("agent:renderer-ready").at(-1);
+
+  listener(trustedEvent(), { view: "settings", modelStatus: "ready" });
+  assert.equal(rendererModelStatus, null);
+  listener(trustedEvent(), { view: "pet", modelStatus: "error" });
+  assert.equal(rendererModelStatus, "error");
+  assert.deepEqual(calls, [["release", "error"]]);
+  startupStatus = { phase: "ready" };
+  listener(trustedEvent(), { view: "pet" });
+  assert.equal(rendererModelStatus, "ready");
+  assert.deepEqual(calls, [["release", "error"]]);
+  listener(trustedEvent("https://example.com"), { view: "pet" });
+  assert.deepEqual(service.snapshot(), {
+    started: true,
+    disposed: false,
+    handles: [],
+    listeners: ["agent:renderer-ready"],
+    petRendererReadyCount: 2,
+    lastModelStatus: "ready"
+  });
+  assert.deepEqual(RENDERER_READY_LISTENER_CHANNELS, ["agent:renderer-ready"]);
+  service.stop();
+  listener(trustedEvent(), { view: "pet" });
+  assert.equal(service.snapshot().petRendererReadyCount, 2);
+  service.dispose();
+  assert.deepEqual(ipc.listeners.get("agent:renderer-ready"), []);
 });
