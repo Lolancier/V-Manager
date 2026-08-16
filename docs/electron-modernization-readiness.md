@@ -182,7 +182,11 @@ Phase 5D 只拆分主进程 IPC，不改变 Electron 依赖版本，不拆分 re
 
 三个服务都接收注入的 `createTrustedIpcRegistrar` 结果，注册失败会回滚已注册 channel，并提供 `start/stop/dispose/snapshot`。它们不导入 Electron、不持有 BrowserWindow；`settings-service` 通过 `persona-card-service` 应用 active persona，避免 bootstrap 与保存配置使用两套语义。启动顺序为设置/人物卡服务先启动，Live2D 扫描完成后再挂载目录 watcher；退出时与日程、自主创作、模型会话等服务一起 dispose。
 
+Live2D 启动使用共享 `startPromise`，并发调用复用同一次扫描，只有刷新和 watcher 创建都成功后才进入 started 状态；扫描、配置保存或 watcher 创建失败会保留可重试的未启动状态。停止与释放通过 lifecycle generation 作废旧扫描，并在移除 IPC handler 前等待在途刷新/保存安全收敛；迟到提交不会更新模型与配置状态，也不会触发配置或模型广播。主进程退出装配将该 dispose Promise 纳入 shutdown 汇总并等待完成。
+
 本阶段迁移 15 个直接 `ipcMain.handle`。`electron/main.js` 从 2434 行降到 2243 行，直接 IPC handler 从 55 降到 40，直接 IPC listener 保持 3；架构审计新增 Phase 5D 服务文件、可信 IPC、生命周期、Electron-free 和 main 回流门禁。
+
+生命周期复查后运行 `npm run verify`：架构审计 0 critical、265/265 测试通过、Vite 生产构建通过。
 
 ## Electron 分阶段升级门禁
 

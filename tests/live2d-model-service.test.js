@@ -22,7 +22,7 @@ function trustedEvent(url = "http://localhost:5173") {
   return { senderFrame: mainFrame, sender: { mainFrame } };
 }
 
-function makeHarness(baseDir) {
+function makeHarness(baseDir, overrides = {}) {
   const ipc = ipcDouble();
   const trustedIpc = createTrustedIpcRegistrar(ipc.raw, {
     isDev: true, devServerUrl: "http://localhost:5173", rendererRoot: "dist"
@@ -40,9 +40,9 @@ function makeHarness(baseDir) {
     getConfig: () => config,
     setConfig: (next) => { config = next; },
     mergeConfig: (value) => ({ ...value, appearance: { ...value.appearance } }),
-    saveConfig: async (_baseDir, value) => { saved.push(value); },
-    broadcastConfigUpdated: (value) => broadcasts.push({ type: "config", value }),
-    broadcastModels: (models) => broadcasts.push({ type: "models", value: models }),
+    saveConfig: overrides.saveConfig || (async (_baseDir, value) => { saved.push(value); }),
+    broadcastConfigUpdated: overrides.broadcastConfigUpdated || ((value) => broadcasts.push({ type: "config", value })),
+    broadcastModels: overrides.broadcastModels || ((models) => broadcasts.push({ type: "models", value: models })),
     openPath: async (target) => { opened.push(target); return "opened"; },
     setTimeout: (callback) => {
       const id = ++timerId;
@@ -55,10 +55,21 @@ function makeHarness(baseDir) {
         const watcher = { target, options, callback, closed: false, close() { this.closed = true; } };
         watchers.push(watcher);
         return watcher;
-      }
+      },
+      ...(overrides.dependencies || {})
     }
   });
   return { broadcasts, config: () => config, ipc, opened, saved, service, timers, watchers };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 async function writeCustomModel(baseDir) {
@@ -126,6 +137,137 @@ test("Live2D service owns watcher and timer cleanup through start, stop, and dis
   assert.equal(harness.timers.size, 0);
   assert.equal(harness.service.snapshot().started, false);
   harness.service.dispose();
+  assert.equal((await harness.service.dispose()).disposed, true);
+  assert.equal(harness.ipc.handlers.size, 0);
+});
+
+test("Live2D service retries start after failure and shares concurrent starts", async () => {
+  const gate = deferred();
+  let mkdirCalls = 0;
+  const harness = makeHarness("base", {
+    dependencies: {
+      fs: {
+        mkdir: async () => {
+          mkdirCalls += 1;
+          await gate.promise;
+          if (mkdirCalls === 1) throw new Error("scan failed");
+        },
+        readdir: async () => []
+      }
+    }
+  });
+
+  const firstStart = harness.service.start({ broadcast: false });
+  const secondStart = harness.service.start({ broadcast: false });
+  assert.equal(firstStart, secondStart);
+  assert.equal(harness.service.snapshot().started, false);
+  assert.equal(harness.service.snapshot().refreshing, true);
+
+  gate.resolve();
+  await assert.rejects(firstStart, /scan failed/);
+  assert.equal(mkdirCalls, 1);
+  assert.equal(harness.watchers.length, 0);
+  assert.equal(harness.service.snapshot().started, false);
+  assert.deepEqual(harness.saved, []);
+  assert.deepEqual(harness.broadcasts, []);
+
+  await harness.service.start({ broadcast: false });
+  assert.equal(mkdirCalls, 2);
+  assert.equal(harness.watchers.length, 1);
+  assert.equal(harness.service.snapshot().started, true);
+});
+
+test("Live2D service retries start after watcher creation fails", async () => {
+  let watchCalls = 0;
+  const harness = makeHarness("base", {
+    dependencies: {
+      mkdir: async () => {},
+      readdir: async () => [],
+      watch() {
+        watchCalls += 1;
+        if (watchCalls === 1) throw new Error("watch failed");
+        const watcher = { close() {} };
+        harness.watchers.push(watcher);
+        return watcher;
+      }
+    }
+  });
+
+  await assert.rejects(harness.service.start({ broadcast: false }), /watch failed/);
+  assert.equal(harness.service.snapshot().started, false);
+  assert.equal(harness.service.snapshot().watching, false);
+
+  await harness.service.start({ broadcast: false });
+  assert.equal(harness.watchers.length, 1);
+  assert.equal(harness.service.snapshot().started, true);
+  assert.equal(harness.service.snapshot().watching, true);
+});
+
+test("Live2D dispose waits for an in-flight refresh and suppresses late state, saves, and broadcasts", async () => {
+  const scanGate = deferred();
+  const harness = makeHarness("base", {
+    dependencies: {
+      fs: {
+        mkdir: async () => scanGate.promise,
+        readdir: async () => []
+      }
+    }
+  });
+  harness.service.registerIpc();
+  const refresh = harness.service.refreshModels();
+  const disposing = harness.service.dispose();
+  let disposeSettled = false;
+  void disposing.then(() => { disposeSettled = true; });
+
+  assert.equal(harness.service.snapshot().disposed, true);
+  assert.equal(harness.service.snapshot().started, false);
+  assert.equal(disposeSettled, false);
+  assert.equal(harness.ipc.handlers.size, 3);
+
+  scanGate.resolve();
+  await assert.rejects(refresh, /Live2D 模型扫描已被停止/);
+  const finalSnapshot = await disposing;
+  assert.equal(disposeSettled, true);
+  assert.equal(finalSnapshot.disposed, true);
+  assert.equal(finalSnapshot.models, 3);
+  assert.equal(finalSnapshot.customModels, 0);
+  assert.equal(finalSnapshot.refreshing, false);
+  assert.equal(harness.config().appearance.live2dModel, "missing");
+  assert.deepEqual(harness.saved, []);
+  assert.deepEqual(harness.broadcasts, []);
+  assert.equal(harness.ipc.handlers.size, 0);
+});
+
+test("Live2D dispose waits for an in-flight config save and suppresses late config commits", async () => {
+  const saveGate = deferred();
+  const saveStarted = deferred();
+  const harness = makeHarness("base", {
+    saveConfig: async (_baseDir, value) => {
+      harness.saved.push(value);
+      saveStarted.resolve();
+      await saveGate.promise;
+    },
+    dependencies: {
+      mkdir: async () => {},
+      readdir: async () => []
+    }
+  });
+  harness.service.registerIpc();
+  const refresh = harness.service.refreshModels();
+  await saveStarted.promise;
+
+  const disposing = harness.service.dispose();
+  let disposeSettled = false;
+  void disposing.then(() => { disposeSettled = true; });
+  assert.equal(disposeSettled, false);
+  assert.equal(harness.config().appearance.live2dModel, "missing");
+
+  saveGate.resolve();
+  await assert.rejects(refresh, /Live2D 模型扫描已被停止/);
+  await disposing;
+  assert.equal(harness.saved.length, 1);
+  assert.equal(harness.config().appearance.live2dModel, "missing");
+  assert.deepEqual(harness.broadcasts, []);
   assert.equal(harness.ipc.handlers.size, 0);
 });
 

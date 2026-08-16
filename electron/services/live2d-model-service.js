@@ -42,8 +42,12 @@ export function createLive2DModelService(options) {
   let directoryWatcher = null;
   let scanTimer = null;
   let refreshPromise = null;
+  let startPromise = null;
+  let stopPromise = null;
+  let disposePromise = null;
   let started = false;
   let disposed = false;
+  let lifecycleGeneration = 0;
 
   const baseDir = () => options.getBaseDir();
   const modelsDirectory = () => path.join(baseDir(), "agent-data", "models");
@@ -97,42 +101,57 @@ export function createLive2DModelService(options) {
   }
 
   function refreshModels({ broadcast = true } = {}) {
-    if (refreshPromise) return refreshPromise;
-    refreshPromise = (async () => {
+    if (disposed) return Promise.reject(new Error("Live2D 模型服务已经释放。"));
+    if (stopPromise) return Promise.reject(new Error("Live2D 模型服务正在停止。"));
+    if (refreshPromise?.generation === lifecycleGeneration) return refreshPromise.promise;
+    const generation = lifecycleGeneration;
+    const isActive = () => !disposed && generation === lifecycleGeneration;
+    const ownPromise = (async () => {
       const root = modelsDirectory();
       await dependencies.fs.mkdir(root, { recursive: true });
       const customModels = (await Promise.all(
         (await findModelFiles(dependencies.fs, root)).map((file) => readCustomModelOption(root, file))
       )).filter(Boolean);
 
-      customModelRoots.clear();
-      for (const model of customModels) customModelRoots.set(model.id, model.root);
-      modelOptions = [
+      const nextModelOptions = [
         ...builtInLive2DModels,
         ...customModels.map(({ root: _root, ...model }) => model)
       ];
+      let nextConfig = null;
 
-      if (!modelOptions.some((model) => model.id === options.getConfig().appearance?.live2dModel)) {
-        const config = options.mergeConfig({
+      if (!nextModelOptions.some((model) => model.id === options.getConfig().appearance?.live2dModel)) {
+        nextConfig = options.mergeConfig({
           ...options.getConfig(),
           appearance: { ...options.getConfig().appearance, live2dModel: "qianqian" }
         });
-        options.setConfig(config);
-        await dependencies.saveConfig(baseDir(), config);
-        options.broadcastConfigUpdated(config);
       }
 
-      if (broadcast) options.broadcastModels(modelOptions);
-      return modelOptions;
-    })().finally(() => {
-      refreshPromise = null;
+      if (nextConfig && isActive()) await dependencies.saveConfig(baseDir(), nextConfig);
+      if (!isActive()) throw new Error("Live2D 模型扫描已被停止。");
+
+      customModelRoots.clear();
+      for (const model of customModels) customModelRoots.set(model.id, model.root);
+      modelOptions = nextModelOptions;
+      if (nextConfig) {
+        options.setConfig(nextConfig);
+        options.broadcastConfigUpdated(nextConfig);
+      }
+      if (broadcast) options.broadcastModels(nextModelOptions);
+      return nextModelOptions;
+    })();
+    refreshPromise = { promise: ownPromise, generation };
+    void ownPromise.then(() => {
+      if (refreshPromise?.promise === ownPromise) refreshPromise = null;
+    }, () => {
+      if (refreshPromise?.promise === ownPromise) refreshPromise = null;
     });
-    return refreshPromise;
+    return ownPromise;
   }
 
-  function startWatcher() {
-    if (directoryWatcher || disposed) return;
+  function startWatcher(generation) {
+    if (disposed || generation !== lifecycleGeneration || directoryWatcher) return;
     directoryWatcher = dependencies.watch(modelsDirectory(), { recursive: true }, () => {
+      if (disposed || !started || generation !== lifecycleGeneration) return;
       if (scanTimer) dependencies.clearTimeout(scanTimer);
       scanTimer = dependencies.setTimeout(() => {
         scanTimer = null;
@@ -166,31 +185,56 @@ export function createLive2DModelService(options) {
 
   function start(startOptions = {}) {
     if (disposed) return Promise.reject(new Error("Live2D 模型服务已经释放。"));
+    if (stopPromise) return Promise.reject(new Error("Live2D 模型服务正在停止。"));
     if (started) return Promise.resolve(snapshot());
-    started = true;
-    return (async () => {
+    if (startPromise?.generation === lifecycleGeneration) return startPromise.promise;
+    const generation = lifecycleGeneration;
+    const ownPromise = (async () => {
       if (startOptions.refresh !== false) await refreshModels({ broadcast: startOptions.broadcast !== false });
-      startWatcher();
+      if (disposed || generation !== lifecycleGeneration) throw new Error("Live2D 模型服务启动已被停止。");
+      startWatcher(generation);
+      started = true;
       return snapshot();
     })();
+    startPromise = { promise: ownPromise, generation };
+    void ownPromise.then(() => {
+      if (startPromise?.promise === ownPromise) startPromise = null;
+    }, () => {
+      if (startPromise?.promise === ownPromise) startPromise = null;
+    });
+    return ownPromise;
   }
 
   function stop() {
+    if (stopPromise) return stopPromise;
+    lifecycleGeneration += 1;
     started = false;
     if (scanTimer) dependencies.clearTimeout(scanTimer);
     scanTimer = null;
     directoryWatcher?.close();
     directoryWatcher = null;
-    return snapshot();
+    const convergence = refreshPromise
+      ? refreshPromise.promise.catch(() => {})
+      : Promise.resolve();
+    const ownPromise = convergence.then(() => {
+      if (stopPromise === ownPromise) stopPromise = null;
+      return snapshot();
+    });
+    stopPromise = ownPromise;
+    return ownPromise;
   }
 
   function dispose() {
-    if (disposed) return stop();
+    if (disposePromise) return disposePromise;
     disposed = true;
-    const result = stop();
-    for (const channel of registeredChannels) options.trustedIpc.removeHandler(channel);
-    registeredChannels.clear();
-    return result;
+    const ownPromise = stop().then(() => {
+      for (const channel of registeredChannels) options.trustedIpc.removeHandler(channel);
+      registeredChannels.clear();
+      return snapshot();
+    });
+    disposePromise = ownPromise;
+    void ownPromise.catch(() => {});
+    return ownPromise;
   }
 
   function snapshot() {
@@ -200,7 +244,8 @@ export function createLive2DModelService(options) {
       models: modelOptions.length,
       customModels: customModelRoots.size,
       watching: Boolean(directoryWatcher),
-      refreshing: Boolean(refreshPromise),
+      refreshing: Boolean(refreshPromise?.generation === lifecycleGeneration && refreshPromise),
+      stopping: Boolean(stopPromise),
       channels: [...registeredChannels]
     };
   }
