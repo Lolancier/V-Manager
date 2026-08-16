@@ -95,6 +95,32 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 - 游戏试玩：统一由 `game-playtest-service` 管理，每次任务创建隔离 renderer；调用方取消或应用退出会中止在途试玩，结束后销毁窗口并等待 Session 存储和缓存清理完成。
 - 下一阶段应为不同窗口建立独立渲染入口，至少先拆出 `settings`、`code` 和 `pet/live2d`，避免每个窗口加载完整 `App.tsx`。
 
+## Phase 5A：Electron 32 到 33 升级记录
+
+Phase 5A 只完成一个变量：Electron 依赖从 32.3.0 升级到精确锁定运行的 `33.4.11`。Electron 33 本身也不是最终停留目标，只是从已停止支持版本迈向受支持版本的过渡检查点；后续仍需按大版本继续升级。
+
+已验证运行时矩阵：
+
+| 项目 | 结果 |
+| --- | --- |
+| Electron | `33.4.11` |
+| Node | `20.18.3` |
+| Chromium | `130.0.6723.191` |
+| modules / ABI | `130` |
+
+新增 `npm run verify:electron` 启动真实 Electron 主进程，并在 `utilityProcess` 中加载 `sherpa-onnx-node`，同时校验主进程和 worker 的 Electron/Node/Chromium/modules 版本，以及 `OfflineTts` 与 `OfflineRecognizer` 导出。脚本使用 CommonJS，避免 Electron 脚本模式下 ESM 加载挂起；Windows 下的 crypto/GPU 警告不影响退出码，脚本已禁用硬件加速。
+
+Phase 5A 已完成的门禁：
+
+1. `npm run verify`：架构审计通过、249/249 测试通过、Vite 生产构建通过。
+2. `npm run verify:electron`：真实 Electron 33 运行时与原生语音模块加载检查通过。
+3. `npm run pack`：Electron 33 `--dir` 打包成功，输出 `win-unpacked`。
+4. 包布局检查：asar 内包含 `electron/main.js`、`electron/preload.cjs`、`electron/workers/utility-entry.js`、`dist/**`、`src-agent/**` 和 `package.json`；`app.asar.unpacked` 中 `sherpa-onnx-win-x64` 包含 `sherpa-onnx.node`、`onnxruntime.dll`、`sherpa-onnx-c-api.dll`、`sherpa-onnx-cxx-api.dll` 和 `onnxruntime_providers_shared.dll`。`package-lock.json` 按当前打包清单不进入应用 asar，安装完整性由本地安装与打包前依赖检查保障。
+
+仍需人工或发布前完成的检查：NSIS 干净安装、覆盖升级与卸载；透明窗口多屏/DPI/置顶/拖拽/鼠标穿透；Live2D 加密资源与中文路径；真实 TTS/STT 模型推理；游戏试玩与协议拦截；以及升级后的启动时间、renderer 数量和内存记录。
+
+本阶段明确不包含普通 IPC handler/listener 迁移，也不包含设置、代码、聊天等 renderer 独立入口拆分。这些工作应在 Electron 版本阶梯稳定后另开阶段执行。
+
 ## Electron 分阶段升级门禁
 
 Electron 官方建议一次迁移一个大版本并逐项检查 Breaking Changes。建议每个大版本单独提交，至少运行：
