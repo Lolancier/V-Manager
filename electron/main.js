@@ -52,6 +52,7 @@ import { createSystemResourceService } from "./services/system-resource-service.
 import { createCompanionLifeService } from "./services/companion-life-service.js";
 import { createWindowIntentService } from "./services/window-intent-service.js";
 import { createCodeWorkspaceService } from "./services/code-workspace-service.js";
+import { createExpressionChatStateService } from "./services/expression-chat-state-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -1230,6 +1231,15 @@ const codeWorkspaceService = createCodeWorkspaceService({
   }
 });
 
+const expressionChatStateService = createExpressionChatStateService({
+  trustedIpc,
+  persistentShapeExpressions,
+  getManualExpressions: () => activeManualExpressions,
+  setManualExpressions: (expressions) => { activeManualExpressions = expressions; },
+  broadcastActiveExpressions,
+  getChatState: () => chatState
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1279,6 +1289,7 @@ hostShellService.registerIpc().start();
 companionLifeService.registerIpc().start();
 windowIntentService.registerIpc().start();
 codeWorkspaceService.registerIpc().start();
+expressionChatStateService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1963,7 +1974,8 @@ app.on("before-quit", (event) => {
       hostShellService.dispose(),
       companionLifeService.dispose(),
       windowIntentService.dispose(),
-      codeWorkspaceService.dispose()
+      codeWorkspaceService.dispose(),
+      expressionChatStateService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();
@@ -1980,31 +1992,6 @@ app.on("before-quit", (event) => {
     speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
   ])
     .finally(() => app.quit());
-});
-
-ipcMain.handle("agent:trigger-expression", async (_event, expressionName) => {
-  const name = String(expressionName || "");
-  if (!name) return false;
-
-  if (activeManualExpressions.has(name)) {
-    activeManualExpressions.delete(name);
-  } else {
-    if (name === "expression20") activeManualExpressions.delete("expression21");
-    if (name === "expression21") activeManualExpressions.delete("expression20");
-    activeManualExpressions.add(name);
-  }
-  broadcastActiveExpressions();
-  return true;
-});
-
-ipcMain.handle("agent:clear-expressions", async () => {
-  activeManualExpressions.clear();
-  broadcastActiveExpressions();
-  return true;
-});
-
-ipcMain.handle("agent:get-chat-state", async () => {
-  return chatState;
 });
 
 ipcMain.handle("agent:get-pet-scale", async () => {

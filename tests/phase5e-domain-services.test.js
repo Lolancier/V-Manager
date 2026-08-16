@@ -27,6 +27,10 @@ import {
   CODE_WORKSPACE_HANDLE_CHANNELS,
   createCodeWorkspaceService
 } from "../electron/services/code-workspace-service.js";
+import {
+  EXPRESSION_CHAT_STATE_HANDLE_CHANNELS,
+  createExpressionChatStateService
+} from "../electron/services/expression-chat-state-service.js";
 
 function ipcDouble() {
   const handlers = new Map();
@@ -435,5 +439,44 @@ test("code workspace service preserves file and workspace argument shapes", asyn
     ["list", "D:/repo"]
   ]);
   assert.equal(service.snapshot().workspaceDir, "D:/repo");
+  service.dispose();
+});
+
+test("expression chat state service preserves toggle and state shapes", async () => {
+  let manualExpressions = new Set(["expression21"]);
+  const broadcasts = [];
+  const chatState = {
+    messages: [{ role: "user", content: "hello" }],
+    knowledge: [],
+    lastReplyMeta: null
+  };
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createExpressionChatStateService({
+    trustedIpc,
+    persistentShapeExpressions: ["expression20", "expression21"],
+    getManualExpressions: () => manualExpressions,
+    setManualExpressions: (next) => { manualExpressions = next; },
+    broadcastActiveExpressions: () => broadcasts.push([...manualExpressions]),
+    getChatState: () => chatState
+  });
+  service.registerIpc().start();
+
+  assert.equal(await ipc.handlers.get("agent:trigger-expression")(trustedEvent(), ""), false);
+  assert.equal(await ipc.handlers.get("agent:trigger-expression")(trustedEvent(), "expression20"), true);
+  assert.deepEqual([...manualExpressions], ["expression20"]);
+  assert.equal(await ipc.handlers.get("agent:trigger-expression")(trustedEvent(), "expression20"), true);
+  assert.deepEqual([...manualExpressions], []);
+  assert.equal(await ipc.handlers.get("agent:get-chat-state")(trustedEvent()), chatState);
+  assert.equal(await ipc.handlers.get("agent:clear-expressions")(trustedEvent()), true);
+  assert.deepEqual(broadcasts, [["expression20"], [], []]);
+  assert.throws(() => ipc.handlers.get("agent:get-chat-state")(trustedEvent("https://example.com")), /拒绝/);
+  assert.deepEqual(EXPRESSION_CHAT_STATE_HANDLE_CHANNELS, [
+    "agent:trigger-expression",
+    "agent:clear-expressions",
+    "agent:get-chat-state"
+  ]);
+  assert.deepEqual(service.snapshot().manualExpressions, []);
+  service.stop();
+  await assert.rejects(ipc.handlers.get("agent:get-chat-state")(trustedEvent()), /尚未启动/);
   service.dispose();
 });
