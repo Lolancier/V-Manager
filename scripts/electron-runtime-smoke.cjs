@@ -4,10 +4,10 @@ const { app, utilityProcess } = require("electron");
 app.disableHardwareAcceleration();
 
 const expectedVersions = Object.freeze({
-  electron: "33.4.11",
-  node: "20.18.3",
-  chrome: "130.0.6723.191",
-  modules: "130"
+  electron: "34.5.8",
+  node: "20.19.1",
+  chrome: "132.0.6834.210",
+  modules: "132"
 });
 
 function assertVersions(scope) {
