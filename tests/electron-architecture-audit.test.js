@@ -100,11 +100,43 @@ const phase5eServiceConfigs = [
     channels: ["agent:renderer-ready"]
   }
 ];
+const phase5eManifestNames = {
+  systemResource: "SYSTEM_RESOURCE_IPC_MANIFEST",
+  fileManager: "FILE_MANAGER_IPC_MANIFEST",
+  hostShell: "HOST_SHELL_IPC_MANIFEST",
+  companionLife: "COMPANION_LIFE_IPC_MANIFEST",
+  windowIntent: "WINDOW_INTENT_IPC_MANIFEST",
+  codeWorkspace: "CODE_WORKSPACE_IPC_MANIFEST",
+  expressionChatState: "EXPRESSION_CHAT_STATE_IPC_MANIFEST",
+  petWindowLayout: "PET_WINDOW_LAYOUT_IPC_MANIFEST",
+  rendererReady: "RENDERER_READY_IPC_MANIFEST"
+};
+for (const config of phase5eServiceConfigs) {
+  const listenerCount = config.key === "petWindowLayout" ? 2 : config.key === "rendererReady" ? 1 : 0;
+  config.manifestExport = phase5eManifestNames[config.key];
+  config.handles = listenerCount ? config.channels.slice(0, -listenerCount) : [...config.channels];
+  config.listeners = listenerCount ? config.channels.slice(-listenerCount) : [];
+}
 const phase5eServices = Object.fromEntries(phase5eServiceConfigs.map((config) => [config.key, `
 const channels = [${config.channels.map((channel) => JSON.stringify(channel)).join(", ")}];
+export const ${config.manifestExport} = {
+  handles: [${config.handles.map((channel) => JSON.stringify(channel)).join(", ")}],
+  listeners: [${config.listeners.map((channel) => JSON.stringify(channel)).join(", ")}]
+};
 export function ${config.factory}(options) {
   return createTrustedDomainIpcService({ trustedIpc: options.trustedIpc });
 }`]));
+const phase5eContracts = phase5eServiceConfigs.map((config) => ({
+  key: config.key,
+  manifest: { handles: [...config.handles], listeners: [...config.listeners] },
+  registrations: { handles: [...config.handles], listeners: [...config.listeners] }
+}));
+const phase5ePreload = phase5eServiceConfigs
+  .flatMap((config) => [
+    ...config.handles.map((channel) => `ipcRenderer.invoke(${JSON.stringify(channel)}, payload);`),
+    ...config.listeners.map((channel) => `ipcRenderer.send(${JSON.stringify(channel)}, payload);`)
+  ])
+  .join("\n");
 const phase5eServicesMain = phase5eServiceConfigs.map((config) => `
 const ${config.variable} = ${config.factory}({ trustedIpc });
 ${config.variable}.registerIpc().start();
@@ -190,7 +222,9 @@ function audit(main = baseMain, packageJson = basePackage, ragSources = baseRagS
     personaCardService: basePersonaCardService,
     live2DModelService: baseLive2DModelService,
     trustedDomainIpcService: overrides.trustedDomainIpcService || trustedDomainIpcService,
-    phase5eServices: overrides.phase5eServices || phase5eServices
+    phase5eServices: overrides.phase5eServices || phase5eServices,
+    preload: overrides.preload ?? phase5ePreload,
+    phase5eContracts: overrides.phase5eContracts ?? phase5eContracts
   });
 }
 
@@ -340,9 +374,88 @@ test("architecture audit accepts the complete Phase 5E migration", () => {
   assert.equal(result.metrics.phase5eServicesConfigured, 9);
   assert.equal(result.metrics.phase5eServicesOwningIpc, 9);
   assert.equal(result.metrics.phase5eOwnedChannels, 43);
+  assert.equal(result.metrics.phase5eManifestsExported, 9);
+  assert.equal(result.metrics.phase5eManifestsMatchingOwnership, 9);
+  assert.equal(result.metrics.phase5eActualRegistrations, 43);
+  assert.equal(result.metrics.phase5eContractsCaptured, 9);
   assert.equal(result.metrics.directMainIpcHandlers, 0);
   assert.equal(result.metrics.directMainIpcListeners, 0);
   assert.deepEqual(result.critical, []);
+});
+
+test("architecture audit rejects channel strings without real registrar registrations", () => {
+  const contracts = phase5eContracts.map((contract) => (
+    contract.key === "systemResource"
+      ? { ...contract, registrations: { handles: [], listeners: [] } }
+      : contract
+  ));
+  const result = audit(baseMain, basePackage, baseRagSources, { phase5eContracts: contracts });
+
+  assert.equal(result.metrics.phase5eServicesOwningIpc, 8);
+  assert.equal(result.metrics.phase5eActualRegistrations, 37);
+  assert.ok(result.metrics.phase5eMissingRegistrations.includes("agent:get-auto-launch"));
+  assert.match(result.critical.join("\n"), /实际注册 channel 为 37\/43/);
+  assert.match(result.critical.join("\n"), /存在未注册 channel/);
+});
+
+test("architecture audit rejects duplicate and extra real registrar registrations", () => {
+  const duplicateContracts = phase5eContracts.map((contract) => (
+    contract.key === "fileManager"
+      ? {
+          ...contract,
+          registrations: {
+            ...contract.registrations,
+            handles: [...contract.registrations.handles, contract.registrations.handles[0]]
+          }
+        }
+      : contract
+  ));
+  const duplicateResult = audit(baseMain, basePackage, baseRagSources, {
+    phase5eContracts: duplicateContracts
+  });
+  assert.deepEqual(duplicateResult.metrics.phase5eDuplicateRegistrations, ["agent:get-file-manager-snapshot"]);
+  assert.match(duplicateResult.critical.join("\n"), /重复注册 channel/);
+
+  const extraContracts = phase5eContracts.map((contract) => (
+    contract.key === "hostShell"
+      ? {
+          ...contract,
+          registrations: {
+            ...contract.registrations,
+            handles: [...contract.registrations.handles, "agent:not-owned"]
+          }
+        }
+      : contract
+  ));
+  const extraResult = audit(baseMain, basePackage, baseRagSources, {
+    phase5eContracts: extraContracts
+  });
+  assert.deepEqual(extraResult.metrics.phase5eExtraRegistrations, ["agent:not-owned"]);
+  assert.match(extraResult.critical.join("\n"), /ownership 基准之外的注册 channel/);
+});
+
+test("architecture audit cross-validates preload inbound channels and main assembly", () => {
+  const missingPreload = phase5ePreload.replace('ipcRenderer.invoke("agent:pet-touch", payload);\n', "");
+  const missingResult = audit(baseMain, basePackage, baseRagSources, { preload: missingPreload });
+  assert.deepEqual(missingResult.metrics.phase5eChannelsMissingFromPreload, ["agent:pet-touch"]);
+  assert.match(missingResult.critical.join("\n"), /缺少 preload 入站 channel/);
+
+  const duplicatePreload = `${phase5ePreload}\nipcRenderer.invoke("agent:pet-touch", payload);`;
+  const duplicateResult = audit(baseMain, basePackage, baseRagSources, { preload: duplicatePreload });
+  assert.deepEqual(duplicateResult.metrics.phase5eDuplicatePreloadChannels, ["agent:pet-touch"]);
+  assert.match(duplicateResult.critical.join("\n"), /preload 入站 channel 重复/);
+
+  const duplicatedMain = `${baseMain}\nsystemResourceService.registerIpc().start();`;
+  const assemblyResult = audit(duplicatedMain);
+  assert.deepEqual(assemblyResult.metrics.phase5eMainAssemblyDuplicates, ["systemResource"]);
+  assert.match(assemblyResult.critical.join("\n"), /main 装配缺失或重复/);
+});
+
+test("architecture audit rejects Phase 5E domain state returning to main", () => {
+  const result = audit(`${baseMain}\nlet chatState = { messages: [] };\nlet proactiveTimer = null;`);
+
+  assert.equal(result.metrics.phase5eDomainStateInMain, 2);
+  assert.match(result.critical.join("\n"), /主进程仍持有 2 处 Phase 5E 领域状态/);
 });
 
 test("architecture audit requires complete Phase 5D service files and lifecycle", () => {

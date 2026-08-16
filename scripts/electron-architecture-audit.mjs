@@ -119,6 +119,26 @@ export function extractBrowserWindowArguments(main) {
   return results;
 }
 
+export function extractPreloadInboundChannels(preload) {
+  const channels = [];
+  for (const match of (preload || "").matchAll(/ipcRenderer\.(?:invoke|send)\s*\(\s*(["'])(.*?)\1/g)) {
+    channels.push(match[2]);
+  }
+  return channels.sort();
+}
+
+function sameChannelSet(actual = [], expected = []) {
+  const actualChannels = [...new Set(actual)].sort();
+  const expectedChannels = [...expected].sort();
+  return actualChannels.length === expectedChannels.length
+    && actualChannels.every((channel, index) => channel === expectedChannels[index]);
+}
+
+function duplicateChannels(channels = []) {
+  const seen = new Set();
+  return [...new Set(channels.filter((channel) => seen.has(channel) || !seen.add(channel)))];
+}
+
 function globMatchesPath(pattern, target) {
   let expression = "";
   for (let index = 0; index < pattern.length; index += 1) {
@@ -187,7 +207,9 @@ export function analyzeElectronArchitecture({
   personaCardService = "",
   live2DModelService = "",
   trustedDomainIpcService = "",
-  phase5eServices = {}
+  phase5eServices = {},
+  preload = "",
+  phase5eContracts = []
 }) {
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
@@ -214,6 +236,7 @@ export function analyzeElectronArchitecture({
   const directMainPhase4cIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase4cChannels})["']`, "g"));
   const phase5dChannels = "get-bootstrap|get-startup-status|save-config|test-astrbot|get-relationship-profile|reset-relationship-profile|list-persona-cards|create-persona-card|update-persona-card|activate-persona-card|archive-persona-card|restore-persona-card|get-live2d-models|refresh-live2d-models|open-live2d-models-folder";
   const directMainPhase5dIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase5dChannels})["']`, "g"));
+  const phase5eDomainStateDeclaration = /\b(?:let|const)\s+(?:chatState|startupDiagnostics|currentLifeState|proactiveTimer|proactiveTickRunning|ownerInteractionRevision|ownerInteractionUpdateRunning|agentTaskRunning|workspaceDir|petWindowScale|positionLocked|bubbleContentSize|activeManualExpressions|activeInterestExpressions|interestBubbleWokenForTask|lastModelStatus|cachedAutoLaunchEnabled)\s*=/g;
   const hasPhase5dServiceLifecycle = (source) => /\bfunction\s+start\s*\(/.test(source)
     && /\bfunction\s+stop\s*\(/.test(source)
     && /\bfunction\s+dispose\s*\(/.test(source)
@@ -224,67 +247,103 @@ export function analyzeElectronArchitecture({
       file: "electron/services/system-resource-service.js",
       factory: "createSystemResourceService",
       variable: "systemResourceService",
-      channels: ["agent:get-auto-launch", "agent:set-auto-launch", "agent:search-files", "agent:get-app-registry", "agent:refresh-app-registry", "agent:get-system-resource-snapshot"]
+      manifestExport: "SYSTEM_RESOURCE_IPC_MANIFEST",
+      handles: ["agent:get-auto-launch", "agent:set-auto-launch", "agent:search-files", "agent:get-app-registry", "agent:refresh-app-registry", "agent:get-system-resource-snapshot"],
+      listeners: []
     },
     {
       key: "fileManager",
       file: "electron/services/file-manager-service.js",
       factory: "createFileManagerService",
       variable: "fileManagerService",
-      channels: ["agent:get-file-manager-snapshot", "agent:scan-managed-directory", "agent:preview-file-organization", "agent:execute-file-organization", "agent:list-file-operations", "agent:undo-file-operation"]
+      manifestExport: "FILE_MANAGER_IPC_MANIFEST",
+      handles: ["agent:get-file-manager-snapshot", "agent:scan-managed-directory", "agent:preview-file-organization", "agent:execute-file-organization", "agent:list-file-operations", "agent:undo-file-operation"],
+      listeners: []
     },
     {
       key: "hostShell",
       file: "electron/services/host-shell-service.js",
       factory: "createHostShellService",
       variable: "hostShellService",
-      channels: ["agent:open-external", "agent:get-data-path", "agent:open-data-folder", "agent:open-persona-folder"]
+      manifestExport: "HOST_SHELL_IPC_MANIFEST",
+      handles: ["agent:open-external", "agent:get-data-path", "agent:open-data-folder", "agent:open-persona-folder"],
+      listeners: []
     },
     {
       key: "companionLife",
       file: "electron/services/companion-life-service.js",
       factory: "createCompanionLifeService",
       variable: "companionLifeService",
-      channels: ["agent:pet-touch", "agent:get-life-state", "agent:pause-proactive-today", "agent:reset-work-session"]
+      manifestExport: "COMPANION_LIFE_IPC_MANIFEST",
+      handles: ["agent:pet-touch", "agent:get-life-state", "agent:pause-proactive-today", "agent:reset-work-session"],
+      listeners: []
     },
     {
       key: "windowIntent",
       file: "electron/services/window-intent-service.js",
       factory: "createWindowIntentService",
       variable: "windowIntentService",
-      channels: ["agent:open-settings-window", "agent:open-composer-window", "agent:open-chat-window", "agent:open-code-window", "agent:open-scale-window", "agent:open-expression-window"]
+      manifestExport: "WINDOW_INTENT_IPC_MANIFEST",
+      handles: ["agent:open-settings-window", "agent:open-composer-window", "agent:open-chat-window", "agent:open-code-window", "agent:open-scale-window", "agent:open-expression-window"],
+      listeners: []
     },
     {
       key: "codeWorkspace",
       file: "electron/services/code-workspace-service.js",
       factory: "createCodeWorkspaceService",
       variable: "codeWorkspaceService",
-      channels: ["agent:get-code-workspace", "agent:read-code-file", "agent:write-code-file", "agent:select-code-workspace"]
+      manifestExport: "CODE_WORKSPACE_IPC_MANIFEST",
+      handles: ["agent:get-code-workspace", "agent:read-code-file", "agent:write-code-file", "agent:select-code-workspace"],
+      listeners: []
     },
     {
       key: "expressionChatState",
       file: "electron/services/expression-chat-state-service.js",
       factory: "createExpressionChatStateService",
       variable: "expressionChatStateService",
-      channels: ["agent:trigger-expression", "agent:clear-expressions", "agent:get-chat-state"]
+      manifestExport: "EXPRESSION_CHAT_STATE_IPC_MANIFEST",
+      handles: ["agent:trigger-expression", "agent:clear-expressions", "agent:get-chat-state"],
+      listeners: []
     },
     {
       key: "petWindowLayout",
       file: "electron/services/pet-window-layout-service.js",
       factory: "createPetWindowLayoutService",
       variable: "petWindowLayoutService",
-      channels: ["agent:get-pet-scale", "agent:get-position-lock", "agent:set-position-lock", "agent:get-pet-window-bounds", "agent:set-pet-window-position", "agent:update-pet-window-layout", "agent:update-bubble-window-size", "agent:set-pet-mouse-passthrough", "agent:show-pet-context-menu"]
+      manifestExport: "PET_WINDOW_LAYOUT_IPC_MANIFEST",
+      handles: ["agent:get-pet-scale", "agent:get-position-lock", "agent:set-position-lock", "agent:get-pet-window-bounds", "agent:set-pet-window-position", "agent:update-pet-window-layout", "agent:update-bubble-window-size"],
+      listeners: ["agent:set-pet-mouse-passthrough", "agent:show-pet-context-menu"]
     },
     {
       key: "rendererReady",
       file: "electron/services/renderer-ready-service.js",
       factory: "createRendererReadyService",
       variable: "rendererReadyService",
-      channels: ["agent:renderer-ready"]
+      manifestExport: "RENDERER_READY_IPC_MANIFEST",
+      handles: [],
+      listeners: ["agent:renderer-ready"]
     }
   ];
+  const contractRecords = new Map((phase5eContracts || []).map((contract) => [contract.key, contract]));
+  const preloadInboundChannels = extractPreloadInboundChannels(preload);
+  const phase5eExpectedChannels = phase5eServiceSpecs.flatMap((spec) => [...spec.handles, ...spec.listeners]);
+  const phase5eActualChannels = (phase5eContracts || []).flatMap((contract) => [
+    ...(contract.registrations?.handles || []),
+    ...(contract.registrations?.listeners || [])
+  ]);
   const phase5eRecords = phase5eServiceSpecs.map((spec) => {
     const source = phase5eServices[spec.key] || "";
+    const contract = contractRecords.get(spec.key) || {};
+    const manifest = contract.manifest || {};
+    const registrations = contract.registrations || {};
+    const manifestDuplicates = [
+      ...duplicateChannels(manifest.handles || []),
+      ...duplicateChannels(manifest.listeners || [])
+    ];
+    const manifestMatches = sameChannelSet(manifest.handles, spec.handles)
+      && sameChannelSet(manifest.listeners, spec.listeners);
+    const registrationsMatch = sameChannelSet(registrations.handles, spec.handles)
+      && sameChannelSet(registrations.listeners, spec.listeners);
     return {
       ...spec,
       source,
@@ -292,16 +351,34 @@ export function analyzeElectronArchitecture({
       configured: new RegExp(`const ${spec.variable} = ${spec.factory}\\s*\\(`).test(main)
         && new RegExp(`${spec.variable}\\.registerIpc\\(\\)\\.start\\(\\)`).test(main)
         && new RegExp(`${spec.variable}\\.dispose\\(\\)`).test(main),
-      ownsIpc: spec.channels.every((channel) => source.includes(channel)) && /trustedIpc:\s*options\.trustedIpc/.test(source),
+      manifestExported: new RegExp(`export\\s+const\\s+${spec.manifestExport}\\s*=`).test(source),
+      manifestMatches,
+      manifestDuplicates,
+      registrationsMatch,
+      duplicateRegistrations: [
+        ...duplicateChannels(registrations.handles || []),
+        ...duplicateChannels(registrations.listeners || [])
+      ],
+      ownsIpc: manifestMatches && registrationsMatch && /trustedIpc:\s*options\.trustedIpc/.test(source),
       lifecycleDelegated: /createTrustedDomainIpcService\s*\(/.test(source)
+      ,
+      mainAssemblyDuplicates: [
+        countMatches(main, new RegExp(`const ${spec.variable} = ${spec.factory}\\s*\\(`, "g")),
+        countMatches(main, new RegExp(`${spec.variable}\\.registerIpc\\(\\)\\.start\\(\\)`, "g")),
+        countMatches(main, new RegExp(`${spec.variable}\\.dispose\\(\\)`, "g"))
+      ].some((count) => count !== 1)
     };
   });
-  const phase5eChannels = phase5eServiceSpecs
-    .flatMap((spec) => spec.channels)
+  const phase5ePreloadInboundChannels = preloadInboundChannels.filter((channel) => phase5eExpectedChannels.includes(channel));
+  const phase5eDuplicatePreloadChannels = duplicateChannels(phase5ePreloadInboundChannels);
+  const phase5eMainAssemblyDuplicates = phase5eRecords.filter((record) => record.mainAssemblyDuplicates).map((record) => record.key);
+  const phase5eManifestDuplicates = phase5eRecords.flatMap((record) => record.manifestDuplicates);
+  const phase5eChannels = phase5eExpectedChannels
     .map((channel) => channel.replace(/^agent:/, ""))
     .join("|");
   const directMainPhase5eIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase5eChannels})["']`, "g"));
   const phase5eServiceSources = phase5eRecords.map((record) => record.source).join("\n");
+  const phase5eDomainStateInMain = countMatches(maskedMain, phase5eDomainStateDeclaration);
   const phase5eTrustedDomainRuntimeOwnsLifecycleAndRollback = /\bfunction\s+registerIpc\s*\(/.test(trustedDomainIpcService)
     && /\bfunction\s+start\s*\(/.test(trustedDomainIpcService)
     && /\bfunction\s+stop\s*\(/.test(trustedDomainIpcService)
@@ -371,10 +448,23 @@ export function analyzeElectronArchitecture({
     phase5eServicesOwningIpc: phase5eRecords.filter((record) => record.ownsIpc).length,
     phase5eServicesWithDelegatedLifecycle: phase5eRecords.filter((record) => record.lifecycleDelegated).length,
     phase5eServicesElectronFree: !/from\s+["']electron["']|require\s*\(\s*["']electron["']/.test(phase5eServiceSources),
+    phase5eDomainStateInMain,
     phase5eTrustedDomainRuntimePresent: normalizedElectronFiles.includes("electron/services/trusted-domain-ipc-service.js"),
     phase5eTrustedDomainRuntimeOwnsLifecycleAndRollback,
-    phase5eOwnedChannels: phase5eRecords.filter((record) => record.present && record.ownsIpc).reduce((total, record) => total + record.channels.length, 0),
-    phase5eExpectedChannels: phase5eServiceSpecs.reduce((total, spec) => total + spec.channels.length, 0),
+    phase5eOwnedChannels: phase5eRecords.filter((record) => record.present && record.ownsIpc).reduce((total, record) => total + record.handles.length + record.listeners.length, 0),
+    phase5eExpectedChannels: phase5eExpectedChannels.length,
+    phase5eContractsCaptured: contractRecords.size,
+    phase5eManifestsExported: phase5eRecords.filter((record) => record.manifestExported).length,
+    phase5eManifestsMatchingOwnership: phase5eRecords.filter((record) => record.manifestMatches).length,
+    phase5eActualRegistrations: new Set(phase5eActualChannels).size,
+    phase5eMissingRegistrations: [...new Set(phase5eExpectedChannels.filter((channel) => !phase5eActualChannels.includes(channel)))].sort(),
+    phase5eDuplicateRegistrations: duplicateChannels(phase5eActualChannels),
+    phase5eExtraRegistrations: [...new Set(phase5eActualChannels.filter((channel) => !phase5eExpectedChannels.includes(channel)))].sort(),
+    phase5eChannelsMissingFromPreload: phase5eExpectedChannels.filter((channel) => !preloadInboundChannels.includes(channel)).sort(),
+    phase5eDuplicatePreloadChannels,
+    phase5eMainAssemblyDuplicates,
+    phase5eManifestDuplicates,
+    preloadInboundChannels,
     directMainPhase5eIpc,
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
@@ -410,7 +500,35 @@ export function analyzeElectronArchitecture({
     critical.push("Phase 5E 服务文件、main 装配、可信 IPC 或共享生命周期/回滚未完整迁移");
   }
   if (!metrics.phase5eServicesElectronFree) critical.push("Phase 5E 服务不得直接导入 Electron");
+  if (metrics.phase5eDomainStateInMain) critical.push(`主进程仍持有 ${metrics.phase5eDomainStateInMain} 处 Phase 5E 领域状态`);
   if (metrics.phase5eOwnedChannels !== metrics.phase5eExpectedChannels) critical.push(`Phase 5E channel 所有权为 ${metrics.phase5eOwnedChannels}/${metrics.phase5eExpectedChannels}`);
+  if (metrics.phase5eManifestsExported !== metrics.phase5eServiceCount
+    || metrics.phase5eManifestsMatchingOwnership !== metrics.phase5eServiceCount
+    || metrics.phase5eContractsCaptured !== metrics.phase5eServiceCount
+    || metrics.phase5eManifestDuplicates.length) {
+    critical.push("Phase 5E 服务 manifest 缺失或与 ownership 基准不一致");
+  }
+  if (metrics.phase5eActualRegistrations !== metrics.phase5eExpectedChannels) {
+    critical.push(`Phase 5E 实际注册 channel 为 ${metrics.phase5eActualRegistrations}/${metrics.phase5eExpectedChannels}`);
+  }
+  if (metrics.phase5eDuplicateRegistrations.length) {
+    critical.push(`Phase 5E 存在重复注册 channel：${metrics.phase5eDuplicateRegistrations.join(", ")}`);
+  }
+  if (metrics.phase5eExtraRegistrations.length) {
+    critical.push(`Phase 5E 存在 ownership 基准之外的注册 channel：${metrics.phase5eExtraRegistrations.join(", ")}`);
+  }
+  if (metrics.phase5eMissingRegistrations.length) {
+    critical.push(`Phase 5E 存在未注册 channel：${metrics.phase5eMissingRegistrations.join(", ")}`);
+  }
+  if (metrics.phase5eChannelsMissingFromPreload.length) {
+    critical.push(`Phase 5E ownership 基准缺少 preload 入站 channel：${metrics.phase5eChannelsMissingFromPreload.join(", ")}`);
+  }
+  if (metrics.phase5eDuplicatePreloadChannels.length) {
+    critical.push(`Phase 5E preload 入站 channel 重复：${metrics.phase5eDuplicatePreloadChannels.join(", ")}`);
+  }
+  if (metrics.phase5eMainAssemblyDuplicates.length) {
+    critical.push(`Phase 5E main 装配缺失或重复：${metrics.phase5eMainAssemblyDuplicates.join(", ")}`);
+  }
   if (metrics.directMainIpcHandlers) critical.push(`主进程仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
   if (metrics.directMainIpcListeners) critical.push(`主进程仍直接注册 ${metrics.directMainIpcListeners} 个 IPC listener`);
   if (metrics.directMainPhase5eIpc) critical.push(`主进程回流了 ${metrics.directMainPhase5eIpc} 处 Phase 5E IPC`);

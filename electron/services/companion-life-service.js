@@ -1,10 +1,17 @@
+import {
+  getFollowUpCandidate,
+  markCommitmentFollowedUp
+} from "../../src-agent/companion-memory.js";
 import { loadConfig } from "../../src-agent/core.js";
 import {
+  evaluateLifeTick,
   loadLifeState,
   pauseProactiveForToday,
-  resetWorkSession
+  recordOwnerInteraction,
+  resetWorkSession,
+  saveLifeState
 } from "../../src-agent/proactive-engine.js";
-import { recordPetTouch } from "../../src-agent/relationship-engine.js";
+import { loadRelationshipProfile, recordPetTouch } from "../../src-agent/relationship-engine.js";
 import { createTrustedDomainIpcService } from "./trusted-domain-ipc-service.js";
 
 export const COMPANION_LIFE_HANDLE_CHANNELS = Object.freeze([
@@ -13,38 +20,187 @@ export const COMPANION_LIFE_HANDLE_CHANNELS = Object.freeze([
   "agent:pause-proactive-today",
   "agent:reset-work-session"
 ]);
+export const COMPANION_LIFE_IPC_MANIFEST = Object.freeze({
+  handles: COMPANION_LIFE_HANDLE_CHANNELS,
+  listeners: []
+});
 
 const defaultDependencies = {
+  evaluateLifeTick,
+  getFollowUpCandidate,
   loadConfig,
   loadLifeState,
+  loadRelationshipProfile,
+  markCommitmentFollowedUp,
   pauseProactiveForToday,
+  recordOwnerInteraction,
   recordPetTouch,
-  resetWorkSession
+  resetWorkSession,
+  saveLifeState
 };
 
 export function createCompanionLifeService(options) {
   const dependencies = { ...defaultDependencies, ...(options.dependencies || {}) };
   let lastPetTouchAt = 0;
+  let lifeState = null;
+  let proactiveTimer = null;
+  let tickPromise = null;
+  let tickRunning = false;
+  let ownerInteractionPromise = null;
+  let ownerInteractionRevision = 0;
+  let ownerInteractionUpdateRunning = false;
+  let engineStarted = false;
+  let generation = 0;
+  let activePetTouchPromise = null;
+  let serviceDisposed = false;
 
-  async function getLifeState() {
-    const current = options.getLifeState() ?? await dependencies.loadLifeState(options.getBaseDir());
-    options.setLifeState(current);
-    return current;
+  function ownerInteractionIdleSeconds(state = lifeState, now = new Date()) {
+    const lastInteraction = Date.parse(state?.lastInteractionAt || state?.updatedAt || "");
+    return Number.isFinite(lastInteraction)
+      ? Math.max(0, (now.getTime() - lastInteraction) / 1000)
+      : 0;
   }
 
-  async function updateLifeState(operation) {
-    const state = await operation(options.getBaseDir());
-    options.setLifeState(state);
+  function commitLifeState(state) {
+    lifeState = state;
     options.onLifeStateUpdated?.(state);
     return state;
   }
 
-  async function petTouch() {
-    await options.markOwnerInteraction();
+  async function getLifeState() {
+    const stateGeneration = generation;
+    const current = lifeState ?? await dependencies.loadLifeState(options.getBaseDir());
+    if (stateGeneration !== generation) return lifeState;
+    return commitLifeState(current);
+  }
+
+  async function updateLifeState(operation) {
+    const stateGeneration = generation;
+    const state = await operation(options.getBaseDir());
+    if (stateGeneration !== generation) return lifeState;
+    return commitLifeState(state);
+  }
+
+  async function markOwnerInteraction(now = new Date()) {
+    if (serviceDisposed) return lifeState;
+    const interactionGeneration = generation;
+    ownerInteractionRevision += 1;
+    ownerInteractionUpdateRunning = true;
+    ownerInteractionPromise = (async () => {
+      try {
+        const state = await dependencies.recordOwnerInteraction(options.getBaseDir(), lifeState, now);
+        if (interactionGeneration !== generation) return lifeState;
+        return commitLifeState(state);
+      } finally {
+        if (interactionGeneration === generation) ownerInteractionUpdateRunning = false;
+      }
+    })();
+    return ownerInteractionPromise;
+  }
+
+  async function tick() {
+    if (tickRunning || ownerInteractionUpdateRunning || !options.isHostReady?.()) return;
+    const tickGeneration = generation;
+    tickRunning = true;
+    tickPromise = (async () => {
+      try {
+        const interactionRevisionAtStart = ownerInteractionRevision;
+        const now = new Date();
+        const previous = lifeState ?? await dependencies.loadLifeState(options.getBaseDir(), now);
+        await options.reconcileCompletedReminders?.();
+        const companion = await dependencies.getFollowUpCandidate(options.getBaseDir(), now);
+        const relationship = await dependencies.loadRelationshipProfile(options.getBaseDir());
+        const config = options.mergeConfig(await dependencies.loadConfig(options.getBaseDir()));
+        const interestSettings = options.getInterestSettings(config);
+        const result = dependencies.evaluateLifeTick(previous, config.proactive, {
+          now,
+          interactionIdleSeconds: ownerInteractionIdleSeconds(previous, now),
+          interruptionScore: companion.store.feedback.interruptionScore,
+          followUpCandidate: companion.candidate,
+          relationshipStage: relationship.affection.stage,
+          autonomousLifeEnabled: interestSettings.enabled && interestSettings.autonomousLifeEnabled
+        });
+        if (tickGeneration !== generation || interactionRevisionAtStart !== ownerInteractionRevision) return;
+        commitLifeState(await dependencies.saveLifeState(options.getBaseDir(), result.state));
+        for (const event of result.events) {
+          publishProactiveEvent(event);
+          if (event.kind === "commitment_followup" && companion.candidate) {
+            await dependencies.markCommitmentFollowedUp(options.getBaseDir(), companion.candidate.id, now);
+          }
+        }
+      } catch (error) {
+        options.onError?.("life tick", error);
+      } finally {
+        tickRunning = false;
+        if (tickGeneration === generation) tickPromise = null;
+      }
+    })();
+    return tickPromise;
+  }
+
+  function startEngine() {
+    if (!engineStarted || proactiveTimer || !options.isHostReady?.()) return;
+    tickPromise = tick();
+    proactiveTimer = options.setInterval?.(() => {
+      tickPromise = tick();
+    }, options.tickIntervalMs || 30_000);
+  }
+
+  function stopEngine() {
+    generation += 1;
+    if (proactiveTimer) options.clearInterval?.(proactiveTimer);
+    proactiveTimer = null;
+    const pendingWork = [tickPromise, ownerInteractionPromise, activePetTouchPromise].filter(Boolean);
+    tickPromise = null;
+    ownerInteractionPromise = null;
+    activePetTouchPromise = null;
+    tickRunning = false;
+    ownerInteractionUpdateRunning = false;
+    return pendingWork.length ? Promise.allSettled(pendingWork).then(() => undefined) : Promise.resolve();
+  }
+
+  async function restoreLifeState() {
+    if (serviceDisposed) return lifeState;
+    const restoreGeneration = generation;
+    lifeState = await dependencies.loadLifeState(options.getBaseDir());
+    if (restoreGeneration !== generation) return lifeState;
+    return lifeState;
+  }
+
+  function publishProactiveEvent(event) {
+    const state = options.chatStateStore.appendProactiveEvent(event);
+    options.onProactiveEvent?.(event, state);
+    return state;
+  }
+
+  function publishInterestInteraction(message, mood = "thinking", userText = "") {
+    const content = typeof message === "object" && message ? message.message : message;
+    const state = options.chatStateStore.appendLocalInteraction({
+      userText,
+      message: content,
+      lastReplyMeta: {
+        responseMode: "local_tool",
+        usedKnowledge: false,
+        knowledgeCount: 0,
+        knowledgeFiles: [],
+        fallbackReason: "",
+        model: "local-interest-state",
+        detectedMood: mood,
+        sourceLabel: "私密空间创作状态"
+      }
+    });
+    options.onInterestInteraction?.(content, mood);
+    return state;
+  }
+
+  async function runPetTouch() {
+    const touchGeneration = generation;
+    await markOwnerInteraction();
+    if (touchGeneration !== generation) return { ok: false, busy: true };
     if (options.isAutonomousBusy()) {
       const reply = await options.getCaughtInterestReply();
-      options.publishInterestInteraction(reply, "surprised");
-      const chatState = options.getChatState();
+      publishInterestInteraction(reply, "surprised");
+      const chatState = options.chatStateStore.getState();
       return {
         ok: true,
         busy: true,
@@ -54,7 +210,7 @@ export function createCompanionLifeService(options) {
       };
     }
 
-    const chatState = options.getChatState();
+    const chatState = options.chatStateStore.getState();
     if (/^(生成中|正在执行|正在查询)/.test(chatState.lastReplyMeta?.sourceLabel || "")) {
       return { ok: false, busy: true };
     }
@@ -70,28 +226,18 @@ export function createCompanionLifeService(options) {
     const reaction = await dependencies.recordPetTouch(options.getBaseDir(), {
       grow: config.relationship?.enabled !== false
     });
-    const replacePreviousTouch = chatState.lastReplyMeta?.sourceLabel === "触碰互动"
-      && chatState.messages.at(-1)?.role === "assistant";
-    const nextMessages = replacePreviousTouch
-      ? [...chatState.messages.slice(0, -1), { role: "assistant", content: reaction.reply }]
-      : [...chatState.messages, { role: "assistant", content: reaction.reply }];
-    const nextChatState = {
-      ...chatState,
-      messages: nextMessages,
-      lastReplyMeta: {
-        responseMode: "local_tool",
-        usedKnowledge: false,
-        knowledgeCount: 0,
-        knowledgeFiles: [],
-        fallbackReason: "",
-        model: "local-relationship-engine",
-        detectedMood: reaction.mood,
-        relationship: reaction.profile,
-        sourceLabel: "触碰互动"
-      }
-    };
-    options.setChatState(nextChatState);
-    options.broadcastChatState();
+    if (touchGeneration !== generation) return { ok: false, busy: true };
+    options.chatStateStore.appendAssistant(reaction.reply, {
+      responseMode: "local_tool",
+      usedKnowledge: false,
+      knowledgeCount: 0,
+      knowledgeFiles: [],
+      fallbackReason: "",
+      model: "local-relationship-engine",
+      detectedMood: reaction.mood,
+      relationship: reaction.profile,
+      sourceLabel: "触碰互动"
+    }, { replaceLastTouch: true });
     options.broadcastRelationshipProfile(reaction.profile);
     options.broadcastMoodUpdate({
       phase: "final",
@@ -102,7 +248,18 @@ export function createCompanionLifeService(options) {
     return { ok: true, ...reaction };
   }
 
-  return createTrustedDomainIpcService({
+  async function petTouch() {
+    if (activePetTouchPromise) return activePetTouchPromise;
+    const touchPromise = runPetTouch();
+    activePetTouchPromise = touchPromise;
+    try {
+      return await touchPromise;
+    } finally {
+      if (activePetTouchPromise === touchPromise) activePetTouchPromise = null;
+    }
+  }
+
+  const runtime = createTrustedDomainIpcService({
     serviceName: "陪伴生活服务",
     trustedIpc: options.trustedIpc,
     handlers: [
@@ -111,6 +268,48 @@ export function createCompanionLifeService(options) {
       { channel: "agent:pause-proactive-today", listener: () => updateLifeState(dependencies.pauseProactiveForToday) },
       { channel: "agent:reset-work-session", listener: () => updateLifeState(dependencies.resetWorkSession) }
     ],
-    snapshot: () => ({ petTouchCooldownActive: options.now() - lastPetTouchAt < 1400 })
+    snapshot: () => ({
+      ownerInteractionRunning: ownerInteractionUpdateRunning,
+      petTouchCooldownActive: options.now() - lastPetTouchAt < 1400,
+      proactiveTickRunning: tickRunning,
+      lifeStatePresent: lifeState !== null
+    })
   });
+
+  async function start() {
+    if (serviceDisposed) throw new Error("陪伴生活服务已经释放。");
+    const snapshot = runtime.start();
+    engineStarted = true;
+    startEngine();
+    return snapshot;
+  }
+
+  async function stop() {
+    await stopEngine();
+    engineStarted = false;
+    return runtime.stop();
+  }
+
+  async function dispose() {
+    serviceDisposed = true;
+    await stopEngine();
+    engineStarted = false;
+    return runtime.dispose();
+  }
+
+  return {
+    ...runtime,
+    dispose,
+    getLifeState: () => lifeState,
+    isProactiveBusy: () => tickRunning || ownerInteractionUpdateRunning,
+    markOwnerInteraction,
+    ownerInteractionIdleSeconds,
+    petTouch,
+    publishInterestInteraction,
+    publishProactiveEvent,
+    restoreLifeState,
+    start,
+    startEngine,
+    stop
+  };
 }

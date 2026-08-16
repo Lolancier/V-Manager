@@ -16,6 +16,10 @@ export const FILE_MANAGER_HANDLE_CHANNELS = Object.freeze([
   "agent:list-file-operations",
   "agent:undo-file-operation"
 ]);
+export const FILE_MANAGER_IPC_MANIFEST = Object.freeze({
+  handles: FILE_MANAGER_HANDLE_CHANNELS,
+  listeners: []
+});
 
 const defaultDependencies = {
   createOrganizationPreview,

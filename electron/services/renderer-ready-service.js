@@ -3,6 +3,10 @@ import { createTrustedDomainIpcService } from "./trusted-domain-ipc-service.js";
 export const RENDERER_READY_LISTENER_CHANNELS = Object.freeze([
   "agent:renderer-ready"
 ]);
+export const RENDERER_READY_IPC_MANIFEST = Object.freeze({
+  handles: [],
+  listeners: RENDERER_READY_LISTENER_CHANNELS
+});
 
 export function createRendererReadyService(options) {
   let petRendererReadyCount = 0;
@@ -13,11 +17,10 @@ export function createRendererReadyService(options) {
     const modelStatus = payload?.modelStatus === "error" ? "error" : "ready";
     petRendererReadyCount += 1;
     lastModelStatus = modelStatus;
-    options.setRendererModelStatus(modelStatus);
     if (options.getStartupStatus().phase === "renderer") options.releaseStartup(modelStatus);
   }
 
-  return createTrustedDomainIpcService({
+  const runtime = createTrustedDomainIpcService({
     serviceName: "渲染就绪服务",
     trustedIpc: options.trustedIpc,
     listeners: RENDERER_READY_LISTENER_CHANNELS.map((channel) => ({
@@ -29,4 +32,9 @@ export function createRendererReadyService(options) {
       lastModelStatus
     })
   });
+
+  return {
+    ...runtime,
+    getModelStatus: () => lastModelStatus
+  };
 }

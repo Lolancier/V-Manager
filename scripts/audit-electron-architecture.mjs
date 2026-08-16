@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { analyzeElectronArchitecture } from "./electron-architecture-audit.mjs";
+import { collectPhase5eIpcRegistrations } from "./phase5e-ipc-registration-collector.mjs";
 
 const root = process.cwd();
 const read = (relativePath) => fs.readFile(path.join(root, relativePath), "utf8");
@@ -15,8 +16,9 @@ async function listFiles(directory) {
   return result;
 }
 
-const [main, electronFiles, packageJson, indexHtml, memoryService, scheduleService, modelConversationService, autonomousCreationService, settingsService, personaCardService, live2DModelService, core, appExecutor, toolExecutor] = await Promise.all([
+const [main, preload, electronFiles, packageJson, indexHtml, memoryService, scheduleService, modelConversationService, autonomousCreationService, settingsService, personaCardService, live2DModelService, core, appExecutor, toolExecutor] = await Promise.all([
   read("electron/main.js"),
+  read("electron/preload.cjs"),
   listFiles("electron"),
   read("package.json").then(JSON.parse),
   read("index.html"),
@@ -67,7 +69,9 @@ const result = analyzeElectronArchitecture({
   personaCardService,
   live2DModelService,
   trustedDomainIpcService,
-  phase5eServices
+  phase5eServices,
+  preload,
+  phase5eContracts: await collectPhase5eIpcRegistrations()
 });
 console.log(JSON.stringify(result, null, 2));
 if (result.critical.length) process.exitCode = 1;

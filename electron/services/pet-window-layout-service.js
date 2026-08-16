@@ -14,8 +14,16 @@ export const PET_WINDOW_LAYOUT_LISTENER_CHANNELS = Object.freeze([
   "agent:set-pet-mouse-passthrough",
   "agent:show-pet-context-menu"
 ]);
+export const PET_WINDOW_LAYOUT_IPC_MANIFEST = Object.freeze({
+  handles: PET_WINDOW_LAYOUT_HANDLE_CHANNELS,
+  listeners: PET_WINDOW_LAYOUT_LISTENER_CHANNELS
+});
 
 export function createPetWindowLayoutService(options) {
+  let petScale = options.initialPetScale ?? 1;
+  let positionLocked = options.initialPositionLocked ?? false;
+  let bubbleContentSize = options.initialBubbleContentSize || { width: 330, height: 180 };
+  let interestBubbleWokenForTask = "";
   const operations = new Map([
     ...PET_WINDOW_LAYOUT_HANDLE_CHANNELS.map((channel) => [channel, 0]),
     ...PET_WINDOW_LAYOUT_LISTENER_CHANNELS.map((channel) => [channel, 0])
@@ -27,10 +35,15 @@ export function createPetWindowLayoutService(options) {
 
   async function setPositionLock(_event, locked) {
     const nextLocked = Boolean(locked);
-    options.setPositionLocked(nextLocked);
+    setPositionLocked(nextLocked);
     options.broadcastPositionLock(nextLocked);
     record("agent:set-position-lock");
     return nextLocked;
+  }
+
+  function setPositionLocked(locked) {
+    positionLocked = Boolean(locked);
+    return positionLocked;
   }
 
   async function getPetWindowBounds() {
@@ -51,7 +64,7 @@ export function createPetWindowLayoutService(options) {
   async function updatePetWindowLayout(_event, { scale }) {
     if (!options.isPetWindowActive()) return null;
     const nextScale = Math.max(0.8, Math.min(1.5, Number(scale) || 1));
-    options.setPetScale(nextScale);
+    petScale = nextScale;
     const nextSize = options.getPetWindowSize(nextScale);
     const currentBounds = options.getPetWindowBounds();
     const workArea = options.getWorkAreaForBounds(currentBounds);
@@ -78,7 +91,7 @@ export function createPetWindowLayoutService(options) {
       width: Math.max(280, Math.min(680, Math.ceil(Number(size?.width) || 330))),
       height: Math.max(100, Math.ceil(Number(size?.height) || 180))
     };
-    options.setBubbleContentSize(contentSize);
+    bubbleContentSize = contentSize;
     options.updateBubbleWindowLayout();
     record("agent:update-bubble-window-size");
     return options.getBubbleWindowBounds();
@@ -96,12 +109,25 @@ export function createPetWindowLayoutService(options) {
     record("agent:show-pet-context-menu");
   }
 
-  return createTrustedDomainIpcService({
+  function shouldWakeInterestBubble(payload) {
+    const taskKey = payload?.status === "working"
+      ? `${payload.startedAt || ""}:${payload.activityId || ""}`
+      : "";
+    if (!taskKey) {
+      interestBubbleWokenForTask = "";
+      return false;
+    }
+    if (taskKey === interestBubbleWokenForTask || payload.type !== "mini_game") return false;
+    interestBubbleWokenForTask = taskKey;
+    return true;
+  }
+
+  const runtime = createTrustedDomainIpcService({
     serviceName: "宠物窗口布局服务",
     trustedIpc: options.trustedIpc,
     handlers: [
-      { channel: "agent:get-pet-scale", listener: () => options.getPetScale() },
-      { channel: "agent:get-position-lock", listener: () => options.getPositionLocked() },
+      { channel: "agent:get-pet-scale", listener: () => petScale },
+      { channel: "agent:get-position-lock", listener: () => positionLocked },
       { channel: "agent:set-position-lock", listener: setPositionLock },
       { channel: "agent:get-pet-window-bounds", listener: getPetWindowBounds },
       { channel: "agent:set-pet-window-position", listener: setPetWindowPosition },
@@ -114,8 +140,19 @@ export function createPetWindowLayoutService(options) {
     ],
     snapshot: () => ({
       operations: Object.fromEntries(operations),
-      petScale: options.getPetScale(),
-      positionLocked: options.getPositionLocked()
+      bubbleContentSize: { ...bubbleContentSize },
+      interestBubbleWokenForTask,
+      petScale,
+      positionLocked
     })
   });
+
+  return {
+    ...runtime,
+    getBubbleContentSize: () => ({ ...bubbleContentSize }),
+    getPetScale: () => petScale,
+    getPositionLocked: () => positionLocked,
+    setPositionLocked,
+    shouldWakeInterestBubble
+  };
 }

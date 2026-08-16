@@ -6,7 +6,6 @@ import {
   clearConversationHistory,
   defaultConfig,
   ensureDataFiles,
-  getActiveWorkspaceDir,
   getRagStatus,
   loadConfig,
   saveConfig,
@@ -14,27 +13,15 @@ import {
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { loadRelationshipProfile } from "../src-agent/relationship-engine.js";
-import { resolveAgentRoute } from "../src-agent/router.js";
-import { classifyFastReaction } from "../src-agent/fast-reaction.js";
 import {
   clearCompanionMemory,
-  detectProactiveFeedback,
-  getFollowUpCandidate,
   loadCompanionMemory,
-  markCommitmentFollowedUp,
-  resolveCommitmentsByText,
-  recordProactiveFeedback
+  resolveCommitmentsByText
 } from "../src-agent/companion-memory.js";
-import {
-  evaluateLifeTick,
-  loadLifeState,
-  recordOwnerInteraction,
-  saveLifeState
-} from "../src-agent/proactive-engine.js";
 import { normalizeInterestConfig } from "../src-agent/interest-sandbox.js";
 import { runGamePlaytest } from "../src-agent/game-playtest.js";
 import { createIsolatedGameDriver } from "./game-playtest-runtime.js";
-import { getMemoryDatabaseStats, getRecentConversationMessages } from "../src-agent/local-database.js";
+import { getMemoryDatabaseStats } from "../src-agent/local-database.js";
 import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
 import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
@@ -49,6 +36,8 @@ import { createSettingsService } from "./services/settings-service.js";
 import { createFileManagerService } from "./services/file-manager-service.js";
 import { createHostShellService } from "./services/host-shell-service.js";
 import { createSystemResourceService } from "./services/system-resource-service.js";
+import { createChatStateStore } from "./services/chat-state-store.js";
+import { createChatFlowService } from "./services/chat-flow-service.js";
 import { createCompanionLifeService } from "./services/companion-life-service.js";
 import { createWindowIntentService } from "./services/window-intent-service.js";
 import { createCodeWorkspaceService } from "./services/code-workspace-service.js";
@@ -93,6 +82,10 @@ const trustedIpc = createTrustedIpcRegistrar(ipcMain, {
   devServerUrl,
   rendererRoot: path.join(app.getAppPath(), "dist")
 });
+const chatStateStore = createChatStateStore({
+  onStateUpdated: (state) => broadcastChatState(state)
+});
+chatStateStore.start();
 const scheduleService = createScheduleService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -103,7 +96,7 @@ const scheduleService = createScheduleService({
   isPackaged: () => app.isPackaged,
   resolveCommitmentsByText,
   loadCompanionMemory,
-  publishProactiveEvent: (event) => publishProactiveEvent(event),
+  publishProactiveEvent: (event) => companionLifeService.publishProactiveEvent(event),
   broadcastSchedules: (items) => {
     for (const win of [settingsWindow, chatWindow]) {
       if (win && !win.isDestroyed()) win.webContents.send("agent:schedules-updated", items);
@@ -121,29 +114,16 @@ let scaleWindow = null;
 let composerWindow = null;
 let chatWindow = null;
 let bubbleWindow = null;
-let bubbleContentSize = { width: 330, height: 180 };
 let expressionWindow = null;
 let codeWindow = null;
 let tray = null;
 let currentAppearanceTheme = "light";
 let currentAgentConfig = defaultConfig;
-let petWindowScale = 1;
-let positionLocked = false;
 let petHiddenForChat = false;
 let petManuallyHidden = false;
-let activeManualExpressions = new Set();
-let activeInterestExpressions = new Set();
-const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
 let cursorTrackingTimer = null;
-let proactiveTimer = null;
-let currentLifeState = null;
-let proactiveTickRunning = false;
-let ownerInteractionRevision = 0;
-let ownerInteractionUpdateRunning = false;
-let agentTaskRunning = false;
 const cursorDeliveryState = new Map();
 let startupReleaseTimer = null;
-let startupRendererModelStatus = null;
 let shutdownCleanupDone = false;
 let gptSovitsShutdownStarted = false;
 let phase4cShutdownPromise = Promise.resolve();
@@ -202,41 +182,6 @@ function getModelContentType(filePath) {
   return "application/octet-stream";
 }
 
-let chatState = {
-  messages: [],
-  knowledge: [],
-  lastReplyMeta: null
-};
-let startupDiagnostics = { rag: null, deepseek: "unchecked", historyRestored: 0 };
-
-async function initializeStartupConversation(baseDir) {
-  const runtimePersona = await personaCardService.applyRuntimePersona(currentAgentConfig);
-  const activeCard = runtimePersona.card;
-  currentAgentConfig = runtimePersona.config;
-  const history = await getRecentConversationMessages(baseDir, { limit: 40, personaCardId: activeCard?.id || "" });
-  const memory = await loadCompanionMemory(baseDir);
-  const greeting = await modelConversationService.generateGreeting(currentAgentConfig, {
-    history,
-    memory,
-    userAddress: activeCard?.payload?.userAddress || "你"
-  });
-  chatState = {
-    messages: [...history.map(({ role, content }) => ({ role, content })), { role: "assistant", content: greeting.reply }].slice(-80),
-    knowledge: [],
-    lastReplyMeta: {
-      responseMode: greeting.mode === "model" ? "deepseek_chat" : "fallback_local",
-      usedKnowledge: false,
-      knowledgeCount: 0,
-      knowledgeFiles: [],
-      fallbackReason: greeting.mode === "model" ? "" : "启动问候使用人物卡本地回退",
-      model: greeting.mode === "model" ? currentAgentConfig.deepseek.chatModel || currentAgentConfig.deepseek.model : "local-persona-greeting",
-      sourceLabel: "本次见面"
-    }
-  };
-  startupDiagnostics.deepseek = greeting.mode === "model" ? "ready" : currentAgentConfig.deepseek?.apiKey ? "unavailable" : "not_configured";
-  startupDiagnostics.historyRestored = history.length;
-}
-
 function getTitleBarOverlay(theme = currentAppearanceTheme, forceDark = false) {
   const dark = forceDark || theme === "dark";
   return {
@@ -256,55 +201,7 @@ function updateTitleBarOverlays() {
   }
 }
 
-function getCodeWorkspaceStatePath() {
-  return path.join(app.getPath("userData"), "agent-data", "code-workspace.json");
-}
-
-async function restoreCodeWorkspace() {
-  try {
-    const saved = JSON.parse(await fs.readFile(getCodeWorkspaceStatePath(), "utf-8"));
-    const stat = await fs.stat(saved.path);
-    if (stat.isDirectory()) setActiveWorkspaceDir(saved.path);
-  } catch {
-    // First launch or a removed folder: keep the process working directory.
-  }
-}
-
-async function persistCodeWorkspace() {
-  await fs.mkdir(path.dirname(getCodeWorkspaceStatePath()), { recursive: true });
-  await fs.writeFile(
-    getCodeWorkspaceStatePath(),
-    JSON.stringify({ path: getActiveWorkspaceDir() }, null, 2),
-    "utf-8"
-  );
-}
-
-function getReplySourceLabel(meta) {
-  if (!meta) {
-    return "尚未发送对话";
-  }
-
-  if (meta.responseMode === "deepseek_chat") {
-    return meta.model ? `快速对话 · ${meta.model}` : "快速对话";
-  }
-
-  if (meta.responseMode === "deepseek" || meta.responseMode === "deepseek_tool") {
-    if (meta.codeMode) {
-      const labels = { auto: "自动", read: "问答", plan: "规划", agent: "Agent", review: "审查" };
-      const toolSuffix = meta.toolUseCount ? ` · ${meta.toolUseCount} 次工具` : "";
-      return `Vivi Code · ${labels[meta.codeMode] || meta.codeMode}${toolSuffix}`;
-    }
-    return meta.model ? `DeepSeek · ${meta.model}` : "DeepSeek";
-  }
-
-  if (meta.responseMode === "local_tool") {
-    return "本地检测";
-  }
-
-  return "本地回退";
-}
-
-function getPetWindowSize(scale = petWindowScale) {
+function getPetWindowSize(scale = petWindowLayoutService.getPetScale()) {
   const normalized = Math.max(0.8, Math.min(1.5, scale));
   return {
     width: Math.round(640 * normalized),
@@ -355,16 +252,17 @@ function getComposerWindowBounds() {
 function getBubbleWindowBounds() {
   if (!petWindow || petWindow.isDestroyed()) {
     return {
-      width: bubbleContentSize.width,
-      height: bubbleContentSize.height,
+      width: petWindowLayoutService.getBubbleContentSize().width,
+      height: petWindowLayoutService.getBubbleContentSize().height,
       placement: "right"
     };
   }
 
   const bounds = petWindow.getBounds();
   const workArea = screen.getDisplayMatching(bounds).workArea;
-  const width = Math.min(bubbleContentSize.width, workArea.width - 24);
-  const height = Math.min(bubbleContentSize.height, workArea.height - 24);
+  const contentSize = petWindowLayoutService.getBubbleContentSize();
+  const width = Math.min(contentSize.width, workArea.width - 24);
+  const height = Math.min(contentSize.height, workArea.height - 24);
   const petCenterX = bounds.x + bounds.width / 2;
   const placement = petCenterX < workArea.x + workArea.width / 2 ? "right" : "left";
   const desiredX = placement === "right"
@@ -814,7 +712,7 @@ function createExpressionWindow() {
   loadView(win, "expressions");
 
   win.webContents.on("did-finish-load", () => {
-    win.webContents.send("agent:expressions-updated", getActiveExpressions());
+    win.webContents.send("agent:expressions-updated", expressionChatStateService.getActiveExpressions());
   });
 
   attachWindowLifecycle(win, {
@@ -842,7 +740,7 @@ function openExpressionWindow() {
   const win = ensureExpressionWindow();
   win.show();
   win.focus();
-  win.webContents.send("agent:expressions-updated", getActiveExpressions());
+  win.webContents.send("agent:expressions-updated", expressionChatStateService.getActiveExpressions());
   return true;
 }
 
@@ -859,7 +757,7 @@ function openScaleWindow() {
   win.show();
   win.moveTop();
   win.focus();
-  win.webContents.send("agent:pet-scale-updated", petWindowScale);
+  win.webContents.send("agent:pet-scale-updated", petWindowLayoutService.getPetScale());
   return true;
 }
 
@@ -870,7 +768,7 @@ function openComposerWindow() {
   win.show();
   win.moveTop();
   win.focus();
-  win.webContents.send("agent:chat-state-updated", chatState);
+  win.webContents.send("agent:chat-state-updated", chatStateStore.getState());
   return true;
 }
 
@@ -882,7 +780,7 @@ function openChatWindow() {
   win.show();
   win.moveTop();
   win.focus();
-  win.webContents.send("agent:chat-state-updated", chatState);
+  win.webContents.send("agent:chat-state-updated", chatStateStore.getState());
   return true;
 }
 
@@ -962,19 +860,6 @@ function getLoginItemOptions(openAtLogin) {
   };
 }
 
-function isAutoLaunchEnabled() {
-  return app.getLoginItemSettings(getLoginItemOptions(false)).openAtLogin;
-}
-
-function setAutoLaunchEnabled(enabled) {
-  app.setLoginItemSettings(getLoginItemOptions(Boolean(enabled)));
-  const applied = isAutoLaunchEnabled();
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send("agent:auto-launch-updated", applied);
-  }
-  return applied;
-}
-
 function createTrayIcon() {
   const size = 32;
   const bitmap = Buffer.alloc(size * size * 4);
@@ -1025,8 +910,8 @@ function buildTrayContextMenu() {
     {
       label: "开机自动启动",
       type: "checkbox",
-      checked: isAutoLaunchEnabled(),
-      click: (menuItem) => setAutoLaunchEnabled(menuItem.checked)
+      checked: systemResourceService.isAutoLaunchEnabled(),
+      click: (menuItem) => systemResourceService.setAutoLaunchEnabled(menuItem.checked)
     },
     { type: "separator" },
     {
@@ -1057,7 +942,7 @@ function openCodeWindow() {
   const win = ensureCodeWindow();
   win.show();
   win.focus();
-  win.webContents.send("agent:chat-state-updated", chatState);
+  win.webContents.send("agent:chat-state-updated", chatStateStore.getState());
   return true;
 }
 
@@ -1081,12 +966,12 @@ function broadcastPetScale(scale) {
   scaleWindow?.webContents.send("agent:pet-scale-updated", scale);
 }
 
-function broadcastChatState() {
-  petWindow?.webContents.send("agent:chat-state-updated", chatState);
-  composerWindow?.webContents.send("agent:chat-state-updated", chatState);
-  chatWindow?.webContents.send("agent:chat-state-updated", chatState);
-  bubbleWindow?.webContents.send("agent:chat-state-updated", chatState);
-  codeWindow?.webContents.send("agent:chat-state-updated", chatState);
+function broadcastChatState(state = chatStateStore.getState()) {
+  petWindow?.webContents.send("agent:chat-state-updated", state);
+  composerWindow?.webContents.send("agent:chat-state-updated", state);
+  chatWindow?.webContents.send("agent:chat-state-updated", state);
+  bubbleWindow?.webContents.send("agent:chat-state-updated", state);
+  codeWindow?.webContents.send("agent:chat-state-updated", state);
 }
 
 function broadcastMoodUpdate(payload) {
@@ -1149,7 +1034,7 @@ const settingsService = createSettingsService({
   },
   getLive2DModels: () => live2dModelService.getModels(),
   getStartupStatus: () => startupStatus,
-  getStartupDiagnostics: () => startupDiagnostics,
+  getStartupDiagnostics: () => chatFlowService.getStartupDiagnostics(),
   beforeConfigApplied: (previousConfig, nextConfig) => {
     if (previousConfig.appearance?.mouseFollow !== nextConfig.appearance?.mouseFollow) {
       cursorDeliveryState.clear();
@@ -1173,8 +1058,13 @@ const settingsService = createSettingsService({
 const systemResourceService = createSystemResourceService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
-  isAutoLaunchEnabled,
-  setAutoLaunchEnabled
+  readLoginItemSettings: () => app.getLoginItemSettings(getLoginItemOptions(false)),
+  writeLoginItemSettings: (enabled) => app.setLoginItemSettings(getLoginItemOptions(Boolean(enabled))),
+  broadcastAutoLaunchUpdate: (enabled) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send("agent:auto-launch-updated", enabled);
+    }
+  }
 });
 
 const fileManagerService = createFileManagerService({
@@ -1193,19 +1083,24 @@ const hostShellService = createHostShellService({
 const companionLifeService = createCompanionLifeService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
-  getLifeState: () => currentLifeState,
-  setLifeState: (state) => { currentLifeState = state; },
   onLifeStateUpdated: (state) => broadcastLifeState(state),
-  markOwnerInteraction,
+  isHostReady: () => app.isReady(),
+  reconcileCompletedReminders: () => scheduleService.reconcileCompletedReminderCommitments(),
+  getInterestSettings: (config) => currentInterestSettings(config),
   isAutonomousBusy: () => autonomousCreationService.isBusy(),
   getCaughtInterestReply: () => autonomousCreationService.caughtReply(),
-  publishInterestInteraction: (reply, mood) => publishInterestInteraction(reply, mood),
-  getChatState: () => chatState,
-  setChatState: (state) => { chatState = state; },
-  broadcastChatState,
+  chatStateStore,
+  onProactiveEvent: (event) => publishProactivePresentation(event),
+  onInterestInteraction: (message, mood) => {
+    wakeBubbleWindow();
+    broadcastMoodUpdate({ phase: "final", mood, reply: message });
+  },
   broadcastRelationshipProfile,
   broadcastMoodUpdate,
   mergeConfig: mergeAgentConfig,
+  setInterval: (listener, intervalMs) => setInterval(listener, intervalMs),
+  clearInterval: (timer) => clearInterval(timer),
+  onError: (scope, error) => console.error(`[proactive] ${scope} failed:`, error),
   now: () => Date.now()
 });
 
@@ -1221,9 +1116,9 @@ const windowIntentService = createWindowIntentService({
 
 const codeWorkspaceService = createCodeWorkspaceService({
   trustedIpc,
-  getActiveWorkspaceDir,
-  setActiveWorkspaceDir,
-  persistCodeWorkspace,
+  getBaseDir: () => app.getPath("userData"),
+  initialWorkspaceDir: process.cwd(),
+  onWorkspaceChanged: (workspaceDir) => setActiveWorkspaceDir(workspaceDir),
   showOpenDialog: (options) => {
     const owner = codeWindow && !codeWindow.isDestroyed() ? codeWindow : undefined;
     return owner
@@ -1234,19 +1129,12 @@ const codeWorkspaceService = createCodeWorkspaceService({
 
 const expressionChatStateService = createExpressionChatStateService({
   trustedIpc,
-  persistentShapeExpressions,
-  getManualExpressions: () => activeManualExpressions,
-  setManualExpressions: (expressions) => { activeManualExpressions = expressions; },
-  broadcastActiveExpressions,
-  getChatState: () => chatState
+  chatStateStore,
+  broadcastActiveExpressions: (expressions) => broadcastActiveExpressions(expressions)
 });
 
 const petWindowLayoutService = createPetWindowLayoutService({
   trustedIpc,
-  getPetScale: () => petWindowScale,
-  setPetScale: (scale) => { petWindowScale = scale; },
-  getPositionLocked: () => positionLocked,
-  setPositionLocked: (locked) => { positionLocked = locked; },
   broadcastPositionLock: (locked) => petWindow?.webContents.send("agent:position-lock-updated", locked),
   isPetWindowActive: () => Boolean(petWindow && !petWindow.isDestroyed()),
   getPetWindowBounds: () => petWindow.getBounds(),
@@ -1258,7 +1146,6 @@ const petWindowLayoutService = createPetWindowLayoutService({
   broadcastPetScale,
   isBubbleWindowActive: () => Boolean(bubbleWindow && !bubbleWindow.isDestroyed()),
   isSenderBubbleWindow: (event) => event.sender === bubbleWindow?.webContents,
-  setBubbleContentSize: (size) => { bubbleContentSize = size; },
   getBubbleWindowBounds,
   isSenderPetWindow: (event) => event.sender === petWindow?.webContents,
   isHoverAutoHideEnabled: () => currentAgentConfig.appearance?.hoverAutoHide === true,
@@ -1277,7 +1164,6 @@ const petWindowLayoutService = createPetWindowLayoutService({
 const rendererReadyService = createRendererReadyService({
   trustedIpc,
   getStartupStatus: () => startupStatus,
-  setRendererModelStatus: (status) => { startupRendererModelStatus = status; },
   releaseStartup: (status) => releaseStartupToApplication(status)
 });
 
@@ -1304,22 +1190,38 @@ const autonomousCreationService = createAutonomousCreationService({
   gamePlaytestService,
   modelService: modelConversationService,
   isHostReady: () => app.isReady(),
-  isOwnerTaskRunning: () => agentTaskRunning,
+  isOwnerTaskRunning: () => chatFlowService.isOwnerTaskRunning(),
   isScheduleBusy: () => scheduleService.snapshot().tickRunning,
-  isProactiveBusy: () => proactiveTickRunning,
-  ownerInteractionIdleSeconds: () => ownerInteractionIdleSeconds(currentLifeState),
-  publishInteraction: (message, mood, userText) => publishInterestInteraction(message, mood, userText),
-  publishProactiveEvent: (event) => publishProactiveEvent(event),
+  isProactiveBusy: () => companionLifeService.isProactiveBusy(),
+  ownerInteractionIdleSeconds: () => companionLifeService.ownerInteractionIdleSeconds(),
+  publishInteraction: (message, mood, userText) => companionLifeService.publishInterestInteraction(message, mood, userText),
+  publishProactiveEvent: (event) => companionLifeService.publishProactiveEvent(event),
   broadcastMood: (payload) => broadcastMoodUpdate(payload),
   broadcastState: (payload) => broadcastInterestState(payload),
-  setExpression: (type) => setInterestExpression(type),
+  setExpression: (type) => expressionChatStateService.setInterestExpression(type),
   resolveLocationLabel: (location) => resolveLocationLabel(location),
   openPath: (target) => shell.openPath(target),
   isFile: (target) => fs.stat(target).then((stat) => stat.isFile()).catch(() => false),
   onError: (scope, error) => console.error(`[interest-sandbox] ${scope} failed:`, error)
 });
 
-modelConversationService.registerIpc(handleChat);
+const chatFlowService = createChatFlowService({
+  getBaseDir: () => app.getPath("userData"),
+  chatStateStore,
+  companionLifeService,
+  modelService: modelConversationService,
+  autonomousService: autonomousCreationService,
+  personaService: personaCardService,
+  wakeBubbleWindow,
+  broadcastMood: (payload) => broadcastMoodUpdate(payload),
+  broadcastRelationshipProfile,
+  clearTransientExpressions: () => expressionChatStateService.clearTransientExpressions(),
+  onRuntimePersona: (runtimePersona) => { currentAgentConfig = runtimePersona.config; },
+  initialStartupDiagnostics: { rag: null, deepseek: "unchecked", historyRestored: 0 }
+});
+chatFlowService.start();
+
+modelConversationService.registerIpc(chatFlowService.handleChat);
 autonomousCreationService.registerIpc();
 live2dModelService.registerIpc();
 personaCardService.registerIpc();
@@ -1374,29 +1276,14 @@ function broadcastLifeState(state) {
   }
 }
 
-function currentInterestSettings() {
+function currentInterestSettings(config = currentAgentConfig) {
   return normalizeInterestConfig({
-    ...currentAgentConfig.interests,
-    personaCardId: currentAgentConfig.activePersonaCard?.id || ""
+    ...config.interests,
+    personaCardId: config.activePersonaCard?.id || ""
   });
 }
 
-function publishProactiveEvent(event) {
-  chatState = {
-    ...chatState,
-    messages: [...chatState.messages, { role: "assistant", content: event.message }].slice(-80),
-    lastReplyMeta: {
-      responseMode: "local_tool",
-      usedKnowledge: false,
-      knowledgeCount: 0,
-      knowledgeFiles: [],
-      fallbackReason: "",
-      localTool: `proactive_${event.kind}`,
-      model: "local-life-engine",
-      sourceLabel: "Vivi 主动陪伴"
-    }
-  };
-  broadcastChatState();
+function publishProactivePresentation(event) {
   broadcastMoodUpdate({ phase: "final", mood: event.mood, reply: event.message });
 
   if (petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
@@ -1414,112 +1301,17 @@ function publishProactiveEvent(event) {
   }
 }
 
-async function tickProactiveLife() {
-  if (proactiveTickRunning || ownerInteractionUpdateRunning || !app.isReady()) return;
-  proactiveTickRunning = true;
-  try {
-    const interactionRevisionAtStart = ownerInteractionRevision;
-    const now = new Date();
-    const previous = currentLifeState ?? await loadLifeState(app.getPath("userData"), now);
-    await scheduleService.reconcileCompletedReminderCommitments();
-    const companion = await getFollowUpCandidate(app.getPath("userData"), now);
-    const relationship = await loadRelationshipProfile(app.getPath("userData"));
-    const interestSettings = currentInterestSettings();
-    const result = evaluateLifeTick(previous, currentAgentConfig.proactive, {
-      now,
-      interactionIdleSeconds: ownerInteractionIdleSeconds(previous, now),
-      interruptionScore: companion.store.feedback.interruptionScore,
-      followUpCandidate: companion.candidate,
-      relationshipStage: relationship.affection.stage,
-      autonomousLifeEnabled: interestSettings.enabled && interestSettings.autonomousLifeEnabled
-    });
-    if (interactionRevisionAtStart !== ownerInteractionRevision) return;
-    currentLifeState = await saveLifeState(app.getPath("userData"), result.state);
-    broadcastLifeState(currentLifeState);
-    for (const event of result.events) {
-      publishProactiveEvent(event);
-      if (event.kind === "commitment_followup" && companion.candidate) {
-        await markCommitmentFollowedUp(app.getPath("userData"), companion.candidate.id, now);
-      }
-    }
-  } catch (error) {
-    console.error("[proactive] life tick failed:", error);
-  } finally {
-    proactiveTickRunning = false;
-  }
-}
-
-function startProactiveLifeEngine() {
-  if (proactiveTimer) return;
-  void tickProactiveLife();
-  proactiveTimer = setInterval(() => { void tickProactiveLife(); }, 30_000);
-}
-
-function stopProactiveLifeEngine() {
-  if (proactiveTimer) clearInterval(proactiveTimer);
-  proactiveTimer = null;
-}
-
-function ownerInteractionIdleSeconds(state, now = new Date()) {
-  const lastInteraction = Date.parse(state?.lastInteractionAt || state?.updatedAt || "");
-  return Number.isFinite(lastInteraction)
-    ? Math.max(0, (now.getTime() - lastInteraction) / 1000)
-    : 0;
-}
-
-async function markOwnerInteraction(now = new Date()) {
-  ownerInteractionRevision += 1;
-  ownerInteractionUpdateRunning = true;
-  try {
-    currentLifeState = await recordOwnerInteraction(app.getPath("userData"), currentLifeState, now);
-    broadcastLifeState(currentLifeState);
-    return currentLifeState;
-  } finally {
-    ownerInteractionUpdateRunning = false;
-  }
-}
-
-function publishInterestInteraction(message, mood = "thinking", userText = "") {
-  const interactionMessages = userText
-    ? [{ role: "user", content: userText }, { role: "assistant", content: message }]
-    : [{ role: "assistant", content: message }];
-  chatState = {
-    ...chatState,
-    messages: [...chatState.messages, ...interactionMessages],
-    lastReplyMeta: {
-      responseMode: "local_tool", usedKnowledge: false, knowledgeCount: 0, knowledgeFiles: [],
-      fallbackReason: "", model: "local-interest-state", detectedMood: mood, sourceLabel: "私密空间创作状态"
-    }
-  };
-  broadcastChatState();
-  wakeBubbleWindow();
-  broadcastMoodUpdate({ phase: "final", mood, reply: message });
-  return chatState;
-}
-
-let interestBubbleWokenForTask = "";
 function broadcastInterestState(payload) {
   for (const win of [petWindow, settingsWindow, composerWindow, chatWindow, bubbleWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:interest-state-updated", payload);
   }
-  const taskKey = payload.status === "working" ? `${payload.startedAt || ""}:${payload.activityId || ""}` : "";
-  if (taskKey && taskKey !== interestBubbleWokenForTask && payload.type === "mini_game"
+  if (petWindowLayoutService.shouldWakeInterestBubble(payload)
     && petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
-    interestBubbleWokenForTask = taskKey;
     wakeBubbleWindow();
   }
-  if (!taskKey) interestBubbleWokenForTask = "";
   return payload;
 }
 
-function setInterestExpression(type) {
-  activeInterestExpressions = type === "mini_game" || type === "play_existing_game" || type === "improve_existing_game"
-    ? new Set(["expression27"])
-    : ["diary", "drawing", "collect_diary_materials", "browse_information", "organize_memory", "review_drawing", "plan_creation", "prepare_chat_topics"].includes(type)
-      ? new Set(["expression25", "expression26"])
-      : new Set();
-  broadcastActiveExpressions();
-}
 function broadcastLive2DModels() {
   const models = live2dModelService.getModels();
   for (const win of [petWindow, settingsWindow]) {
@@ -1611,14 +1403,9 @@ async function updateHoverAutoHide(enabled) {
   return currentAgentConfig.appearance.hoverAutoHide;
 }
 
-function broadcastActiveExpressions() {
-  const expressions = getActiveExpressions();
+function broadcastActiveExpressions(expressions) {
   petWindow?.webContents.send("agent:expressions-updated", expressions);
   expressionWindow?.webContents.send("agent:expressions-updated", expressions);
-}
-
-function getActiveExpressions() {
-  return [...new Set([...activeManualExpressions, ...activeInterestExpressions])];
 }
 
 function updateBubbleWindowLayout() {
@@ -1710,10 +1497,10 @@ function buildPetContextMenu() {
         {
           label: "固定位置",
           type: "checkbox",
-          checked: positionLocked,
+          checked: petWindowLayoutService.getPositionLocked(),
           click: () => {
-            positionLocked = !positionLocked;
-            petWindow?.webContents.send("agent:position-lock-updated", positionLocked);
+            const locked = petWindowLayoutService.setPositionLocked(!petWindowLayoutService.getPositionLocked());
+            petWindow?.webContents.send("agent:position-lock-updated", locked);
           }
         },
         { type: "separator" },
@@ -1863,26 +1650,33 @@ app.whenReady().then(async () => {
   });
   publishStartupStatus({ phase: "data", progress: 72, title: "正在整理本地状态", detail: "恢复工作区、日程与陪伴记忆…" });
   try {
-    startupDiagnostics.rag = await ragTaskClient.ensure(app.getPath("userData"));
+    chatFlowService.updateStartupDiagnostics({
+      rag: await ragTaskClient.ensure(app.getPath("userData"))
+    });
   } catch (error) {
-    startupDiagnostics.rag = { error: String(error?.message || error) };
+    chatFlowService.updateStartupDiagnostics({
+      rag: { error: String(error?.message || error) }
+    });
   }
-  await initializeStartupConversation(app.getPath("userData"));
-  await restoreCodeWorkspace();
+  currentAgentConfig = await chatFlowService.initializeStartupConversation(
+    currentAgentConfig,
+    personaCardService
+  );
+  await codeWorkspaceService.restoreWorkspaceState();
   createPetWindow();
   createBubbleWindow();
   createSystemTray();
   updateBubbleWindowLayout();
   syncGlobalCursorTracking();
-  currentLifeState = await loadLifeState(app.getPath("userData"));
-  startProactiveLifeEngine();
+  await companionLifeService.restoreLifeState();
+  companionLifeService.startEngine();
   await scheduleService.start({ publishAgenda: !isBackgroundScheduleLaunch });
   await autonomousCreationService.start().catch((error) => {
     console.error("[interest-sandbox] startup failed:", error);
   });
   if (!isBackgroundScheduleLaunch) {
     publishStartupStatus({ phase: "renderer", progress: 90, title: "正在加载 Vivi", detail: "等待 Live2D 模型完成渲染…" });
-    if (startupRendererModelStatus) releaseStartupToApplication(startupRendererModelStatus);
+    if (rendererReadyService.getModelStatus()) releaseStartupToApplication(rendererReadyService.getModelStatus());
     else startupReleaseTimer = setTimeout(() => releaseStartupToApplication("error"), 45_000);
   }
 
@@ -1919,88 +1713,20 @@ registerMemoryServiceIpc({
   clearConversationHistory,
   clearCompanionMemory,
   onCleared: () => {
-    chatState = { messages: [], knowledge: [], lastReplyMeta: null };
-    broadcastChatState();
+    chatStateStore.reset();
     return true;
   }
 });
-
-async function handleChat(payload) {
-  await markOwnerInteraction();
-  const interestReply = await autonomousCreationService.handleChat(payload.message);
-  if (interestReply) return interestReply;
-  if (String(chatState.lastReplyMeta?.localTool || "").startsWith("proactive_")) {
-    const feedback = detectProactiveFeedback(payload.message);
-    if (feedback) await recordProactiveFeedback(app.getPath("userData"), feedback);
-  }
-  const userMessage = { role: "user", content: payload.message };
-  const route = payload.codeContext ? { type: "workspace_code" } : resolveAgentRoute(payload.message);
-  const isAction = route.type !== "chat";
-  const isQuery = /查询|查看|看看|检查|状态|多少|有没有|在运行吗|还在吗/.test(payload.message);
-  const pendingText = isAction ? (isQuery ? "正在查询本机状态..." : "正在执行...") : "";
-  chatState = {
-    ...chatState,
-    messages: [...chatState.messages, userMessage, { role: "assistant", content: pendingText }],
-    lastReplyMeta: {
-      responseMode: isAction ? "local_tool" : "deepseek_chat",
-      usedKnowledge: false,
-      knowledgeCount: 0,
-      knowledgeFiles: [],
-      fallbackReason: "",
-      model: "",
-      sourceLabel: isAction ? pendingText : "生成中..."
-    }
-  };
-  broadcastChatState();
-  wakeBubbleWindow();
-  broadcastMoodUpdate({ phase: "anticipation", ...classifyFastReaction(payload.message) });
-
-  let result;
-  agentTaskRunning = true;
-  try {
-    result = await modelConversationService.generateReply(payload, {
-      stream: true,
-      onDelta: (partialReply) => {
-        const nextMessages = [...chatState.messages];
-        nextMessages[nextMessages.length - 1] = { role: "assistant", content: partialReply };
-        chatState = { ...chatState, messages: nextMessages };
-        broadcastChatState();
-      }
-    });
-    await autonomousCreationService.markOwnerTaskCompleted();
-  } finally {
-    agentTaskRunning = false;
-  }
-
-  if (result.meta?.personaChanged) await personaCardService.refreshRuntimePersona();
-  chatState = {
-    messages: [...chatState.messages.slice(0, -1), { role: "assistant", content: result.reply }],
-    knowledge: result.knowledge,
-    lastReplyMeta: { ...result.meta, sourceLabel: getReplySourceLabel(result.meta) }
-  };
-  broadcastChatState();
-  if (result.meta?.relationship) broadcastRelationshipProfile(result.meta.relationship);
-  activeManualExpressions = new Set(
-    [...activeManualExpressions].filter((name) => persistentShapeExpressions.has(name))
-  );
-  broadcastActiveExpressions();
-  broadcastMoodUpdate({
-    phase: "final",
-    mood: result.meta?.detectedMood || "happy",
-    faceParams: result.meta?.faceParams || null,
-    reply: result.reply
-  });
-  return chatState;
-}
 
 app.on("before-quit", (event) => {
   app.isQuiting = true;
   if (!shutdownCleanupDone) {
     shutdownCleanupDone = true;
-    stopProactiveLifeEngine();
     const scheduleShutdown = scheduleService.dispose();
     phase4cShutdownPromise = Promise.allSettled([
       scheduleShutdown,
+      chatFlowService.dispose(),
+      chatStateStore.dispose(),
       autonomousCreationService.dispose(),
       modelConversationService.dispose(),
       settingsService.dispose(),

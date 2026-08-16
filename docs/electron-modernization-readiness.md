@@ -12,7 +12,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 
 | 区域 | 现状 | 风险 | 后续目标 |
 | --- | --- | --- | --- |
-| `electron/main.js` | 约 2040 行；窗口、托盘、协议与宿主 adapter 仍在主文件，常规业务 IPC 已迁入领域服务 | Electron 升级回归范围仍大；窗口宿主状态仍多 | 继续按窗口宿主域拆分，只保留应用启动、服务装配和生命周期 |
+| `electron/main.js` | 1761 行；窗口、托盘、协议与宿主 adapter 仍在主文件，常规业务 IPC 与 Phase 5E 领域状态已迁入服务 | Electron 升级回归范围仍大；窗口宿主状态仍多 | 继续按窗口宿主域拆分，只保留应用启动、服务装配和生命周期 |
 | `src/App.tsx` | 约 5300 行，所有窗口共用一个 React 入口 | 每个辅助 renderer 都加载整套 UI 和 Live2D 依赖 | 按 `startup/pet/bubble/settings/chat/code` 拆入口和动态 chunk |
 | `src/styles.css` | 约 4300 行 | 样式回归范围大，窗口间互相影响 | 按窗口和共享组件拆分 |
 | `src-agent/core.js` | 约 1500 行，模型请求、上下文、工具循环、配置混合 | 难以独立放入 utilityProcess | 拆成 model-client、prompt-builder、conversation-service、tool-loop |
@@ -199,18 +199,22 @@ Phase 5E 只拆分主进程 IPC，不改变 Electron 依赖版本，不拆分 re
 | `electron/services/system-resource-service.js` | 自动启动读写、本地文件搜索、应用注册表读取/刷新、系统资源快照，共 6 个 handle | Electron 自动启动能力由注入回调执行；搜索和注册表复用 Agent 纯领域模块 |
 | `electron/services/file-manager-service.js` | 文件管家快照、目录扫描、整理预览/执行、操作列表与撤销，共 6 个 handle | 只依赖 safe-file-manager 领域模块与注入的 baseDir；不接触窗口 |
 | `electron/services/host-shell-service.js` | 外部链接、数据路径、打开数据目录、定位人物卡数据库，共 4 个 handle | 服务校验外部 URL 并计算路径；`shell.openExternal/openPath/showItemInFolder` 由宿主回调注入 |
-| `electron/services/companion-life-service.js` | 触碰互动、生活状态读取、暂停主动行为、重置工作节律，共 4 个 handle | 关系/生活引擎留在 Agent 领域模块；聊天、关系、情绪广播通过回调注入 |
+| `electron/services/companion-life-service.js` | 触碰互动、生活状态读取、暂停主动行为、重置工作节律，共 4 个 handle | 关系/生活引擎留在 Agent 领域模块；生活状态、主动 timer/tick/持久化和 owner interaction 编排由服务持有，聊天/关系/情绪事件通过显式回调广播 |
 | `electron/services/window-intent-service.js` | 设置、输入、聊天、代码、缩放、表情窗口打开意图，共 6 个 handle | 服务只路由意图并记录快照；BrowserWindow 创建与聚焦由宿主回调执行 |
 | `electron/services/code-workspace-service.js` | 代码文件列表/读写、工作区选择，共 4 个 handle | 工作区边界由 `code-executor` 保持；目录选择 dialog 由注入 adapter 执行 |
-| `electron/services/expression-chat-state-service.js` | 手动表情切换/清除、聊天状态读取，共 3 个 handle | 服务保留原互斥表情语义；状态与广播通过回调注入 |
-| `electron/services/pet-window-layout-service.js` | 宠物缩放/锁定/位置/布局、气泡尺寸 7 个 handle，以及鼠标穿透和右键菜单 2 个 listener | screen/workArea、窗口 bounds、鼠标穿透和菜单由宿主回调注入；服务校验事件发送方后只操作注入状态 |
+| `electron/services/expression-chat-state-service.js` | 手动表情切换/清除、聊天状态读取，共 3 个 handle | 服务保留原互斥表情语义并持有手动/兴趣表情状态；广播通过显式回调注入 |
+| `electron/services/pet-window-layout-service.js` | 宠物缩放/锁定/位置/布局、气泡尺寸 7 个 handle，以及鼠标穿透和右键菜单 2 个 listener | 服务持有缩放、锁定、气泡尺寸和兴趣气泡唤醒去重状态；screen/workArea、窗口 bounds、鼠标穿透和菜单由宿主 adapter 执行 |
 | `electron/services/renderer-ready-service.js` | `agent:renderer-ready` 1 个 listener | 只接受 pet payload，并驱动注入的启动状态释放回调 |
 
 `trusted-domain-ipc-service` 统一提供 `registerIpc/start/stop/dispose/snapshot`：注册 listener 后注册 handler，任一注册失败会回滚已注册 channel；stop/dispose 幂等清理 listener 与 handler；未启动或已释放时 handler 拒绝执行。九个业务服务都不导入 Electron、不持有 BrowserWindow，也不接收原始 `ipcMain`。
 
-本阶段迁移 40 个直接 `ipcMain.handle` 和 3 个直接 `ipcMain.on`。`electron/main.js` 从 2243 行降到 2035 行；架构审计指标为 Phase 5E 服务 9/9、channel 所有权 43/43、`directMainIpcHandlers=0`、`directMainIpcListeners=0`。`tests/phase5e-domain-services.test.js` 覆盖共享运行时回滚/幂等退出、可信边界、代表性参数转发、返回形状、事件发送方检查和 listener 清理。
+本阶段迁移 40 个直接 `ipcMain.handle` 和 3 个直接 `ipcMain.on`。结构复查后，聊天状态与启动会话、生活状态与主动生命周期、工作区持久化、表情状态、宠物布局和 renderer 就绪状态均已移入对应服务；`electron/main.js` 只保留窗口宿主、托盘、协议、Electron adapter 和装配逻辑，不再向 Phase 5E 服务注入 getter/setter 改写集中状态。
 
-最终验证：`npm run verify` 通过，包含架构审计 0 critical、281/281 测试通过和 Vite 生产构建；`npm run verify:electron` 通过 Electron 43.4.0 / Node 24.18.1 / Chromium 150.0.7871.224 / modules 148 与原生语音导出检查；`npm run pack` 通过并输出 Windows x64 `win-unpacked`。默认 Electron 下载源曾因 `fetch failed` 需要切换 mirror，镜像下载后冒烟通过。
+架构审计不再依赖 channel 字符串表面匹配：九个服务导出 manifest，`scripts/phase5e-ipc-registration-collector.mjs` 用基于真实 trusted registrar 的 fake registrar 实例化服务并捕获实际 `handle/on` 注册；审计交叉验证 preload inbound channel、main 装配、每个服务 manifest 与实际注册集合，拒绝 missing、duplicate、extra 和未注册 channel，并用负向 fixture 固化“只有 channel 字符串但未注册”的绕过场景。同时新增 Phase 5E 领域状态声明回流 main 的 critical 门禁。
+
+结构复查后 `electron/main.js` 为 1761 行；架构审计指标为 Phase 5E 服务 9/9、manifest 9/9、channel 所有权 43/43、实际注册 43/43、`directMainIpcHandlers=0`、`directMainIpcListeners=0`、`directMainPhase5eIpc=0`、`phase5eDomainStateInMain=0`。`tests/phase5e-domain-services.test.js` 覆盖共享运行时回滚/幂等退出、可信边界、代表性参数转发、返回形状、事件发送方检查、listener 清理、服务状态所有权和生命周期行为。
+
+结构复查后最终验证：`npm run verify` 通过，包含架构审计 0 critical、292/292 测试通过和 Vite 生产构建；`npm run verify:electron` 通过 Electron 43.4.0 / Node 24.18.1 / Chromium 150.0.7871.224 / modules 148 与原生语音导出检查；`npm run pack` 通过并输出 Windows x64 `win-unpacked`。默认 Electron 下载源曾因 `fetch failed` 需要切换 mirror，镜像下载后冒烟通过。剩余 warning 为 `electron/main.js` 仍有 1761 行，以及所有窗口仍共用单一 React 入口。
 
 ## Electron 分阶段升级门禁
 

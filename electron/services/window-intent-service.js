@@ -8,6 +8,10 @@ export const WINDOW_INTENT_HANDLE_CHANNELS = Object.freeze([
   "agent:open-scale-window",
   "agent:open-expression-window"
 ]);
+export const WINDOW_INTENT_IPC_MANIFEST = Object.freeze({
+  handles: WINDOW_INTENT_HANDLE_CHANNELS,
+  listeners: []
+});
 
 export function createWindowIntentService(options) {
   const openCallbacks = new Map([

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { createTrustedIpcRegistrar } from "../electron/ipc-security.js";
 import { createTrustedDomainIpcService } from "../electron/services/trusted-domain-ipc-service.js";
+import { createChatStateStore } from "../electron/services/chat-state-store.js";
+import { createChatFlowService } from "../electron/services/chat-flow-service.js";
 import {
   SYSTEM_RESOURCE_HANDLE_CHANNELS,
   createSystemResourceService
@@ -70,6 +72,12 @@ function trustedEvent(url = "http://localhost:5173") {
   return { senderFrame: mainFrame, sender: { mainFrame } };
 }
 
+function createTestChatStateStore(initialState, onStateUpdated) {
+  const store = createChatStateStore({ initialState, onStateUpdated });
+  store.start();
+  return store;
+}
+
 function makeRegistrar(ipc = ipcDouble()) {
   return {
     ipc,
@@ -79,6 +87,16 @@ function makeRegistrar(ipc = ipcDouble()) {
       rendererRoot: "dist"
     })
   };
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 test("shared domain IPC runtime is rollback-safe and lifecycle-idempotent", async () => {
@@ -128,6 +146,7 @@ test("shared domain IPC runtime is rollback-safe and lifecycle-idempotent", asyn
 
 test("system resource service preserves arguments, returns, and trust boundary", async () => {
   const calls = [];
+  let autoLaunchEnabled = true;
   const dependencies = {
     searchLocalFiles: async (query) => { calls.push(["search", query]); return [{ path: query }]; },
     getAppRegistrySnapshot: async (baseDir) => { calls.push(["registry", baseDir]); return { entries: 1 }; },
@@ -138,8 +157,12 @@ test("system resource service preserves arguments, returns, and trust boundary",
   const service = createSystemResourceService({
     trustedIpc,
     getBaseDir: () => "user-data",
-    isAutoLaunchEnabled: () => true,
-    setAutoLaunchEnabled: (enabled) => { calls.push(["auto-launch", enabled]); return enabled; },
+    readLoginItemSettings: () => ({ openAtLogin: autoLaunchEnabled }),
+    writeLoginItemSettings: (enabled) => {
+      calls.push(["auto-launch", enabled]);
+      autoLaunchEnabled = Boolean(enabled);
+    },
+    broadcastAutoLaunchUpdate: (enabled) => calls.push(["auto-launch-broadcast", enabled]),
     dependencies
   });
   service.registerIpc().start();
@@ -153,7 +176,7 @@ test("system resource service preserves arguments, returns, and trust boundary",
     "agent:get-system-resource-snapshot"
   ]);
   assert.equal(await ipc.handlers.get("agent:get-auto-launch")(trustedEvent()), true);
-  assert.equal(await ipc.handlers.get("agent:set-auto-launch")(trustedEvent(), 0), 0);
+  assert.equal(await ipc.handlers.get("agent:set-auto-launch")(trustedEvent(), 0), false);
   assert.deepEqual(await ipc.handlers.get("agent:search-files")(trustedEvent(), "报告"), [{ path: "报告" }]);
   assert.deepEqual(await ipc.handlers.get("agent:get-app-registry")(trustedEvent()), { entries: 1 });
   assert.deepEqual(await ipc.handlers.get("agent:refresh-app-registry")(trustedEvent()), { entries: 2 });
@@ -161,6 +184,7 @@ test("system resource service preserves arguments, returns, and trust boundary",
   assert.throws(() => ipc.handlers.get("agent:search-files")(trustedEvent("https://example.com")), /拒绝/);
   assert.deepEqual(calls, [
     ["auto-launch", 0],
+    ["auto-launch-broadcast", false],
     ["search", "报告"],
     ["registry", "user-data"],
     ["rebuild", "user-data"]
@@ -236,12 +260,11 @@ test("host shell service validates external URLs and owns data-path side effects
 
 test("companion life service preserves pet-touch state transitions and cooldowns", async () => {
   const calls = [];
-  let currentLifeState = null;
-  let chatState = {
+  const broadcasts = [];
+  const chatStateStore = createTestChatStateStore({
     messages: [{ role: "assistant", content: "旧触碰" }],
     lastReplyMeta: { sourceLabel: "触碰互动" }
-  };
-  const broadcasts = [];
+  });
   const reaction = {
     reply: "新触碰",
     mood: "happy",
@@ -255,20 +278,17 @@ test("companion life service preserves pet-touch state transitions and cooldowns
     dependencies: {
       loadConfig: async () => ({ relationship: { enabled: true } }),
       loadLifeState: async () => ({ paused: false }),
+      recordOwnerInteraction: async () => { calls.push(["owner"]); return { paused: false }; },
       pauseProactiveForToday: async () => ({ paused: true }),
       resetWorkSession: async () => ({ workSession: null }),
       recordPetTouch: async (_baseDir, input) => { calls.push(["touch", input]); return reaction; }
     },
-    getLifeState: () => currentLifeState,
-    setLifeState: (state) => { currentLifeState = state; },
+    chatStateStore,
     onLifeStateUpdated: (state) => broadcasts.push(state),
-    markOwnerInteraction: async () => { calls.push(["owner"]); },
     isAutonomousBusy: () => false,
     getCaughtInterestReply: async () => ({}),
-    publishInterestInteraction: (reply, mood) => { calls.push(["interest", reply, mood]); },
-    getChatState: () => chatState,
-    setChatState: (state) => { chatState = state; },
-    broadcastChatState: () => broadcasts.push("chat"),
+    isHostReady: () => true,
+    getInterestSettings: () => ({ enabled: true, autonomousLifeEnabled: true }),
     broadcastRelationshipProfile: (profile) => broadcasts.push(profile),
     broadcastMoodUpdate: (payload) => broadcasts.push(payload),
     mergeConfig: (config) => config,
@@ -289,8 +309,8 @@ test("companion life service preserves pet-touch state transitions and cooldowns
   const result = await ipc.handlers.get("agent:pet-touch")(trustedEvent());
   assert.equal(result.ok, true);
   assert.equal(result.reply, "新触碰");
-  assert.deepEqual(chatState.messages, [{ role: "assistant", content: "新触碰" }]);
-  assert.equal(chatState.lastReplyMeta.model, "local-relationship-engine");
+  assert.deepEqual(chatStateStore.getState().messages, [{ role: "assistant", content: "新触碰" }]);
+  assert.equal(chatStateStore.getState().lastReplyMeta.model, "local-relationship-engine");
   assert.deepEqual(await ipc.handlers.get("agent:pet-touch")(trustedEvent()), {
     ok: false,
     cooldownMs: 800
@@ -311,7 +331,7 @@ test("companion life service preserves pet-touch state transitions and cooldowns
 });
 
 test("companion pet-touch preserves autonomous busy return shape", async () => {
-  let chatState = { messages: [], lastReplyMeta: null };
+  const chatStateStore = createTestChatStateStore();
   const { ipc, trustedIpc } = makeRegistrar();
   const service = createCompanionLifeService({
     trustedIpc,
@@ -319,24 +339,17 @@ test("companion pet-touch preserves autonomous busy return shape", async () => {
     dependencies: {
       loadConfig: async () => ({}),
       loadLifeState: async () => ({}),
+      recordOwnerInteraction: async () => ({}),
       pauseProactiveForToday: async () => ({}),
       resetWorkSession: async () => ({}),
       recordPetTouch: async () => ({})
     },
-    getLifeState: () => null,
-    setLifeState: () => {},
-    markOwnerInteraction: async () => {},
+    chatStateStore,
     isAutonomousBusy: () => true,
     getCaughtInterestReply: async () => ({ message: "caught" }),
-    publishInterestInteraction: (reply, mood) => {
-      chatState = {
-        ...chatState,
-        messages: [...chatState.messages, { role: "assistant", content: `${reply.message}-${mood}` }]
-      };
+    onInterestInteraction: (message, mood) => {
+      chatStateStore.appendAssistant(`${message}-${mood}`, { sourceLabel: "test" });
     },
-    getChatState: () => chatState,
-    setChatState: (state) => { chatState = state; },
-    broadcastChatState: () => {},
     broadcastRelationshipProfile: () => {},
     broadcastMoodUpdate: () => {},
     mergeConfig: (config) => config,
@@ -352,6 +365,50 @@ test("companion pet-touch preserves autonomous busy return shape", async () => {
     mood: "surprised"
   });
   assert.throws(() => ipc.handlers.get("agent:pet-touch")(trustedEvent("https://example.com")), /拒绝/);
+});
+
+test("companion pet-touch dispose waits and suppresses late domain writes", async () => {
+  const broadcasts = [];
+  const chatStateStore = createTestChatStateStore();
+  const modelGate = createDeferred();
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createCompanionLifeService({
+    trustedIpc,
+    getBaseDir: () => "base",
+    dependencies: {
+      loadConfig: async () => ({}),
+      loadLifeState: async () => ({}),
+      recordOwnerInteraction: async () => ({}),
+      recordPetTouch: async () => {
+        await modelGate.promise;
+        return {
+          reply: "late touch",
+          mood: "happy",
+          faceParams: {},
+          profile: { affection: 3 }
+        };
+      }
+    },
+    chatStateStore,
+    isAutonomousBusy: () => false,
+    getCaughtInterestReply: async () => ({}),
+    broadcastRelationshipProfile: (profile) => broadcasts.push(["relationship", profile]),
+    broadcastMoodUpdate: (payload) => broadcasts.push(["mood", payload]),
+    mergeConfig: (config) => config,
+    now: () => 0
+  });
+  service.registerIpc().start();
+
+  const touch = ipc.handlers.get("agent:pet-touch")(trustedEvent());
+  const disposing = service.dispose();
+  modelGate.resolve();
+  await Promise.all([touch, disposing]);
+  const touchResult = await touch;
+
+  assert.deepEqual(touchResult, { ok: false, busy: true });
+  assert.deepEqual(chatStateStore.getState().messages, []);
+  assert.deepEqual(broadcasts, []);
+  assert.equal(ipc.handlers.size, 0);
 });
 
 test("window intent service forwards open requests through the trust boundary", async () => {
@@ -392,6 +449,15 @@ test("code workspace service preserves file and workspace argument shapes", asyn
   const calls = [];
   let workspaceDir = "D:/work";
   const dependencies = {
+    fs: {
+      mkdir: async (directory, options) => { calls.push(["mkdir", directory, options]); },
+      writeFile: async (file, content) => { calls.push(["write-file", file, content]); }
+    },
+    path: {
+      resolve: (value) => value,
+      join: (...parts) => parts.join("/"),
+      dirname: (value) => value.split("/").slice(0, -1).join("/")
+    },
     listWorkspaceCodeFiles: async (options) => { calls.push(["list", options.workspaceDir]); return [{ path: "main.js" }]; },
     readWorkspaceCode: async (relativePath, options) => {
       calls.push(["read", relativePath, options]);
@@ -405,9 +471,9 @@ test("code workspace service preserves file and workspace argument shapes", asyn
   const { ipc, trustedIpc } = makeRegistrar();
   const service = createCodeWorkspaceService({
     trustedIpc,
-    getActiveWorkspaceDir: () => workspaceDir,
-    setActiveWorkspaceDir: (next) => { workspaceDir = next; },
-    persistCodeWorkspace: async () => { calls.push(["persist", workspaceDir]); },
+    getBaseDir: () => "audit-user-data",
+    initialWorkspaceDir: workspaceDir,
+    onWorkspaceChanged: (next) => { workspaceDir = next; },
     showOpenDialog: async (options) => {
       calls.push(["dialog", options]);
       return { canceled: false, filePaths: ["D:/repo"] };
@@ -444,38 +510,78 @@ test("code workspace service preserves file and workspace argument shapes", asyn
       defaultPath: "D:/work",
       properties: ["openDirectory"]
     }],
-    ["persist", "D:/repo"],
+    ["mkdir", "audit-user-data/agent-data", { recursive: true }],
+    ["write-file", "audit-user-data/agent-data/code-workspace.json", JSON.stringify({ path: "D:/repo" }, null, 2)],
     ["list", "D:/repo"]
   ]);
   assert.equal(service.snapshot().workspaceDir, "D:/repo");
   service.dispose();
 });
 
+test("code workspace dispose waits for pending persistence", async () => {
+  const events = [];
+  const writeGate = createDeferred();
+  const service = createCodeWorkspaceService({
+    getBaseDir: () => "audit-user-data",
+    initialWorkspaceDir: "D:/old",
+    onWorkspaceChanged: (workspaceDir) => events.push(["workspace", workspaceDir]),
+    showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+    dependencies: {
+      fs: {
+        mkdir: async () => {},
+        writeFile: async () => {
+          await writeGate.promise;
+          events.push(["write-complete"]);
+        }
+      },
+      path: {
+        resolve: (value) => value,
+        join: (...parts) => parts.join("/"),
+        dirname: (value) => value.split("/").slice(0, -1).join("/")
+      },
+      listWorkspaceCodeFiles: async () => []
+    }
+  });
+
+  const write = service.setWorkspaceDir("D:/next");
+  const disposing = service.dispose();
+  writeGate.resolve();
+  const savedDir = await write;
+  await disposing;
+  events.push(["dispose-complete"]);
+
+  assert.equal(savedDir, null);
+  assert.deepEqual(events, [
+    ["workspace", "D:/next"],
+    ["write-complete"],
+    ["dispose-complete"]
+  ]);
+  assert.equal(service.snapshot().disposed, true);
+});
+
 test("expression chat state service preserves toggle and state shapes", async () => {
-  let manualExpressions = new Set(["expression21"]);
   const broadcasts = [];
-  const chatState = {
+  const chatStateStore = createTestChatStateStore({
     messages: [{ role: "user", content: "hello" }],
     knowledge: [],
     lastReplyMeta: null
-  };
+  });
   const { ipc, trustedIpc } = makeRegistrar();
   const service = createExpressionChatStateService({
     trustedIpc,
     persistentShapeExpressions: ["expression20", "expression21"],
-    getManualExpressions: () => manualExpressions,
-    setManualExpressions: (next) => { manualExpressions = next; },
-    broadcastActiveExpressions: () => broadcasts.push([...manualExpressions]),
-    getChatState: () => chatState
+    initialManualExpressions: ["expression21"],
+    chatStateStore,
+    broadcastActiveExpressions: (expressions) => broadcasts.push(expressions)
   });
   service.registerIpc().start();
 
   assert.equal(await ipc.handlers.get("agent:trigger-expression")(trustedEvent(), ""), false);
   assert.equal(await ipc.handlers.get("agent:trigger-expression")(trustedEvent(), "expression20"), true);
-  assert.deepEqual([...manualExpressions], ["expression20"]);
+  assert.deepEqual(service.snapshot().manualExpressions, ["expression20"]);
   assert.equal(await ipc.handlers.get("agent:trigger-expression")(trustedEvent(), "expression20"), true);
-  assert.deepEqual([...manualExpressions], []);
-  assert.equal(await ipc.handlers.get("agent:get-chat-state")(trustedEvent()), chatState);
+  assert.deepEqual(service.snapshot().manualExpressions, []);
+  assert.deepEqual(await ipc.handlers.get("agent:get-chat-state")(trustedEvent()), chatStateStore.getState());
   assert.equal(await ipc.handlers.get("agent:clear-expressions")(trustedEvent()), true);
   assert.deepEqual(broadcasts, [["expression20"], [], []]);
   assert.throws(() => ipc.handlers.get("agent:get-chat-state")(trustedEvent("https://example.com")), /拒绝/);
@@ -490,23 +596,43 @@ test("expression chat state service preserves toggle and state shapes", async ()
   service.dispose();
 });
 
+test("expression service unions manual and interest-owned state", async () => {
+  const broadcasts = [];
+  const service = createExpressionChatStateService({
+    persistentShapeExpressions: ["expression20"],
+    initialManualExpressions: ["expression21"],
+    chatStateStore: createTestChatStateStore(),
+    broadcastActiveExpressions: (expressions) => broadcasts.push(expressions)
+  });
+  service.start();
+
+  service.setInterestExpression("mini_game");
+  assert.deepEqual(service.getActiveExpressions(), ["expression21", "expression27"]);
+  assert.deepEqual(service.clearTransientExpressions(), ["expression27"]);
+  service.setInterestExpression("diary");
+  assert.deepEqual(service.getActiveExpressions(), ["expression25", "expression26"]);
+
+  assert.deepEqual(broadcasts, [
+    ["expression21", "expression27"],
+    ["expression27"],
+    ["expression25", "expression26"]
+  ]);
+  service.dispose();
+});
+
 test("pet window layout service preserves bounds, sender checks, and listeners", async () => {
   const calls = [];
   const petSender = { id: "pet", mainFrame: { url: "http://localhost:5173" } };
   const bubbleSender = { id: "bubble", mainFrame: { url: "http://localhost:5173" } };
   const eventFor = (sender) => ({ senderFrame: sender.mainFrame, sender });
-  let petScale = 1.25;
-  let positionLocked = false;
-  let bubbleContentSize = { width: 330, height: 180 };
   let petBounds = { x: 100, y: 100, width: 640, height: 960 };
   let nextBounds = null;
   const { ipc, trustedIpc } = makeRegistrar();
   const service = createPetWindowLayoutService({
     trustedIpc,
-    getPetScale: () => petScale,
-    setPetScale: (scale) => { petScale = scale; },
-    getPositionLocked: () => positionLocked,
-    setPositionLocked: (locked) => { positionLocked = locked; },
+    initialPetScale: 1.25,
+    initialPositionLocked: false,
+    initialBubbleContentSize: { width: 330, height: 180 },
     broadcastPositionLock: (locked) => calls.push(["lock-broadcast", locked]),
     isPetWindowActive: () => true,
     getPetWindowBounds: () => petBounds,
@@ -521,8 +647,7 @@ test("pet window layout service preserves bounds, sender checks, and listeners",
     broadcastPetScale: (scale) => calls.push(["scale-broadcast", scale]),
     isBubbleWindowActive: () => true,
     isSenderBubbleWindow: (event) => event.sender === bubbleSender,
-    setBubbleContentSize: (size) => { bubbleContentSize = size; },
-    getBubbleWindowBounds: () => ({ ...bubbleContentSize, placement: "right" }),
+    getBubbleWindowBounds: () => ({ width: 680, height: 100, placement: "right" }),
     isSenderPetWindow: (event) => event.sender === petSender,
     isHoverAutoHideEnabled: () => false,
     setPetMousePassthrough: (ignore) => calls.push(["passthrough", ignore]),
@@ -585,28 +710,48 @@ test("pet window layout service preserves bounds, sender checks, and listeners",
   assert.deepEqual(ipc.listeners.get("agent:show-pet-context-menu"), []);
 });
 
+test("pet window layout service owns interest bubble wake deduplication", () => {
+  const service = createPetWindowLayoutService({
+    isPetWindowActive: () => false,
+    isBubbleWindowActive: () => false
+  });
+  const firstTask = {
+    status: "working",
+    type: "mini_game",
+    startedAt: "2026-08-17T00:00:00.000Z",
+    activityId: "task-1"
+  };
+  const secondTask = { ...firstTask, activityId: "task-2" };
+
+  assert.equal(service.shouldWakeInterestBubble(firstTask), true);
+  assert.equal(service.shouldWakeInterestBubble(firstTask), false);
+  assert.equal(service.shouldWakeInterestBubble(secondTask), true);
+  assert.equal(service.snapshot().interestBubbleWokenForTask, `${firstTask.startedAt}:${secondTask.activityId}`);
+  assert.equal(service.shouldWakeInterestBubble({ ...firstTask, status: "idle" }), false);
+  assert.equal(service.snapshot().interestBubbleWokenForTask, "");
+  assert.equal(service.shouldWakeInterestBubble(firstTask), true);
+});
+
 test("renderer ready service filters pet payloads and cleans listeners", async () => {
   const calls = [];
   let startupStatus = { phase: "renderer" };
-  let rendererModelStatus = null;
   const { ipc, trustedIpc } = makeRegistrar();
   const service = createRendererReadyService({
     trustedIpc,
     getStartupStatus: () => startupStatus,
-    setRendererModelStatus: (status) => { rendererModelStatus = status; },
     releaseStartup: (status) => calls.push(["release", status])
   });
   service.registerIpc().start();
   const listener = ipc.listeners.get("agent:renderer-ready").at(-1);
 
   listener(trustedEvent(), { view: "settings", modelStatus: "ready" });
-  assert.equal(rendererModelStatus, null);
+  assert.equal(service.getModelStatus(), null);
   listener(trustedEvent(), { view: "pet", modelStatus: "error" });
-  assert.equal(rendererModelStatus, "error");
+  assert.equal(service.getModelStatus(), "error");
   assert.deepEqual(calls, [["release", "error"]]);
   startupStatus = { phase: "ready" };
   listener(trustedEvent(), { view: "pet" });
-  assert.equal(rendererModelStatus, "ready");
+  assert.equal(service.getModelStatus(), "ready");
   assert.deepEqual(calls, [["release", "error"]]);
   listener(trustedEvent("https://example.com"), { view: "pet" });
   assert.deepEqual(service.snapshot(), {
@@ -623,4 +768,150 @@ test("renderer ready service filters pet payloads and cleans listeners", async (
   assert.equal(service.snapshot().petRendererReadyCount, 2);
   service.dispose();
   assert.deepEqual(ipc.listeners.get("agent:renderer-ready"), []);
+});
+
+test("chat flow serializes concurrent owner chat commands", async () => {
+  const chatStateStore = createTestChatStateStore();
+  const modelStarted = createDeferred();
+  const releaseModel = createDeferred();
+  const modelCalls = [];
+  const service = createChatFlowService({
+    getBaseDir: () => "base",
+    chatStateStore,
+    companionLifeService: { markOwnerInteraction: async () => ({}) },
+    modelService: {
+      generateReply: async (payload) => {
+        modelCalls.push(payload.message);
+        await releaseModel.promise;
+        return { reply: `reply:${payload.message}`, knowledge: [], meta: {} };
+      }
+    },
+    autonomousService: {
+      handleChat: async () => null,
+      markOwnerTaskCompleted: async () => {}
+    },
+    personaService: {},
+    wakeBubbleWindow: () => {},
+    broadcastMood: () => {},
+    broadcastRelationshipProfile: () => {},
+    clearTransientExpressions: () => {},
+    dependencies: {
+      classifyFastReaction: () => ({ mood: "happy" }),
+      resolveAgentRoute: () => ({ type: "chat" })
+    }
+  });
+  service.start();
+
+  const first = service.handleChat({ message: "first" });
+  const second = service.handleChat({ message: "second" });
+  releaseModel.resolve();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(firstResult, secondResult);
+  assert.deepEqual(modelCalls, ["first"]);
+  assert.equal(chatStateStore.getState().messages.at(-1).content, "reply:first");
+  await service.dispose();
+});
+
+test("chat flow dispose waits and suppresses late state writes and broadcasts", async () => {
+  const broadcasts = [];
+  const chatStateStore = createTestChatStateStore();
+  const modelStarted = createDeferred();
+  const releaseModel = createDeferred();
+  const service = createChatFlowService({
+    getBaseDir: () => "base",
+    chatStateStore,
+    companionLifeService: { markOwnerInteraction: async () => ({}) },
+    modelService: {
+      generateReply: async (_payload, options) => {
+        modelStarted.resolve();
+        await releaseModel.promise;
+        options.onDelta("late delta");
+        return { reply: "late reply", knowledge: [], meta: {} };
+      }
+    },
+    autonomousService: {
+      handleChat: async () => null,
+      markOwnerTaskCompleted: async () => {}
+    },
+    personaService: {},
+    wakeBubbleWindow: () => broadcasts.push(["wake"]),
+    broadcastMood: (payload) => broadcasts.push(["mood", payload]),
+    broadcastRelationshipProfile: (profile) => broadcasts.push(["relationship", profile]),
+    clearTransientExpressions: () => broadcasts.push(["clear-expressions"]),
+    dependencies: {
+      classifyFastReaction: () => ({ mood: "happy" }),
+      resolveAgentRoute: () => ({ type: "chat" })
+    }
+  });
+  service.start();
+  const chat = service.handleChat({ message: "dispose during chat" });
+  await modelStarted.promise;
+  const disposing = service.dispose();
+  releaseModel.resolve();
+  const result = await chat;
+  await disposing;
+
+  assert.equal(result.messages.at(-1).content, "");
+  assert.deepEqual(broadcasts, [
+    ["wake"],
+    ["mood", { phase: "anticipation", mood: "happy" }]
+  ]);
+  assert.equal(service.snapshot().disposed, true);
+});
+
+test("chat flow owns startup diagnostics and startup conversation state", async () => {
+  const broadcasts = [];
+  const chatStateStore = createChatStateStore({ onStateUpdated: (state) => broadcasts.push(state) });
+  chatStateStore.start();
+  const runtimePersona = {
+    config: {
+      deepseek: { apiKey: "configured", chatModel: "deepseek-chat", model: "fallback-model" }
+    },
+    card: { id: "card-1", payload: { userAddress: "老板" } }
+  };
+  const service = createChatFlowService({
+    getBaseDir: () => "base",
+    chatStateStore,
+    companionLifeService: {},
+    modelService: {
+      generateGreeting: async () => ({ mode: "model", reply: "greeting" })
+    },
+    autonomousService: {},
+    personaService: {
+      applyRuntimePersona: async () => runtimePersona
+    },
+    wakeBubbleWindow: () => {},
+    broadcastMood: () => {},
+    broadcastRelationshipProfile: () => {},
+    clearTransientExpressions: () => {},
+    dependencies: {
+      getRecentConversationMessages: async () => [
+        { role: "user", content: "old" },
+        { role: "assistant", content: "history" }
+      ],
+      loadCompanionMemory: async () => ({ memories: [] })
+    }
+  });
+  service.updateStartupDiagnostics({ rag: { ready: true } });
+  service.start();
+
+  const startupConfig = await service.initializeStartupConversation(runtimePersona.config, {
+    applyRuntimePersona: async () => runtimePersona
+  });
+
+  assert.equal(startupConfig, runtimePersona.config);
+  assert.deepEqual(chatStateStore.getState().messages, [
+    { role: "user", content: "old" },
+    { role: "assistant", content: "history" },
+    { role: "assistant", content: "greeting" }
+  ]);
+  assert.equal(chatStateStore.getState().lastReplyMeta.sourceLabel, "本次见面");
+  assert.deepEqual(service.getStartupDiagnostics(), {
+    rag: { ready: true },
+    deepseek: "ready",
+    historyRestored: 2
+  });
+  assert.deepEqual(service.snapshot().startupDiagnostics, service.getStartupDiagnostics());
+  assert.deepEqual(broadcasts, []);
 });

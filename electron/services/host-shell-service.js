@@ -8,6 +8,10 @@ export const HOST_SHELL_HANDLE_CHANNELS = Object.freeze([
   "agent:open-data-folder",
   "agent:open-persona-folder"
 ]);
+export const HOST_SHELL_IPC_MANIFEST = Object.freeze({
+  handles: HOST_SHELL_HANDLE_CHANNELS,
+  listeners: []
+});
 
 export function createHostShellService(options) {
   const dependencies = { fs, path, ...(options.dependencies || {}) };
