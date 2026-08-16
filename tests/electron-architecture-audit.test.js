@@ -22,7 +22,20 @@ const autonomousCreationService = createAutonomousCreationService({ trustedIpc }
 autonomousCreationService.registerIpc();
 autonomousCreationService.start();
 autonomousCreationService.dispose();`;
-const baseMain = `${canonicalDeclaration}\n${utilityConfiguration}\n${Array.from({ length: 9 }, () => canonicalWindow).join("\n")}`;
+const phase5dServices = `
+const settingsService = createSettingsService({ trustedIpc });
+settingsService.registerIpc();
+settingsService.start();
+settingsService.dispose();
+const personaCardService = createPersonaCardService({ trustedIpc });
+personaCardService.registerIpc();
+personaCardService.start();
+personaCardService.dispose();
+const live2dModelService = createLive2DModelService({ trustedIpc });
+live2dModelService.registerIpc();
+live2dModelService.start();
+live2dModelService.dispose();`;
+const baseMain = `${canonicalDeclaration}\n${utilityConfiguration}\n${phase5dServices}\n${Array.from({ length: 9 }, () => canonicalWindow).join("\n")}`;
 const basePackage = {
   main: "electron/main.js",
   devDependencies: { electron: "^32.3.0" },
@@ -51,17 +64,50 @@ for (const channel of channels) trustedIpc.handle(channel, handler);
 let currentTask = null;
 const config = snapshotConfig(options.getConfig());
 const persona = personaFor(config);`;
+function phase5dServiceSource(channels) {
+  return `
+const channelList = [${channels.map((channel) => JSON.stringify(channel)).join(", ")}];
+for (const channel of channelList) trustedIpc.handle(channel, handler);
+function start() {}
+function stop() {}
+function dispose() {}
+function snapshot() {}`;
+}
+const baseSettingsService = phase5dServiceSource([
+  "agent:get-bootstrap",
+  "agent:get-startup-status",
+  "agent:save-config",
+  "agent:test-astrbot",
+  "agent:get-relationship-profile",
+  "agent:reset-relationship-profile"
+]);
+const basePersonaCardService = phase5dServiceSource([
+  "agent:list-persona-cards",
+  "agent:create-persona-card",
+  "agent:update-persona-card",
+  "agent:activate-persona-card",
+  "agent:archive-persona-card",
+  "agent:restore-persona-card"
+]);
+const baseLive2DModelService = phase5dServiceSource([
+  "agent:get-live2d-models",
+  "agent:refresh-live2d-models",
+  "agent:open-live2d-models-folder"
+]);
 
 function audit(main = baseMain, packageJson = basePackage, ragSources = baseRagSources) {
   return analyzeElectronArchitecture({
     main,
-    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js"],
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js", "electron/services/settings-service.js", "electron/services/persona-card-service.js", "electron/services/live2d-model-service.js"],
     packageJson,
     indexHtml: '<script type="module" src="/src/main.tsx"></script>',
     ragSources,
     scheduleService: baseScheduleService,
     modelConversationService: baseModelService,
-    autonomousCreationService: baseAutonomousService
+    autonomousCreationService: baseAutonomousService,
+    settingsService: baseSettingsService,
+    personaCardService: basePersonaCardService,
+    live2DModelService: baseLive2DModelService
   });
 }
 
@@ -203,4 +249,49 @@ test("architecture audit requires Electron-free Phase 4C services and persona sn
   });
   assert.match(result.critical.join("\n"), /自主创作状态/);
   assert.match(result.critical.join("\n"), /不得直接导入 Electron/);
+});
+
+test("architecture audit requires complete Phase 5D service files and lifecycle", () => {
+  const result = analyzeElectronArchitecture({
+    main: baseMain,
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js"],
+    packageJson: basePackage,
+    indexHtml: "",
+    ragSources: baseRagSources,
+    scheduleService: baseScheduleService,
+    modelConversationService: baseModelService,
+    autonomousCreationService: baseAutonomousService,
+    settingsService: baseSettingsService.replace("function dispose() {}", ""),
+    personaCardService: basePersonaCardService,
+    live2DModelService: baseLive2DModelService
+  });
+  assert.equal(result.metrics.settingsServicePresent, false);
+  assert.equal(result.metrics.settingsLifecycleOwnedByService, false);
+  assert.match(result.critical.join("\n"), /Phase 5D 设置服务/);
+});
+
+test("architecture audit rejects Electron imports in Phase 5D services", () => {
+  const result = analyzeElectronArchitecture({
+    main: baseMain,
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js", "electron/services/settings-service.js", "electron/services/persona-card-service.js", "electron/services/live2d-model-service.js"],
+    packageJson: basePackage,
+    indexHtml: "",
+    ragSources: baseRagSources,
+    scheduleService: baseScheduleService,
+    modelConversationService: baseModelService,
+    autonomousCreationService: baseAutonomousService,
+    settingsService: baseSettingsService,
+    personaCardService: `import { shell } from "electron"; ${basePersonaCardService}`,
+    live2DModelService: baseLive2DModelService
+  });
+  assert.equal(result.metrics.phase5dServicesElectronFree, false);
+  assert.match(result.critical.join("\n"), /Phase 5D 服务不得直接导入 Electron/);
+});
+
+test("architecture audit rejects Phase 5D IPC returning to main", () => {
+  const result = audit(`${baseMain}\nipcMain.handle("agent:save-config", handler);\nipcMain.on("agent:get-live2d-models", listener);`);
+  assert.equal(result.metrics.directMainPhase5dIpc, 2);
+  assert.equal(result.metrics.directMainIpcHandlers, 1);
+  assert.equal(result.metrics.directMainIpcListeners, 1);
+  assert.match(result.critical.join("\n"), /主进程回流了 2 处 Phase 5D IPC/);
 });

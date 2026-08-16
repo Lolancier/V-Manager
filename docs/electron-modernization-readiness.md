@@ -4,7 +4,7 @@
 
 ## 结论
 
-项目应继续使用 Electron，但不能直接从 32 跳到最新大版本后再统一修复。升级前需要把“桌面宿主能力、业务服务、后台任务、窗口生命周期、渲染入口”分开。本轮已经建立第一批边界：Agent 核心不再直接导入 Electron Shell、记忆 IPC 已成为独立服务、辅助窗口关闭后释放 renderer，并加入可重复执行的架构审计。Phase 1 还将 `electron/preload.cjs` 固化为唯一 preload 源，开发与打包窗口都通过主进程的 `PRELOAD_PATH` 加载它。Phase 2 已把完整语音域迁入 `speech-service`；Phase 4B 已将三种语音合成及本地 STT 的原生/网络推理通过统一后台任务协议移出主进程，主进程只保留缓存、IPC 和生命周期管理。Phase 3 已把 Electron 生产路径的 RAG 扫描、Embedding 和索引写入接到惰性 `utilityProcess`，主进程只保留状态读取和检索。Phase 4A 已把日程计时、提醒/电源处理、Windows Task Scheduler 同步、承诺完成回写和 2 个日程 IPC 迁入 `schedule-service`。Phase 4C 已把模型会话和自主创作状态机分别迁入 `model-conversation-service` 与 `autonomous-creation-service`，对应 13 个 IPC 全部使用可信 registrar。
+项目应继续使用 Electron，但不能直接从 32 跳到最新大版本后再统一修复。升级前需要把“桌面宿主能力、业务服务、后台任务、窗口生命周期、渲染入口”分开。本轮已经建立第一批边界：Agent 核心不再直接导入 Electron Shell、记忆 IPC 已成为独立服务、辅助窗口关闭后释放 renderer，并加入可重复执行的架构审计。Phase 1 还将 `electron/preload.cjs` 固化为唯一 preload 源，开发与打包窗口都通过主进程的 `PRELOAD_PATH` 加载它。Phase 2 已把完整语音域迁入 `speech-service`；Phase 4B 已将三种语音合成及本地 STT 的原生/网络推理通过统一后台任务协议移出主进程，主进程只保留缓存、IPC 和生命周期管理。Phase 3 已把 Electron 生产路径的 RAG 扫描、Embedding 和索引写入接到惰性 `utilityProcess`，主进程只保留状态读取和检索。Phase 4A 已把日程计时、提醒/电源处理、Windows Task Scheduler 同步、承诺完成回写和 2 个日程 IPC 迁入 `schedule-service`。Phase 4C 已把模型会话和自主创作状态机分别迁入 `model-conversation-service` 与 `autonomous-creation-service`，对应 13 个 IPC 全部使用可信 registrar。Phase 5D 已把设置、人物卡和 Live2D 模型 15 个 IPC 迁入三个 Electron-free 服务。
 
 RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，也不访问 BrowserWindow、app、ipcMain 或 Shell。启动刷新、memory-service 设置页手动重建、app-executor 自然语言重建和 tool-executor 模型工具重建这 4 条 Electron 写路径都注入同一个后台 adapter。`src-agent` 的两个 executor 仍保留直接调用 RAG 模块的兼容 fallback，供 CLI、测试或其他非 Electron 宿主使用；它们不是 Electron 生产主进程路径。
 
@@ -12,7 +12,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 
 | 区域 | 现状 | 风险 | 后续目标 |
 | --- | --- | --- | --- |
-| `electron/main.js` | 约 2430 行；窗口、托盘、协议与宿主发布仍在主文件，语音、RAG、日程、模型会话和自主创作已抽离 | Electron 升级回归范围仍大；窗口宿主状态仍多 | 继续按窗口宿主域拆分，只保留应用启动、服务装配和生命周期 |
+| `electron/main.js` | 约 2240 行；窗口、托盘、协议与宿主发布仍在主文件，语音、RAG、日程、模型会话、自主创作、设置、人物卡和 Live2D 模型已抽离 | Electron 升级回归范围仍大；窗口宿主状态仍多 | 继续按窗口宿主域拆分，只保留应用启动、服务装配和生命周期 |
 | `src/App.tsx` | 约 5300 行，所有窗口共用一个 React 入口 | 每个辅助 renderer 都加载整套 UI 和 Live2D 依赖 | 按 `startup/pet/bubble/settings/chat/code` 拆入口和动态 chunk |
 | `src/styles.css` | 约 4300 行 | 样式回归范围大，窗口间互相影响 | 按窗口和共享组件拆分 |
 | `src-agent/core.js` | 约 1500 行，模型请求、上下文、工具循环、配置混合 | 难以独立放入 utilityProcess | 拆成 model-client、prompt-builder、conversation-service、tool-loop |
@@ -30,7 +30,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 ## 高优先级风险
 
 1. Electron 32 已停止支持。升级期间必须逐大版本验证，不能只在最终版本运行一次测试。
-2. 大量 IPC 仍直接注册在主文件，并且多数尚未统一验证发送方。记忆与语音服务已使用主 frame 与本地 URL 校验；剩余 IPC 仍需逐域迁入该注册器，并继续补参数 schema 和调用窗口权限。
+2. 主文件仍直接注册 40 个 IPC handler，剩余域尚未统一验证发送方。记忆、语音、日程、模型会话、自主创作、设置、人物卡和 Live2D 模型服务已使用主 frame 与本地 URL 校验；剩余 IPC 仍需逐域迁入该注册器，并继续补参数 schema 和调用窗口权限。
 3. 启动链路仍等待后台 RAG 刷新、语音服务准备、模型扫描、数据库恢复和日程同步；RAG 已不阻塞主进程事件循环且失败会降级，但启动页面仍会等待其任务结果。
 4. `App.tsx` 的单入口意味着“懒创建窗口”并不等于“轻量窗口”；每个 renderer 仍会解析大部分相同代码。
 5. `src-agent` 之前直接使用 Electron Shell，使核心无法安全迁入 utilityProcess。本轮已经改成宿主适配器，但未来 worker 中的特权操作仍应通过主进程 RPC 返回执行。
@@ -59,7 +59,7 @@ RAG worker 入口直接导入 `src-agent/rag.js`，不加载整个 Agent core，
 4. `creation-service`：自主日程、日记/绘画/游戏生成与作品清理。Phase 4C 已完成 Electron 编排层抽离。
 5. `conversation-service`：模型请求、Prompt/Token 预算、工具调用循环和对话持久化。Phase 4C 已完成 Electron 编排层抽离；纯模型管线仍保留在 `src-agent/core.js`。
 
-服务模块不得直接持有 BrowserWindow；通过事件发布器通知窗口。每个服务需返回 `start()`、`stop()`、`snapshot()`，并能在测试中注入时钟、文件根目录和宿主能力。
+服务模块不得直接持有 BrowserWindow；通过事件发布器通知窗口。每个服务需返回 `start()`、`stop()`、`dispose()`、`snapshot()`，并能在测试中注入时钟、文件根目录和宿主能力。
 
 迁移单个 IPC 域时，应把 `createTrustedIpcRegistrar(ipcMain, policy)` 注入该域 registrar，禁止把原始 `ipcMain` 继续传入服务。`handle/removeHandler` 用于 request/response：不可信 `invoke` 会以拒绝错误返回。renderer `send` 对应的接收侧使用 `on`：它会在每次事件进入业务 listener 前执行同一套主 frame 与 URL 校验，但对不可信单向事件只安全丢弃，不让校验异常从 EventEmitter 传播；可信业务 listener 自己抛出的异常仍保持原有传播语义。`on` 返回可重试且成功后幂等的 disposer；也可用原始 listener 调用 `removeListener`，registrar 会精确移除内部包装函数。先保持 renderer 的 channel、方法名、参数形状和返回值不变，再在服务边界增加参数 schema 与窗口级权限；对应测试至少覆盖受信主 frame 成功、外部 origin 或子 frame 在业务 handler 执行前被拒绝或丢弃，以及 dispose 移除全部 handler/listener。`memory-service` 与可信 registrar 的组合测试已覆盖这条装配路径，后续服务按相同模式逐域迁移，不在一次变更中批量搬移全部 IPC。
 
@@ -166,7 +166,23 @@ Electron 40 的 npm 包把下载栈迁到 `@electron/get` 5，并通过 `@electr
 5. 游戏试玩、模拟输入、截图、取消与协议联网拦截。
 6. 记录启动时间、空闲内存、逐窗口打开后的 renderer 数量和峰值内存。
 
-本阶段只升级 Electron 运行时、锁定运行时冒烟矩阵和记录验证证据，不包含普通 IPC handler/listener 迁移、renderer 独立入口拆分、窗口宿主重构或其他依赖升级。主进程仍保留 55 个直接 IPC handler、3 个直接 IPC listener 和单一 React renderer 入口，应作为后续独立阶段处理。
+本阶段只升级 Electron 运行时、锁定运行时冒烟矩阵和记录验证证据，不包含普通 IPC handler/listener 迁移、renderer 独立入口拆分、窗口宿主重构或其他依赖升级。Phase 5B 结束时主进程仍保留 55 个直接 IPC handler、3 个直接 IPC listener 和单一 React renderer 入口；这些拆分应作为后续独立阶段处理。
+
+## Phase 5D：设置、人物卡与 Live2D IPC 拆分记录
+
+Phase 5D 只拆分主进程 IPC，不改变 Electron 依赖版本，不拆分 renderer 入口，也不调整 `electron/preload.cjs` 暴露的方法、channel、参数形状和返回形状。主进程继续负责 BrowserWindow 广播、`vivi-model://` 协议、窗口表现副作用和 Electron Shell 打开目录；领域状态与 handler 移入服务。
+
+新增三个服务：
+
+| 服务 | 负责 channel | 边界 |
+| --- | --- | --- |
+| `electron/services/settings-service.js` | `agent:get-bootstrap`、`agent:get-startup-status`、`agent:save-config`、`agent:test-astrbot`、`agent:get-relationship-profile`、`agent:reset-relationship-profile` | 读写配置、启动状态、bootstrap 汇总、AstrBot 连通性和关系档案；窗口副作用通过注入回调执行 |
+| `electron/services/persona-card-service.js` | `agent:list-persona-cards`、`agent:create-persona-card`、`agent:update-persona-card`、`agent:activate-persona-card`、`agent:archive-persona-card`、`agent:restore-persona-card` | 人物卡 CRUD、激活状态和 runtime persona 应用；配置广播通过回调注入 |
+| `electron/services/live2d-model-service.js` | `agent:get-live2d-models`、`agent:refresh-live2d-models`、`agent:open-live2d-models-folder` | 内置模型元数据、自定义 `.model3.json` 扫描、模型根映射、无效选择修复、目录 watcher 与防抖；打开目录由宿主回调执行 |
+
+三个服务都接收注入的 `createTrustedIpcRegistrar` 结果，注册失败会回滚已注册 channel，并提供 `start/stop/dispose/snapshot`。它们不导入 Electron、不持有 BrowserWindow；`settings-service` 通过 `persona-card-service` 应用 active persona，避免 bootstrap 与保存配置使用两套语义。启动顺序为设置/人物卡服务先启动，Live2D 扫描完成后再挂载目录 watcher；退出时与日程、自主创作、模型会话等服务一起 dispose。
+
+本阶段迁移 15 个直接 `ipcMain.handle`。`electron/main.js` 从 2434 行降到 2243 行，直接 IPC handler 从 55 降到 40，直接 IPC listener 保持 3；架构审计新增 Phase 5D 服务文件、可信 IPC、生命周期、Electron-free 和 main 回流门禁。
 
 ## Electron 分阶段升级门禁
 
@@ -193,4 +209,4 @@ Electron 官方建议一次迁移一个大版本并逐项检查 Breaking Changes
 npm run audit:architecture
 ```
 
-该命令会输出 Electron 版本、主文件行数、直接 IPC 数、窗口数、Agent 核心是否重新直接导入 Electron、安全窗口配置、preload 状态，以及 utilityProcess/RAG、schedule-service 和 Phase 4C 迁移指标。RAG 门禁要求 worker 入口存在并进入生产打包、主进程不直接调用写索引函数、启动/memory-service/app-executor/tool-executor 四条写路径全部注入后台 adapter。日程门禁要求服务文件、可信 IPC、`start/stop/tick/snapshot` 生命周期和聊天工具 adapter 同时存在，并把日程 channel、timer 状态或 Windows/提醒具体编排回流主文件视为 critical。Phase 4C 门禁要求模型与自主创作服务存在、使用可信 IPC、持有人物卡快照和退出生命周期、禁止直接导入 Electron，并将 13 个 channel 或旧状态机回流 main、main 超过 2500 行视为 critical。审计同时会独立统计全部 `new BrowserWindow(` 调用，再逐个配对调用参数；只认可第一个参数是可静态分析的对象 literal，且真实属性路径为 `webPreferences.preload: PRELOAD_PATH`。变量 options、第二参数或顶层/metadata preload 诱饵、动态 spread/computed 属性，以及任何无法静态确认的窗口都会作为 critical。preload 或 utility worker 被生产清单排除也会直接失败。API 表面、代表性参数转发与事件解绑另由 `tests/preload.test.js` 固化；审计规则的绕过场景由 `tests/electron-architecture-audit.test.js` 固化；其余尚待拆分的结构问题继续作为 warning 展示。
+该命令会输出 Electron 版本、主文件行数、直接 IPC 数、窗口数、Agent 核心是否重新直接导入 Electron、安全窗口配置、preload 状态，以及 utilityProcess/RAG、schedule-service、Phase 4C 和 Phase 5D 迁移指标。RAG 门禁要求 worker 入口存在并进入生产打包、主进程不直接调用写索引函数、启动/memory-service/app-executor/tool-executor 四条写路径全部注入后台 adapter。日程门禁要求服务文件、可信 IPC、`start/stop/tick/snapshot` 生命周期和聊天工具 adapter 同时存在，并把日程 channel、timer 状态或 Windows/提醒具体编排回流主文件视为 critical。Phase 4C 门禁要求模型与自主创作服务存在、使用可信 IPC、持有人物卡快照和退出生命周期、禁止直接导入 Electron，并将 13 个 channel 或旧状态机回流 main、main 超过 2500 行视为 critical。Phase 5D 门禁要求设置、人物卡和 Live2D 服务存在、使用可信 IPC、具备 `start/stop/dispose/snapshot` 生命周期、禁止直接导入 Electron，并把 15 个 channel 回流 main 视为 critical。审计同时会独立统计全部 `new BrowserWindow(` 调用，再逐个配对调用参数；只认可第一个参数是可静态分析的对象 literal，且真实属性路径为 `webPreferences.preload: PRELOAD_PATH`。变量 options、第二参数或顶层/metadata preload 诱饵、动态 spread/computed 属性，以及任何无法静态确认的窗口都会作为 critical。preload 或 utility worker 被生产清单排除也会直接失败。API 表面、代表性参数转发与事件解绑另由 `tests/preload.test.js` 固化；审计规则的绕过场景由 `tests/electron-architecture-audit.test.js` 固化；其余尚待拆分的结构问题继续作为 warning 展示。
