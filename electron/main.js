@@ -1,5 +1,4 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, utilityProcess } from "electron";
-import { watch } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,11 +8,9 @@ import {
   ensureDataFiles,
   getAppRegistrySnapshot,
   getActiveWorkspaceDir,
-  getConfigPath,
   getFileManagerSnapshot,
   getRagStatus,
   getSystemResourceSnapshot,
-  listKnowledgeFiles,
   loadConfig,
   rebuildAppRegistry,
   saveConfig,
@@ -22,9 +19,8 @@ import {
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
-import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
+import { loadRelationshipProfile, recordPetTouch } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
-import { testAstrBotConnection } from "../src-agent/astrbot-client.js";
 import { classifyFastReaction } from "../src-agent/fast-reaction.js";
 import {
   createOrganizationPreview,
@@ -54,16 +50,6 @@ import { normalizeInterestConfig } from "../src-agent/interest-sandbox.js";
 import { runGamePlaytest } from "../src-agent/game-playtest.js";
 import { createIsolatedGameDriver } from "./game-playtest-runtime.js";
 import { getMemoryDatabaseStats, getRecentConversationMessages } from "../src-agent/local-database.js";
-import {
-  activatePersonaCard,
-  applyPersonaCardToConfig,
-  archivePersonaCard,
-  createPersonaCard,
-  getActivePersonaCard,
-  listPersonaCards,
-  restorePersonaCard,
-  updatePersonaCard
-} from "../src-agent/persona-cards.js";
 import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
 import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
@@ -72,6 +58,9 @@ import { createScheduleService } from "./services/schedule-service.js";
 import { createGamePlaytestService } from "./services/game-playtest-service.js";
 import { createModelConversationService } from "./services/model-conversation-service.js";
 import { createAutonomousCreationService, interestStatusLabel } from "./services/autonomous-creation-service.js";
+import { createLive2DModelService } from "./services/live2d-model-service.js";
+import { createPersonaCardService } from "./services/persona-card-service.js";
+import { createSettingsService } from "./services/settings-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -151,15 +140,6 @@ let petManuallyHidden = false;
 let activeManualExpressions = new Set();
 let activeInterestExpressions = new Set();
 const persistentShapeExpressions = new Set(["expression20", "expression21", "expression22", "expression24"]);
-const builtInLive2DModels = [
-  { id: "qianqian", label: "芊芊", detail: "完整表情、形态与动作适配", builtIn: true, capabilities: { expressionCount: 32, motionGroupCount: 2, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } },
-  { id: "hiyori", label: "Hiyori", detail: "通用参数适配 · 动作 2 组", builtIn: true, capabilities: { expressionCount: 0, motionGroupCount: 2, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } },
-  { id: "epsilon", label: "Epsilon", detail: "通用参数 + 8 个原生表情", builtIn: true, capabilities: { expressionCount: 8, motionGroupCount: 6, hasLipSync: true, hasEyeBlink: true, hasDisplayInfo: true } }
-];
-let live2dModelOptions = [...builtInLive2DModels];
-let customModelRoots = new Map();
-let modelDirectoryWatcher = null;
-let modelScanTimer = null;
 let cursorTrackingTimer = null;
 let proactiveTimer = null;
 let currentLifeState = null;
@@ -217,105 +197,6 @@ function mergeAgentConfig(nextConfig = {}) {
   };
 }
 
-function getLive2DModelsDirectory() {
-  return path.join(app.getPath("userData"), "agent-data", "models");
-}
-
-async function findModelFiles(root, directory = root, depth = 0) {
-  if (depth > 4) return [];
-  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-  const files = [];
-  for (const entry of entries) {
-    const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...await findModelFiles(root, target, depth + 1));
-    else if (entry.isFile() && entry.name.toLowerCase().endsWith(".model3.json")) files.push(target);
-  }
-  return files;
-}
-
-async function readCustomModelOption(modelsDirectory, modelFile) {
-  try {
-    const definition = JSON.parse(await fs.readFile(modelFile, "utf8"));
-    const modelRoot = path.dirname(modelFile);
-    const requiredFiles = [definition?.FileReferences?.Moc, ...(definition?.FileReferences?.Textures ?? [])]
-      .filter(Boolean)
-      .map((file) => path.resolve(modelRoot, file));
-    if (!definition?.FileReferences?.Moc || requiredFiles.some((file) => {
-      const relative = path.relative(modelRoot, file);
-      return relative.startsWith("..") || path.isAbsolute(relative);
-    })) return null;
-    for (const file of requiredFiles) await fs.access(file);
-
-    const relativeModelFile = path.relative(modelsDirectory, modelFile).replaceAll("\\", "/");
-    const id = `custom-${Buffer.from(relativeModelFile).toString("base64url")}`;
-    const baseName = path.basename(modelFile).replace(/\.model3\.json$/i, "");
-    const parentName = path.basename(modelRoot);
-    const expressions = definition?.FileReferences?.Expressions ?? [];
-    const motions = definition?.FileReferences?.Motions ?? {};
-    const groups = definition?.Groups ?? [];
-    const hasGroup = (name) => groups.some((group) => String(group?.Name || "").toLowerCase() === name.toLowerCase() && (group?.Ids?.length ?? 0) > 0);
-    const capabilities = {
-      expressionCount: expressions.length,
-      motionGroupCount: Object.keys(motions).length,
-      hasLipSync: hasGroup("LipSync"),
-      hasEyeBlink: hasGroup("EyeBlink"),
-      hasDisplayInfo: Boolean(definition?.FileReferences?.DisplayInfo)
-    };
-    const abilityLabels = [
-      expressions.length ? `${expressions.length} 个原生表情` : "通用参数",
-      capabilities.hasLipSync ? "口型" : null,
-      capabilities.hasEyeBlink ? "眨眼" : null
-    ].filter(Boolean);
-    return {
-      id,
-      label: baseName || parentName,
-      detail: `用户模型 · ${abilityLabels.join(" + ")} · ${path.relative(modelsDirectory, modelRoot) || parentName}`,
-      directory: `vivi-model://local/${encodeURIComponent(id)}/`,
-      fileName: path.basename(modelFile),
-      builtIn: false,
-      capabilities,
-      root: modelRoot
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function refreshLive2DModels({ broadcast = true } = {}) {
-  const modelsDirectory = getLive2DModelsDirectory();
-  await fs.mkdir(modelsDirectory, { recursive: true });
-  const customModels = (await Promise.all(
-    (await findModelFiles(modelsDirectory)).map((file) => readCustomModelOption(modelsDirectory, file))
-  )).filter(Boolean);
-
-  customModelRoots = new Map(customModels.map((model) => [model.id, model.root]));
-  live2dModelOptions = [
-    ...builtInLive2DModels,
-    ...customModels.map(({ root: _root, ...model }) => model)
-  ];
-
-  if (!live2dModelOptions.some((model) => model.id === currentAgentConfig.appearance?.live2dModel)) {
-    currentAgentConfig = mergeAgentConfig({
-      ...currentAgentConfig,
-      appearance: { ...currentAgentConfig.appearance, live2dModel: "qianqian" }
-    });
-    await saveConfig(app.getPath("userData"), currentAgentConfig);
-    broadcastConfigUpdated(currentAgentConfig);
-  }
-
-  if (broadcast) broadcastLive2DModels();
-  return live2dModelOptions;
-}
-
-function startLive2DModelWatcher() {
-  const modelsDirectory = getLive2DModelsDirectory();
-  modelDirectoryWatcher?.close();
-  modelDirectoryWatcher = watch(modelsDirectory, { recursive: true }, () => {
-    if (modelScanTimer) clearTimeout(modelScanTimer);
-    modelScanTimer = setTimeout(() => { void refreshLive2DModels(); }, 500);
-  });
-}
-
 function getModelContentType(filePath) {
   const extension = path.extname(filePath).toLowerCase();
   if (extension === ".json") return "application/json";
@@ -335,8 +216,9 @@ let chatState = {
 let startupDiagnostics = { rag: null, deepseek: "unchecked", historyRestored: 0 };
 
 async function initializeStartupConversation(baseDir) {
-  const activeCard = await getActivePersonaCard(baseDir, currentAgentConfig);
-  currentAgentConfig = applyPersonaCardToConfig(currentAgentConfig, activeCard);
+  const runtimePersona = await personaCardService.applyRuntimePersona(currentAgentConfig);
+  const activeCard = runtimePersona.card;
+  currentAgentConfig = runtimePersona.config;
   const history = await getRecentConversationMessages(baseDir, { limit: 40, personaCardId: activeCard?.id || "" });
   const memory = await loadCompanionMemory(baseDir);
   const greeting = await modelConversationService.generateGreeting(currentAgentConfig, {
@@ -1241,6 +1123,61 @@ const speechService = registerSpeechServiceIpc({
   runBackgroundTask: (type, payload, runOptions) => utilityTaskSupervisor.run(type, payload, runOptions)
 });
 
+const live2dModelService = createLive2DModelService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getConfig: () => currentAgentConfig,
+  setConfig: (config) => { currentAgentConfig = config; },
+  mergeConfig: mergeAgentConfig,
+  saveConfig,
+  broadcastConfigUpdated: (config) => broadcastConfigUpdated(config),
+  broadcastModels: (models) => broadcastLive2DModels(models),
+  openPath: (target) => shell.openPath(target),
+  onError: (scope, error) => console.error(`[live2d] ${scope} failed:`, error)
+});
+
+const personaCardService = createPersonaCardService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getConfig: () => currentAgentConfig,
+  setConfig: (config) => { currentAgentConfig = config; },
+  mergeConfig: mergeAgentConfig,
+  broadcastConfigUpdated: (config) => broadcastConfigUpdated(config)
+});
+
+const settingsService = createSettingsService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getConfig: () => currentAgentConfig,
+  mergeConfig: mergeAgentConfig,
+  loadRuntimePersona: async (storedConfig) => {
+    const runtimePersona = await personaCardService.applyRuntimePersona(storedConfig);
+    currentAgentConfig = runtimePersona.config;
+    return runtimePersona;
+  },
+  getLive2DModels: () => live2dModelService.getModels(),
+  getStartupStatus: () => startupStatus,
+  getStartupDiagnostics: () => startupDiagnostics,
+  beforeConfigApplied: (previousConfig, nextConfig) => {
+    if (previousConfig.appearance?.mouseFollow !== nextConfig.appearance?.mouseFollow) {
+      cursorDeliveryState.clear();
+    }
+    if (previousConfig.appearance?.hoverAutoHide === true && nextConfig.appearance?.hoverAutoHide !== true
+      && petWindow && !petWindow.isDestroyed()) {
+      petWindow.setIgnoreMouseEvents(false);
+    }
+  },
+  afterConfigApplied: async (config) => {
+    syncGlobalCursorTracking();
+    currentAppearanceTheme = config.appearance?.theme === "dark" ? "dark" : "light";
+    updateTitleBarOverlays();
+    broadcastConfigUpdated(config);
+    refreshTrayMenu();
+    await scheduleService.afterMutation();
+  },
+  broadcastRelationshipProfile: (profile) => broadcastRelationshipProfile(profile)
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1281,6 +1218,9 @@ const autonomousCreationService = createAutonomousCreationService({
 
 modelConversationService.registerIpc(handleChat);
 autonomousCreationService.registerIpc();
+live2dModelService.registerIpc();
+personaCardService.registerIpc();
+settingsService.registerIpc();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1469,8 +1409,9 @@ function setInterestExpression(type) {
   broadcastActiveExpressions();
 }
 function broadcastLive2DModels() {
+  const models = live2dModelService.getModels();
   for (const win of [petWindow, settingsWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:live2d-models-updated", live2dModelOptions);
+    if (win && !win.isDestroyed()) win.webContents.send("agent:live2d-models-updated", models);
   }
 }
 
@@ -1522,7 +1463,7 @@ function stopGlobalCursorTracking() {
 }
 
 async function updateLive2DModel(modelId) {
-  if (!live2dModelOptions.some((model) => model.id === modelId)) return false;
+  if (!live2dModelService.getModels().some((model) => model.id === modelId)) return false;
   currentAgentConfig = mergeAgentConfig({
     ...currentAgentConfig,
     appearance: { ...currentAgentConfig.appearance, live2dModel: modelId }
@@ -1625,7 +1566,7 @@ function buildPetContextMenu() {
         },
         {
           label: "切换模型",
-          submenu: live2dModelOptions.map((model) => ({
+          submenu: live2dModelService.getModels().map((model) => ({
             label: model.label,
             type: "radio",
             checked: currentAgentConfig.appearance?.live2dModel === model.id,
@@ -1730,6 +1671,7 @@ app.whenReady().then(async () => {
   await saveConfig(app.getPath("userData"), currentAgentConfig);
   await fs.rm(path.join(app.getPath("userData"), "agent-data", "outlook-token.bin"), { force: true }).catch(() => null);
   currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
+  await Promise.all([settingsService.start(), personaCardService.start()]);
 
   createStartupWindow();
   publishStartupStatus({ phase: "booting", progress: 12, title: "正在读取配置", detail: "人物设定与本地权限已载入。" });
@@ -1768,7 +1710,7 @@ app.whenReady().then(async () => {
   }
 
   publishStartupStatus({ phase: "models", progress: 58, title: "正在检查形象资源", detail: "扫描 Live2D 模型与表情配置…" });
-  await refreshLive2DModels({ broadcast: false });
+  await live2dModelService.start({ broadcast: false });
   protocol.handle("vivi-asset", async (request) => {
     try {
       const url = new URL(request.url);
@@ -1793,7 +1735,7 @@ app.whenReady().then(async () => {
       const url = new URL(request.url);
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
       const modelId = parts.shift();
-      const modelRoot = customModelRoots.get(modelId);
+      const modelRoot = live2dModelService.getModelRoot(modelId);
       if (!modelRoot || parts.length === 0) return new Response("Not found", { status: 404 });
       const filePath = path.resolve(modelRoot, ...parts);
       const relative = path.relative(modelRoot, filePath);
@@ -1807,7 +1749,6 @@ app.whenReady().then(async () => {
       return new Response("Not found", { status: 404 });
     }
   });
-  startLive2DModelWatcher();
   publishStartupStatus({ phase: "data", progress: 72, title: "正在整理本地状态", detail: "恢复工作区、日程与陪伴记忆…" });
   try {
     startupDiagnostics.rag = await ragTaskClient.ensure(app.getPath("userData"));
@@ -1855,115 +1796,12 @@ app.on("second-instance", (_event, argv) => {
   showPetWindow();
 });
 
-ipcMain.handle("agent:get-bootstrap", async () => {
-  const baseDir = app.getPath("userData");
-  const storedConfig = mergeAgentConfig(await loadConfig(baseDir));
-  const activePersonaCard = await getActivePersonaCard(baseDir, storedConfig);
-  const config = applyPersonaCardToConfig(storedConfig, activePersonaCard);
-  currentAgentConfig = config;
-  const knowledgeFiles = await listKnowledgeFiles(baseDir);
-  const relationshipProfile = await loadRelationshipProfile(baseDir);
-  const personaCards = await listPersonaCards(baseDir);
-  const memoryDatabase = await getMemoryDatabaseStats(baseDir);
-
-  return {
-    config,
-    activePersonaCard,
-    personaCards,
-    memoryDatabase,
-    startupDiagnostics,
-    relationshipProfile,
-    live2dModels: live2dModelOptions,
-    knowledgeFiles,
-    runtime: {
-      mode: "desktop",
-      configPath: getConfigPath(app.getPath("userData"))
-    },
-    abilities: [
-      { id: "chat", name: "自然对话", status: "ready", detail: "已接入人格设定和本地知识检索。" },
-      { id: "relationship", name: "情绪与好感", status: "ready", detail: "本地计算情绪变化和关系阶段，并持续影响回复语气与 Live2D 神态。" },
-      { id: "proactive", name: "主动陪伴", status: "ready", detail: "根据连续工作、空闲状态、安静时段和每日上限提供本地健康关怀，并管理 Vivi 的休息节奏。" },
-      { id: "schedules", name: "提醒与电源计划", status: "ready", detail: "支持本地提醒，以及经二次确认的定时关机和重启；所有计划均可查看和取消。" },
-      { id: "memory", name: "本地记忆/RAG", status: "ready", detail: "从本地知识库检索相关片段参与回答。" },
-      { id: "resource", name: "资源查看", status: "ready", detail: "可查看 CPU、内存、运行进程和当前前台应用数量。" },
-      { id: "launcher", name: "应用启动", status: "ready", detail: "已接入本地执行层，可直接启动常见应用，也支持传入本地 exe 路径。" },
-      { id: "code-agent", name: "代码代理", status: "ready", detail: "可在当前工作区搜索和读取代码；文件修改与开发命令必须经用户明确确认后执行。" },
-      { id: "browser", name: "浏览器搜索", status: "ready", detail: "可在系统默认浏览器中打开网址，并使用 Bing、Google 或百度搜索。" },
-      { id: "vscode", name: "VS Code 适配", status: "ready", detail: "可用 VS Code 打开本地文件或工作区，并定位到指定文件行。" },
-      { id: "filesystem", name: "安全文件管家", status: "ready", detail: "支持只读扫描、整理预览、按类型/日期归档、隔离、操作日志与撤销；删除仅进入 Windows 回收站。" },
-      {
-        id: "messenger",
-        name: "消息联动",
-        status: "planned",
-        detail: "AstrBot、微信代发、消息读取与自动回复统一归入后续路线，本阶段不作为正式能力开放。"
-      }
-    ]
-  };
-});
-
-ipcMain.handle("agent:get-startup-status", async () => startupStatus);
-
 ipcMain.on("agent:renderer-ready", (_event, payload) => {
   if (payload?.view !== "pet") return;
   startupRendererModelStatus = payload?.modelStatus === "error" ? "error" : "ready";
   if (startupStatus.phase === "renderer") releaseStartupToApplication(startupRendererModelStatus);
 });
 
-ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
-  const merged = mergeAgentConfig(nextConfig);
-  await saveConfig(app.getPath("userData"), merged);
-  if (currentAgentConfig.appearance?.mouseFollow !== merged.appearance?.mouseFollow) {
-    cursorDeliveryState.clear();
-  }
-  if (currentAgentConfig.appearance?.hoverAutoHide === true && merged.appearance?.hoverAutoHide !== true
-    && petWindow && !petWindow.isDestroyed()) {
-    petWindow.setIgnoreMouseEvents(false);
-  }
-  const activePersonaCard = await getActivePersonaCard(app.getPath("userData"), merged);
-  currentAgentConfig = applyPersonaCardToConfig(merged, activePersonaCard);
-  syncGlobalCursorTracking();
-  currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
-  updateTitleBarOverlays();
-  broadcastConfigUpdated(currentAgentConfig);
-  refreshTrayMenu();
-  await scheduleService.afterMutation();
-  return currentAgentConfig;
-});
-
-async function refreshRuntimePersona(card = null) {
-  const baseDir = app.getPath("userData");
-  const activeCard = card || await getActivePersonaCard(baseDir, currentAgentConfig);
-  currentAgentConfig = applyPersonaCardToConfig(mergeAgentConfig(await loadConfig(baseDir)), activeCard);
-  broadcastConfigUpdated(currentAgentConfig);
-  return {
-    card: activeCard,
-    cards: await listPersonaCards(baseDir),
-    config: currentAgentConfig
-  };
-}
-
-ipcMain.handle("agent:list-persona-cards", async () => listPersonaCards(app.getPath("userData")));
-ipcMain.handle("agent:create-persona-card", async (_event, input) => {
-  const card = await createPersonaCard(app.getPath("userData"), input);
-  return { card, cards: await listPersonaCards(app.getPath("userData")) };
-});
-ipcMain.handle("agent:update-persona-card", async (_event, cardId, input) => {
-  const card = await updatePersonaCard(app.getPath("userData"), cardId, input);
-  const active = (await listPersonaCards(app.getPath("userData"))).find((item) => item.id === cardId)?.isActive;
-  return active ? refreshRuntimePersona(card) : { card, cards: await listPersonaCards(app.getPath("userData")) };
-});
-ipcMain.handle("agent:activate-persona-card", async (_event, cardId) => {
-  const card = await activatePersonaCard(app.getPath("userData"), cardId);
-  return refreshRuntimePersona(card);
-});
-ipcMain.handle("agent:archive-persona-card", async (_event, cardId) => {
-  await archivePersonaCard(app.getPath("userData"), cardId);
-  return listPersonaCards(app.getPath("userData"));
-});
-ipcMain.handle("agent:restore-persona-card", async (_event, cardId) => {
-  await restorePersonaCard(app.getPath("userData"), cardId);
-  return listPersonaCards(app.getPath("userData"));
-});
 registerMemoryServiceIpc({
   ipcMain: trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1979,36 +1817,6 @@ registerMemoryServiceIpc({
     broadcastChatState();
     return true;
   }
-});
-
-ipcMain.handle("agent:test-astrbot", async (_event, astrbotOverride) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  try {
-    const result = await testAstrBotConnection({ ...config.astrbot, ...(astrbotOverride ?? {}) });
-    return { ok: true, message: `AstrBot 已连接，发现 ${result.bots.length} 个可用机器人/平台。`, bots: result.bots };
-  } catch (error) {
-    return { ok: false, message: `AstrBot 连接失败：${error.message}`, bots: [] };
-  }
-});
-
-ipcMain.handle("agent:get-relationship-profile", async () => {
-  return loadRelationshipProfile(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:reset-relationship-profile", async () => {
-  const profile = await resetRelationshipProfile(app.getPath("userData"));
-  broadcastRelationshipProfile(profile);
-  return profile;
-});
-
-ipcMain.handle("agent:get-live2d-models", async () => live2dModelOptions);
-
-ipcMain.handle("agent:refresh-live2d-models", async () => refreshLive2DModels());
-
-ipcMain.handle("agent:open-live2d-models-folder", async () => {
-  const modelsDirectory = getLive2DModelsDirectory();
-  await fs.mkdir(modelsDirectory, { recursive: true });
-  return shell.openPath(modelsDirectory);
 });
 
 async function handleChat(payload) {
@@ -2058,7 +1866,7 @@ async function handleChat(payload) {
     agentTaskRunning = false;
   }
 
-  if (result.meta?.personaChanged) await refreshRuntimePersona();
+  if (result.meta?.personaChanged) await personaCardService.refreshRuntimePersona();
   chatState = {
     messages: [...chatState.messages.slice(0, -1), { role: "assistant", content: result.reply }],
     knowledge: result.knowledge,
@@ -2145,11 +1953,12 @@ app.on("before-quit", (event) => {
     phase4cShutdownPromise = Promise.allSettled([
       scheduleShutdown,
       autonomousCreationService.dispose(),
-      modelConversationService.dispose()
+      modelConversationService.dispose(),
+      settingsService.dispose(),
+      personaCardService.dispose(),
+      live2dModelService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
-    modelDirectoryWatcher?.close();
-    modelDirectoryWatcher = null;
     utilityTaskSupervisor.close();
     gamePlaytestService.dispose();
     speechService.dispose();

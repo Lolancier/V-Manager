@@ -173,7 +173,20 @@ function analyzeBuildFiles(files, target) {
   return result;
 }
 
-export function analyzeElectronArchitecture({ main, electronFiles, packageJson, indexHtml, directElectronImports = [], ragSources = {}, scheduleService = "", modelConversationService = "", autonomousCreationService = "" }) {
+export function analyzeElectronArchitecture({
+  main,
+  electronFiles,
+  packageJson,
+  indexHtml,
+  directElectronImports = [],
+  ragSources = {},
+  scheduleService = "",
+  modelConversationService = "",
+  autonomousCreationService = "",
+  settingsService = "",
+  personaCardService = "",
+  live2DModelService = ""
+}) {
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
     .map((file) => file.replaceAll("\\", "/"))
@@ -197,6 +210,12 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     + countMatches(main, /ipcMain\.(?:handle|on)\s*\(\s*["']agent:(?:list-schedules|cancel-schedule)["']/g);
   const phase4cChannels = "chat|test-deepseek|generate-persona-card-draft|get-interest-sandbox|run-interest-activity|get-interest-state|cleanup-interest-sandbox|play-interest-game|interrupt-interest-activity|update-interest-location|open-interest-sandbox|open-interest-artifact|open-interest-category";
   const directMainPhase4cIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase4cChannels})["']`, "g"));
+  const phase5dChannels = "get-bootstrap|get-startup-status|save-config|test-astrbot|get-relationship-profile|reset-relationship-profile|list-persona-cards|create-persona-card|update-persona-card|activate-persona-card|archive-persona-card|restore-persona-card|get-live2d-models|refresh-live2d-models|open-live2d-models-folder";
+  const directMainPhase5dIpc = countMatches(main, new RegExp(`ipcMain\\.(?:handle|on)\\s*\\(\\s*["']agent:(?:${phase5dChannels})["']`, "g"));
+  const hasPhase5dServiceLifecycle = (source) => /\bfunction\s+start\s*\(/.test(source)
+    && /\bfunction\s+stop\s*\(/.test(source)
+    && /\bfunction\s+dispose\s*\(/.test(source)
+    && /\bfunction\s+snapshot\s*\(/.test(source);
   const directMainPhase4cOrchestration = directMainPhase4cIpc
     + countMatches(maskedMain, /\b(?:currentInterestActivity|tickInterestSandbox|startInterestSandbox|stopInterestSandbox|runInterestActivity|runAutonomousLifeActivity|buildAgentReply|testDeepSeekConnection|generatePersonaCardDraft)\b/g);
   const metrics = {
@@ -239,6 +258,20 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
     modelCancellationPropagated: /signal:\s*payload\.signal/.test(ragSources.core || "") || /payload\.signal/.test(ragSources.core || ""),
     directMainPhase4cIpc,
     directMainPhase4cOrchestration,
+    settingsServicePresent: normalizedElectronFiles.includes("electron/services/settings-service.js"),
+    settingsServiceConfigured: /createSettingsService\s*\(/.test(maskedMain) && /settingsService\.registerIpc\s*\(/.test(maskedMain) && /settingsService\.start\s*\(/.test(maskedMain) && /settingsService\.dispose\s*\(/.test(maskedMain),
+    settingsServiceOwnsIpc: ["agent:get-bootstrap", "agent:get-startup-status", "agent:save-config", "agent:test-astrbot", "agent:get-relationship-profile", "agent:reset-relationship-profile"].every((channel) => settingsService.includes(channel)) && /trustedIpc\.handle\s*\(/.test(settingsService),
+    settingsLifecycleOwnedByService: hasPhase5dServiceLifecycle(settingsService),
+    personaCardServicePresent: normalizedElectronFiles.includes("electron/services/persona-card-service.js"),
+    personaCardServiceConfigured: /createPersonaCardService\s*\(/.test(maskedMain) && /personaCardService\.registerIpc\s*\(/.test(maskedMain) && /personaCardService\.start\s*\(/.test(maskedMain) && /personaCardService\.dispose\s*\(/.test(maskedMain),
+    personaCardServiceOwnsIpc: ["agent:list-persona-cards", "agent:create-persona-card", "agent:update-persona-card", "agent:activate-persona-card", "agent:archive-persona-card", "agent:restore-persona-card"].every((channel) => personaCardService.includes(channel)) && /trustedIpc\.handle\s*\(/.test(personaCardService),
+    personaCardLifecycleOwnedByService: hasPhase5dServiceLifecycle(personaCardService),
+    live2DModelServicePresent: normalizedElectronFiles.includes("electron/services/live2d-model-service.js"),
+    live2DModelServiceConfigured: /createLive2DModelService\s*\(/.test(maskedMain) && /live2dModelService\.registerIpc\s*\(/.test(maskedMain) && /live2dModelService\.start\s*\(/.test(maskedMain) && /live2dModelService\.dispose\s*\(/.test(maskedMain),
+    live2DModelServiceOwnsIpc: ["agent:get-live2d-models", "agent:refresh-live2d-models", "agent:open-live2d-models-folder"].every((channel) => live2DModelService.includes(channel)) && /trustedIpc\.handle\s*\(/.test(live2DModelService),
+    live2DModelLifecycleOwnedByService: hasPhase5dServiceLifecycle(live2DModelService),
+    phase5dServicesElectronFree: !/from\s+["']electron["']|require\s*\(\s*["']electron["']/.test(`${settingsService}\n${personaCardService}\n${live2DModelService}`),
+    directMainPhase5dIpc,
     singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
   };
   const critical = [];
@@ -259,6 +292,11 @@ export function analyzeElectronArchitecture({ main, electronFiles, packageJson, 
   if (!metrics.autonomousCreationServicePresent || !metrics.autonomousCreationServiceConfigured || !metrics.autonomousCreationServiceOwnsState || !metrics.autonomousCreationServiceOwnsIpc) critical.push("Phase 4C 自主创作状态、生命周期或可信 IPC 未完整迁移");
   if (!metrics.phase4cServicesElectronFree) critical.push("Phase 4C 服务不得直接导入 Electron");
   if (metrics.directMainPhase4cOrchestration) critical.push(`主进程回流了 ${metrics.directMainPhase4cOrchestration} 处 Phase 4C IPC 或领域编排`);
+  if (!metrics.settingsServicePresent || !metrics.settingsServiceConfigured || !metrics.settingsServiceOwnsIpc || !metrics.settingsLifecycleOwnedByService) critical.push("Phase 5D 设置服务、可信 IPC 或生命周期未完整迁移");
+  if (!metrics.personaCardServicePresent || !metrics.personaCardServiceConfigured || !metrics.personaCardServiceOwnsIpc || !metrics.personaCardLifecycleOwnedByService) critical.push("Phase 5D 人物卡服务、可信 IPC 或生命周期未完整迁移");
+  if (!metrics.live2DModelServicePresent || !metrics.live2DModelServiceConfigured || !metrics.live2DModelServiceOwnsIpc || !metrics.live2DModelLifecycleOwnedByService) critical.push("Phase 5D Live2D 服务、可信 IPC 或生命周期未完整迁移");
+  if (!metrics.phase5dServicesElectronFree) critical.push("Phase 5D 服务不得直接导入 Electron");
+  if (metrics.directMainPhase5dIpc) critical.push(`主进程回流了 ${metrics.directMainPhase5dIpc} 处 Phase 5D IPC`);
   if (metrics.mainLines > 2500) critical.push(`electron/main.js 为 ${metrics.mainLines} 行，超过 Phase 4C 的 2500 行门禁`);
   if (metrics.mainLines > 1500) warnings.push(`electron/main.js 仍有 ${metrics.mainLines} 行，需要按领域继续拆分`);
   if (metrics.directMainIpcHandlers > 30) warnings.push(`主文件仍直接注册 ${metrics.directMainIpcHandlers} 个 IPC handler`);
