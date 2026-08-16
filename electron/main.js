@@ -4,7 +4,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  buildAgentReply,
   clearConversationHistory,
   defaultConfig,
   ensureDataFiles,
@@ -20,11 +19,9 @@ import {
   saveConfig,
   setActiveWorkspaceDir,
   searchLocalFiles,
-  testDeepSeekConnection,
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
-import { classifyDiaryRequest, diaryOpenReply, diaryStatusReply } from "../src-agent/diary-privacy.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { testAstrBotConnection } from "../src-agent/astrbot-client.js";
@@ -53,24 +50,7 @@ import {
   resetWorkSession,
   saveLifeState
 } from "../src-agent/proactive-engine.js";
-import {
-  cleanupInterestSandbox,
-  generatePlaytestReflection,
-  getInterestActivity,
-  getInterestSandboxSnapshot,
-  initializeInterestSession,
-  isSafeInterestArtifact,
-  saveInterestLocation,
-  normalizeInterestConfig,
-  recordInterestPlaytest,
-  recordDelegatedAutonomousActivity,
-  repairInterestGame,
-  reviseInterestGame,
-  runAutonomousLifeActivity,
-  runInterestActivity,
-  selectInterestActivity,
-  updateInterestSession
-} from "../src-agent/interest-sandbox.js";
+import { normalizeInterestConfig } from "../src-agent/interest-sandbox.js";
 import { runGamePlaytest } from "../src-agent/game-playtest.js";
 import { createIsolatedGameDriver } from "./game-playtest-runtime.js";
 import { getMemoryDatabaseStats, getRecentConversationMessages } from "../src-agent/local-database.js";
@@ -84,14 +64,14 @@ import {
   restorePersonaCard,
   updatePersonaCard
 } from "../src-agent/persona-cards.js";
-import { generatePersonaCardDraft } from "../src-agent/persona-generator.js";
-import { generateStartupGreeting } from "../src-agent/startup-greeting.js";
 import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
 import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
 import { registerSpeechServiceIpc } from "./services/speech-service.js";
 import { createScheduleService } from "./services/schedule-service.js";
 import { createGamePlaytestService } from "./services/game-playtest-service.js";
+import { createModelConversationService } from "./services/model-conversation-service.js";
+import { createAutonomousCreationService, interestStatusLabel } from "./services/autonomous-creation-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -186,15 +166,13 @@ let currentLifeState = null;
 let proactiveTickRunning = false;
 let ownerInteractionRevision = 0;
 let ownerInteractionUpdateRunning = false;
-let interestTimer = null;
-let interestTickRunning = false;
-let currentInterestActivity = null;
 let agentTaskRunning = false;
 const cursorDeliveryState = new Map();
 let startupReleaseTimer = null;
 let startupRendererModelStatus = null;
 let shutdownCleanupDone = false;
 let gptSovitsShutdownStarted = false;
+let phase4cShutdownPromise = Promise.resolve();
 let startupStatus = {
   phase: "booting",
   progress: 4,
@@ -361,11 +339,11 @@ async function initializeStartupConversation(baseDir) {
   currentAgentConfig = applyPersonaCardToConfig(currentAgentConfig, activeCard);
   const history = await getRecentConversationMessages(baseDir, { limit: 40, personaCardId: activeCard?.id || "" });
   const memory = await loadCompanionMemory(baseDir);
-  const greeting = await generateStartupGreeting(currentAgentConfig, {
+  const greeting = await modelConversationService.generateGreeting(currentAgentConfig, {
     history,
     memory,
     userAddress: activeCard?.payload?.userAddress || "你"
-  }, { modelFetch: net.fetch.bind(net) });
+  });
   chatState = {
     messages: [...history.map(({ role, content }) => ({ role, content })), { role: "assistant", content: greeting.reply }].slice(-80),
     knowledge: [],
@@ -1263,6 +1241,47 @@ const speechService = registerSpeechServiceIpc({
   runBackgroundTask: (type, payload, runOptions) => utilityTaskSupervisor.run(type, payload, runOptions)
 });
 
+const modelConversationService = createModelConversationService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getConfig: () => currentAgentConfig,
+  loadConfig,
+  mergeConfig: mergeAgentConfig,
+  fetch: net.fetch.bind(net),
+  ragClient: ragTaskClient,
+  scheduleClient: {
+    afterMutation: () => scheduleService.afterMutation(),
+    abortPowerAction: () => scheduleService.abortPowerAction()
+  },
+  interestStatusLabel
+});
+
+const autonomousCreationService = createAutonomousCreationService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getConfig: () => currentAgentConfig,
+  getRelationshipProfile: () => loadRelationshipProfile(app.getPath("userData")),
+  gamePlaytestService,
+  modelService: modelConversationService,
+  isHostReady: () => app.isReady(),
+  isOwnerTaskRunning: () => agentTaskRunning,
+  isScheduleBusy: () => scheduleService.snapshot().tickRunning,
+  isProactiveBusy: () => proactiveTickRunning,
+  ownerInteractionIdleSeconds: () => ownerInteractionIdleSeconds(currentLifeState),
+  publishInteraction: (message, mood, userText) => publishInterestInteraction(message, mood, userText),
+  publishProactiveEvent: (event) => publishProactiveEvent(event),
+  broadcastMood: (payload) => broadcastMoodUpdate(payload),
+  broadcastState: (payload) => broadcastInterestState(payload),
+  setExpression: (type) => setInterestExpression(type),
+  resolveLocationLabel: (location) => resolveLocationLabel(location),
+  openPath: (target) => shell.openPath(target),
+  isFile: (target) => fs.stat(target).then((stat) => stat.isFile()).catch(() => false),
+  onError: (scope, error) => console.error(`[interest-sandbox] ${scope} failed:`, error)
+});
+
+modelConversationService.registerIpc(handleChat);
+autonomousCreationService.registerIpc();
+
 async function resolveLocationLabel(location) {
   try {
     const latitude = Number(location?.latitude);
@@ -1408,65 +1427,10 @@ async function markOwnerInteraction(now = new Date()) {
   }
 }
 
-async function tickInterestSandbox() {
-  if (interestTickRunning || currentInterestActivity || agentTaskRunning || scheduleService.snapshot().tickRunning || proactiveTickRunning || !app.isReady()) return;
-  interestTickRunning = true;
-  try {
-    const settings = currentInterestSettings();
-    if (!settings.enabled || !settings.autonomousLifeEnabled) return;
-    const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), settings);
-    const diaryDue = Boolean(snapshot.session?.diaryDueAt)
-      && new Date(snapshot.session.diaryDueAt).getTime() <= Date.now()
-      && !snapshot.today.diaryWritten;
-    const idleEnough = ownerInteractionIdleSeconds(currentLifeState) >= settings.idleMinutes * 60;
-    if (!idleEnough) return;
-    const completedAfterLaunch = Boolean(snapshot.session?.lastTaskCompletedAt)
-      && new Date(snapshot.session.lastTaskCompletedAt) >= new Date(snapshot.session.launchedAt);
-    const pendingType = !diaryDue && idleEnough ? snapshot.session?.pendingActivity : null;
-    const decision = selectInterestActivity(settings, snapshot, new Date(), {
-      manualType: pendingType || undefined,
-      automaticDiaryDue: diaryDue,
-      hasCompletedOwnerTask: completedAfterLaunch
-    });
-    if (!decision.allowed) {
-      if (decision.budgetExhausted && !snapshot.session?.budgetRequestNotified) {
-        await updateInterestSession(app.getPath("userData"), { budgetRequestNotified: true });
-        publishProactiveEvent({
-          kind: "autonomous_budget_request",
-          message: `我今天分到的自主生活 Token 已经用完了，所以先停下来了。如果你希望我继续活动，可以在私密空间提高每日总预算。`,
-          mood: "sad"
-        });
-      }
-      return;
-    }
-    await executeInterestActivity(decision.type, {
-      manual: Boolean(pendingType),
-      routineId: decision.routineId || "",
-      category: decision.category || "creative",
-      automaticDiaryDue: diaryDue,
-      hasCompletedOwnerTask: completedAfterLaunch,
-      localOnly: decision.localOnly
-    });
-  } catch (error) {
-    console.error("[interest-sandbox] tick failed:", error);
-  } finally {
-    interestTickRunning = false;
-  }
-}
-
-function interestStatusLabel(type) {
-  const labels = {
-    diary: "整理今天的日记", drawing: "在笔记本上写写画画", mini_game: "制作并试玩离线小游戏",
-    collect_diary_materials: "收集今天的日记素材", browse_information: "看看天气和允许读取的资讯",
-    organize_memory: "整理记忆和近期话题", play_existing_game: "玩一个以前做的小游戏",
-    improve_existing_game: "改进以前制作的小游戏", review_drawing: "回顾以前画过的画",
-    plan_creation: "规划下一次创作", rest: "安静休息和发呆", prepare_chat_topics: "准备以后想和你聊的话题"
-  };
-  return labels[type] || "进行自己的沙盒活动";
-}
-
 function publishInterestInteraction(message, mood = "thinking", userText = "") {
-  const interactionMessages = userText ? [{ role: "user", content: userText }, { role: "assistant", content: message }] : [{ role: "assistant", content: message }];
+  const interactionMessages = userText
+    ? [{ role: "user", content: userText }, { role: "assistant", content: message }]
+    : [{ role: "assistant", content: message }];
   chatState = {
     ...chatState,
     messages: [...chatState.messages, ...interactionMessages],
@@ -1478,21 +1442,21 @@ function publishInterestInteraction(message, mood = "thinking", userText = "") {
   broadcastChatState();
   wakeBubbleWindow();
   broadcastMoodUpdate({ phase: "final", mood, reply: message });
-  if (currentInterestActivity) setInterestExpression(currentInterestActivity.type);
   return chatState;
 }
 
-function broadcastInterestState() {
-  const payload = currentInterestActivity
-    ? { status: "working", type: currentInterestActivity.type, label: currentInterestActivity.label || interestStatusLabel(currentInterestActivity.type), startedAt: currentInterestActivity.startedAt, activityId: currentInterestActivity.activityId || null, title: currentInterestActivity.title || "", phase: currentInterestActivity.phase || "working", progress: currentInterestActivity.progress || null, logs: (currentInterestActivity.logs || []).slice(-12) }
-    : { status: "idle", type: null, label: "当前没有进行创作", startedAt: null };
+let interestBubbleWokenForTask = "";
+function broadcastInterestState(payload) {
   for (const win of [petWindow, settingsWindow, composerWindow, chatWindow, bubbleWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:interest-state-updated", payload);
   }
-  if (payload.status === "working" && payload.type === "mini_game" && !currentInterestActivity.bubbleWoken && petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
-    currentInterestActivity.bubbleWoken = true;
+  const taskKey = payload.status === "working" ? `${payload.startedAt || ""}:${payload.activityId || ""}` : "";
+  if (taskKey && taskKey !== interestBubbleWokenForTask && payload.type === "mini_game"
+    && petWindow && !petWindow.isDestroyed() && petWindow.isVisible()) {
+    interestBubbleWokenForTask = taskKey;
     wakeBubbleWindow();
   }
+  if (!taskKey) interestBubbleWokenForTask = "";
   return payload;
 }
 
@@ -1504,332 +1468,6 @@ function setInterestExpression(type) {
       : new Set();
   broadcastActiveExpressions();
 }
-
-async function playtestInterestGame(activity, options = {}) {
-  if (!activity || activity.type !== "mini_game" || !isSafeInterestArtifact(app.getPath("userData"), activity.artifactPath)) {
-    throw new Error("只能试玩兴趣沙盒中的 HTML 小游戏。");
-  }
-  const settings = currentInterestSettings();
-  let repairAttempts = 0;
-  let extraTokens = 0;
-  let playtest;
-  const onProgress = (entry) => {
-    if (currentInterestActivity) {
-      currentInterestActivity.phase = entry.stage;
-      currentInterestActivity.progress = entry;
-      currentInterestActivity.label = entry.label;
-      currentInterestActivity.logs = [...(currentInterestActivity.logs || []), entry].slice(-24);
-      broadcastInterestState();
-    }
-    options.onProgress?.(entry);
-  };
-  while (true) {
-    playtest = await gamePlaytestService.run({
-      artifactPath: activity.artifactPath,
-      screenshotPath: path.join(path.dirname(activity.artifactPath), "playtest.png"),
-      maxSeconds: settings.selfPlayMaxSeconds,
-      maxActions: settings.selfPlayMaxActions,
-      signal: options.signal,
-      onProgress
-    });
-    if (playtest.cancelled || options.signal?.aborted) {
-      const completed = {
-        ...playtest,
-        cancelled: true,
-        outcome: "cancelled",
-        reflection: `我已经停下《${activity.title}》的试玩，刚才完成了 ${playtest.actions} 次操作。当前进度和终止记录已经保存。`,
-        repairAttempts
-      };
-      const recordedTokens = options.separateActivityRecord ? 0 : extraTokens;
-      const updated = await recordInterestPlaytest(app.getPath("userData"), activity.id, completed, recordedTokens);
-      return { activity: updated, playtest: completed, tokensUsed: extraTokens };
-    }
-    const needsRepair = !playtest.ok || !playtest.state.protocolDetected || playtest.errors.some((item) => ["console-error", "page-error", "render-gone", "load-failed", "unresponsive", "playtest-error"].includes(item.type));
-    if (!needsRepair || repairAttempts >= settings.selfRepairAttempts) break;
-    try {
-      onProgress({ stage: "repairing", label: `发现运行问题，正在第 ${repairAttempts + 1} 次修复`, actions: playtest.actions, highestScore: playtest.highestScore, at: new Date().toISOString() });
-      const repaired = await repairInterestGame(app.getPath("userData"), currentAgentConfig, activity, playtest, { signal: options.signal });
-      extraTokens += repaired.tokens;
-      repairAttempts += 1;
-    } catch (error) {
-      playtest.errors.push({ type: "repair-error", message: String(error?.message || error).slice(0, 500) });
-      break;
-    }
-  }
-  if (options.signal?.aborted) {
-    const completed = {
-      ...playtest, cancelled: true, outcome: "cancelled",
-      reflection: `我已经停下《${activity.title}》的试玩和修复，终止前完成了 ${playtest.actions} 次操作。`, repairAttempts
-    };
-    const recordedTokens = options.separateActivityRecord ? 0 : extraTokens;
-    const updated = await recordInterestPlaytest(app.getPath("userData"), activity.id, completed, recordedTokens);
-    return { activity: updated, playtest: completed, tokensUsed: extraTokens };
-  }
-  onProgress({ stage: "reflecting", label: "试玩结束，正在整理分数和感想", actions: playtest.actions, highestScore: playtest.highestScore, at: new Date().toISOString() });
-  const reflected = await generatePlaytestReflection(currentAgentConfig, activity, playtest, { signal: options.signal });
-  extraTokens += reflected.tokens;
-  const completed = {
-    ...playtest,
-    reflection: reflected.reflection,
-    repairAttempts
-  };
-  const recordedTokens = options.separateActivityRecord ? 0 : extraTokens;
-  const updated = await recordInterestPlaytest(app.getPath("userData"), activity.id, completed, recordedTokens);
-  return { activity: updated, playtest: completed, tokensUsed: extraTokens };
-}
-
-async function caughtInterestReply(activity = currentInterestActivity) {
-  const title = activity?.title ? `《${activity.title}》` : "这个小游戏";
-  const fallback = activity?.type === "mini_game"
-    ? `诶……你什么时候过来的？我刚玩到${title}这里，差一点就想装作什么都没发生了。你要看我继续，还是先把位置让给你？`
-    : `诶，你回来啦。我刚才在${activity?.label || interestStatusLabel(activity?.type)}，本来还想等整理好以后再悄悄给你看的。`;
-  if (!currentAgentConfig.deepseek?.apiKey) return fallback;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 6000);
-  try {
-    const endpoint = `${String(currentAgentConfig.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
-    const response = await net.fetch(endpoint, {
-      method: "POST",
-      signal: controller.signal,
-      headers: { authorization: `Bearer ${currentAgentConfig.deepseek.apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model: currentAgentConfig.deepseek.chatModel || currentAgentConfig.deepseek.model,
-        temperature: 0.9,
-        max_tokens: 260,
-        messages: [
-          {
-            role: "system",
-            content: [
-              currentAgentConfig.personaPrompt || `你是 ${currentAgentConfig.personaName || "Vivi"}。`,
-              "请严格保持当前人物卡的身份、措辞、亲密程度和表达习惯。",
-              "你正在自己的隔离沙盒里进行私人休闲活动，使用的是主人明确分配给你的沙盒预算。现在主人突然触碰你、发现了这件事。",
-              "表现应是私人小动作被撞见后的短暂慌张、遮掩、窘迫或转而邀请，而不是认错、机械道歉或声称自己越权。",
-              "只说一到两句自然口语。不要写舞台动作、括号描写、标签或固定客服话术；不要照抄用户给过的任何示例句。"
-            ].join("\n")
-          },
-          {
-            role: "user",
-            content: JSON.stringify({ activity: activity?.label || "沙盒活动", gameTitle: activity?.type === "mini_game" ? title : "", canStopOrContinue: true })
-          }
-        ]
-      })
-    });
-    if (!response.ok) return fallback;
-    const payload = await response.json();
-    const generated = String(payload.choices?.[0]?.message?.content || "").trim()
-      .replace(/^```[\s\S]*?\n|```$/g, "")
-      .slice(0, 500);
-    return generated || fallback;
-  } catch {
-    return fallback;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function executeExistingGamePlaytest(activity) {
-  if (currentInterestActivity) throw new Error("当前还有创作或试玩正在进行，请稍后再试。");
-  if (!activity) throw new Error("没有找到要试玩的小游戏。");
-  currentInterestActivity = {
-    type: "mini_game", label: `正在玩《${activity.title}》`, title: activity.title,
-    activityId: activity.id, startedAt: new Date().toISOString(), controller: new AbortController(), phase: "starting", logs: []
-  };
-  setInterestExpression("mini_game");
-  broadcastInterestState();
-  broadcastMoodUpdate({ phase: "final", mood: "thinking", reply: `我正在玩《${activity.title}》。` });
-  try {
-    const result = await playtestInterestGame(activity, { signal: currentInterestActivity.controller.signal });
-    const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
-    publishProactiveEvent({
-      kind: "interest_playtest",
-      message: `${result.playtest.reflection}${result.playtest.repairAttempts ? ` 我还自己修了 ${result.playtest.repairAttempts} 次。` : ""}`,
-      mood: result.playtest.cancelled ? "idle" : result.playtest.ok ? "happy" : "sad"
-    });
-    return { ...result, snapshot };
-  } finally {
-    currentInterestActivity = null;
-    setInterestExpression(null);
-    broadcastInterestState();
-  }
-}
-
-function matchingInterestGames(snapshot, message) {
-  const games = snapshot.activities.filter((item) => item.type === "mini_game" && item.status === "completed" && item.artifactPath);
-  const text = String(message || "").toLocaleLowerCase();
-  const named = games.filter((item) => text.includes(String(item.title || "").toLocaleLowerCase()));
-  return { games, matches: named.length ? named : [] };
-}
-
-async function tryHandleVirtualLifeChat(message) {
-  const text = String(message || "").trim();
-  if (!/(?:你(?:现在)?在(?:做|忙|干)什么|你在干嘛|虚拟日程|你今天有什么安排|接下来做什么)/.test(text)) return null;
-  const settings = currentInterestSettings();
-  if (!settings.enabled) return publishInterestInteraction("我现在就是安静陪着你。自主生活还没有开启，所以不会背着你安排沙盒活动。", "idle", text);
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), settings);
-  const next = snapshot.routine?.find((item) => item.status !== "completed");
-  const latest = snapshot.activities.find((item) => item.status === "completed");
-  const typeName = (type) => type === "drawing" ? "画点东西" : type === "mini_game" ? "做一个文字小游戏，再自己试玩" : "整理日记";
-  if (next) {
-    const due = new Date(next.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    return publishInterestInteraction(`我现在闲着，在整理今天可以写进日记的素材。下一项虚拟日程是 ${due} ${typeName(next.type)}${settings.networkAccess === "weather_news" ? "；到时候也会看看你允许读取的资讯标题" : ""}。你随时可以提前叫我开始。`, "idle", text);
-  }
-  if (latest) return publishInterestInteraction(`我现在闲着陪你。今天最近完成的是《${latest.title}》，暂时没有下一项虚拟日程；你也可以叫我画画、写游戏或者再玩一次。`, "happy", text);
-  return publishInterestInteraction("我现在没在忙，只是在自己的沙盒里整理想法，等一个适合写日记或做点小作品的时间。", "idle", text);
-}
-
-async function tryHandleInterestGameChat(message) {
-  const text = String(message || "").trim();
-  const wantsRevision = /(?:修改|改改|调整|优化|修复).{0,18}(?:小游戏|游戏)|(?:小游戏|游戏).{0,18}(?:修改|调整|优化|修复)/.test(text);
-  const wantsPlay = /(?:你|自己).{0,5}(?:玩|试玩).{0,12}(?:小游戏|游戏)?|(?:试玩|再玩一次).{0,12}(?:小游戏|游戏)/.test(text);
-  const wantsCreate = /(?:做|写|制作|生成|设计).{0,10}(?:小游戏|文字游戏).{0,10}(?:给我玩|你自己玩|试玩|玩玩)?/.test(text);
-  if (!wantsRevision && !wantsPlay && !wantsCreate) return null;
-  const settings = currentInterestSettings();
-  if (!settings.enabled || !settings.activities.miniGames) {
-    return publishInterestInteraction("小游戏沙盒目前没有开启。请先在“私密空间”里启用小游戏创作，我才会在隔离空间里制作和试玩。", "sad", text);
-  }
-  if (wantsCreate && !wantsRevision) {
-    const result = await executeInterestActivity("mini_game", { manual: true });
-    return publishInterestInteraction(result.playtest
-      ? `做好啦，是《${result.activity.title}》。我也自己试玩过了：${result.playtest.reflection}`
-      : `我做好了《${result.activity.title}》，你可以去私密空间打开它。`, "happy", text);
-  }
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), settings);
-  const { games, matches } = matchingInterestGames(snapshot, text);
-  if (!games.length) return publishInterestInteraction("我的沙盒里还没有能玩的小游戏。你可以先让我做一个文字小游戏。", "thinking", text);
-  if (wantsRevision) {
-    if (games.length > 1 && matches.length !== 1) {
-      return publishInterestInteraction(`你想改哪一个？现在有：${games.slice(0, 6).map((item) => `《${item.title}》`).join("、")}。请带上名字告诉我。`, "thinking", text);
-    }
-    const activity = matches[0] || games[0];
-    currentInterestActivity = { type: "mini_game", label: `修改《${activity.title}》`, title: activity.title, activityId: activity.id, startedAt: new Date().toISOString(), controller: new AbortController() };
-    setInterestExpression("mini_game");
-    broadcastInterestState();
-    try {
-      const revised = await reviseInterestGame(app.getPath("userData"), currentAgentConfig, activity, text, { signal: currentInterestActivity.controller.signal });
-      const result = settings.selfPlayGames ? await playtestInterestGame(revised.activity, { signal: currentInterestActivity.controller.signal }) : null;
-      return publishInterestInteraction(result ? `《${revised.activity.title}》已经按你的要求改好，我也重新试玩了：${result.playtest.reflection}` : `《${revised.activity.title}》已经按你的要求改好。`, "happy", text);
-    } finally {
-      currentInterestActivity = null;
-      setInterestExpression(null);
-      broadcastInterestState();
-    }
-  }
-  return publishInterestInteraction((await executeExistingGamePlaytest(matches[0] || games[0])).playtest.reflection, "happy", text);
-}
-
-async function executeInterestActivity(type, options = {}) {
-  if (agentTaskRunning || scheduleService.snapshot().tickRunning) throw new Error("当前还有主人交代的任务正在执行，请稍后再开始创作。");
-  if (currentInterestActivity) throw new Error("Vivi 正在进行另一项创作。");
-  const controller = new AbortController();
-  currentInterestActivity = { type, startedAt: new Date().toISOString(), controller };
-  broadcastInterestState();
-  broadcastMoodUpdate({ phase: "final", mood: "thinking", reply: `我正在${interestStatusLabel(type)}。` });
-  setInterestExpression(type);
-  try {
-    const activePersona = await getActivePersonaCard(app.getPath("userData"), currentAgentConfig);
-    const persona = activePersona ? { cardId: activePersona.id, version: activePersona.version, name: activePersona.payload.identityName || activePersona.name } : null;
-    if (!["diary", "drawing", "mini_game"].includes(type)) {
-      const lifeResult = await runAutonomousLifeActivity(app.getPath("userData"), currentAgentConfig, type, {
-        ...options, persona, signal: controller.signal
-      });
-      if (lifeResult.delegated === "play_existing_game") {
-        currentInterestActivity.label = `正在玩《${lifeResult.target.title}》`;
-        currentInterestActivity.title = lifeResult.target.title;
-        currentInterestActivity.activityId = lifeResult.target.id;
-        broadcastInterestState();
-        const played = await playtestInterestGame(lifeResult.target, { signal: controller.signal, separateActivityRecord: true });
-        const record = await recordDelegatedAutonomousActivity(app.getPath("userData"), type, lifeResult.target, played.playtest, { routineId: options.routineId, tokens: played.tokensUsed });
-        await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
-        return { activity: record, playtest: played.playtest, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()) };
-      }
-      if (lifeResult.delegated === "improve_existing_game") {
-        currentInterestActivity.label = `正在改进《${lifeResult.target.title}》`;
-        broadcastInterestState();
-        const revised = await reviseInterestGame(app.getPath("userData"), currentAgentConfig, lifeResult.target, "根据最近一次试玩感想和运行状态，小幅改进玩法、反馈或平衡，保持原主题。", { signal: controller.signal, separateActivityRecord: true });
-        const played = currentInterestSettings().selfPlayGames ? await playtestInterestGame(revised.activity, { signal: controller.signal, separateActivityRecord: true }) : null;
-        const record = await recordDelegatedAutonomousActivity(app.getPath("userData"), type, lifeResult.target, played?.playtest || { summary: "完成了一次小幅改进。" }, { routineId: options.routineId, tokens: revised.tokens + (played?.tokensUsed || 0) });
-        await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
-        return { activity: record, playtest: played?.playtest, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()) };
-      }
-      await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
-      return lifeResult;
-    }
-    const result = await runInterestActivity(app.getPath("userData"), currentAgentConfig, type, {
-      ...options,
-      persona,
-      signal: controller.signal
-    });
-    if (type === "mini_game" && currentInterestSettings().selfPlayGames) {
-      currentInterestActivity.label = `正在玩《${result.activity.title}》`;
-      currentInterestActivity.title = result.activity.title;
-      currentInterestActivity.activityId = result.activity.id;
-      broadcastInterestState();
-      broadcastMoodUpdate({ phase: "final", mood: "thinking", reply: "游戏做好了，我先自己试玩一下。" });
-      const played = await playtestInterestGame(result.activity, { signal: controller.signal });
-      result.activity = played.activity;
-      result.playtest = played.playtest;
-      result.snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
-    }
-    await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
-    if (type !== "diary") {
-      publishProactiveEvent({
-        kind: "interest_creation",
-        message: `${currentAgentConfig.personaName || "Vivi"} 在私密空间里${result.activity.action === "updated" ? "更新" : "完成"}了《${result.activity.title}》。你有空时可以去活动记录里看看。`,
-        mood: "happy"
-      });
-    }
-    const settings = currentInterestSettings();
-    if (type !== "diary" && settings.permissionLevel === "preview" && settings.autoOpenPreview && isSafeInterestArtifact(app.getPath("userData"), result.activity.artifactPath)) {
-      await shell.openPath(result.activity.artifactPath);
-    }
-    return result;
-  } catch (error) {
-    if (controller.signal.aborted || error?.name === "AbortError") {
-      await updateInterestSession(app.getPath("userData"), { pendingActivity: type });
-    }
-    throw error;
-  } finally {
-    currentInterestActivity = null;
-    setInterestExpression(null);
-    broadcastInterestState();
-  }
-}
-
-async function tryHandleDiaryChat(message) {
-  const intent = classifyDiaryRequest(message);
-  if (!intent) return null;
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
-  const profile = await loadRelationshipProfile(app.getPath("userData"));
-  const diary = snapshot.activities.find((item) => item.type === "diary" && item.day === snapshot.today.date && item.status === "completed" && item.artifactPath);
-  const written = Boolean(diary || snapshot.today.diaryWritten);
-
-  if (intent === "status") {
-    return publishInterestInteraction(diaryStatusReply({
-      written,
-      profile,
-      personaName: currentAgentConfig.personaName || "Vivi"
-    }), profile.emotion.suggestedMood || "idle", message);
-  }
-
-  const decision = diaryOpenReply({ written, profile });
-  if (decision.allowed && diary && isSafeInterestArtifact(app.getPath("userData"), diary.artifactPath)) {
-    const error = await shell.openPath(path.resolve(diary.artifactPath));
-    if (error) return publishInterestInteraction(`我想打开，但 Windows 没有成功：${error}`, "sad", message);
-  }
-  return publishInterestInteraction(decision.reply, profile.emotion.suggestedMood || "idle", message);
-}
-
-function startInterestSandbox() {
-  if (interestTimer) return;
-  void initializeInterestSession(app.getPath("userData"), new Date(), currentInterestSettings());
-  interestTimer = setInterval(() => { void tickInterestSandbox(); }, 5 * 60_000);
-}
-
-function stopInterestSandbox() {
-  if (interestTimer) clearInterval(interestTimer);
-  interestTimer = null;
-}
-
 function broadcastLive2DModels() {
   for (const win of [petWindow, settingsWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send("agent:live2d-models-updated", live2dModelOptions);
@@ -2186,7 +1824,9 @@ app.whenReady().then(async () => {
   currentLifeState = await loadLifeState(app.getPath("userData"));
   startProactiveLifeEngine();
   await scheduleService.start({ publishAgenda: !isBackgroundScheduleLaunch });
-  startInterestSandbox();
+  await autonomousCreationService.start().catch((error) => {
+    console.error("[interest-sandbox] startup failed:", error);
+  });
   if (!isBackgroundScheduleLaunch) {
     publishStartupStatus({ phase: "renderer", progress: 90, title: "正在加载 Vivi", detail: "等待 Live2D 模型完成渲染…" });
     if (startupRendererModelStatus) releaseStartupToApplication(startupRendererModelStatus);
@@ -2307,10 +1947,6 @@ ipcMain.handle("agent:create-persona-card", async (_event, input) => {
   const card = await createPersonaCard(app.getPath("userData"), input);
   return { card, cards: await listPersonaCards(app.getPath("userData")) };
 });
-ipcMain.handle("agent:generate-persona-card-draft", async (_event, input) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return generatePersonaCardDraft(config, input, net.fetch.bind(net));
-});
 ipcMain.handle("agent:update-persona-card", async (_event, cardId, input) => {
   const card = await updatePersonaCard(app.getPath("userData"), cardId, input);
   const active = (await listPersonaCards(app.getPath("userData"))).find((item) => item.id === cardId)?.isActive;
@@ -2375,26 +2011,10 @@ ipcMain.handle("agent:open-live2d-models-folder", async () => {
   return shell.openPath(modelsDirectory);
 });
 
-ipcMain.handle("agent:chat", async (_event, payload) => {
+async function handleChat(payload) {
   await markOwnerInteraction();
-  if (currentInterestActivity) {
-    const text = String(payload?.message || "").trim();
-    if (/^(?:终止|停止|取消)(?:创作|当前创作|这个任务|吧)?$/.test(text)) {
-      const label = currentInterestActivity.label || interestStatusLabel(currentInterestActivity.type);
-      currentInterestActivity.controller.abort(new Error("用户终止创作"));
-      return publishInterestInteraction(`好，我先停下${label}。这项内容会保留为待继续，等你一段时间没有和我互动、我也没有其他事务时，再接着完成。`, "idle", text);
-    }
-    if (/^(?:等待|继续|等你完成|你继续|继续完成)(?:吧)?$/.test(text)) {
-      return publishInterestInteraction(`好，我继续${currentInterestActivity.label || interestStatusLabel(currentInterestActivity.type)}，完成后再告诉你。`, "thinking", text);
-    }
-    return publishInterestInteraction(await caughtInterestReply(), "surprised", text);
-  }
-  const interestGameReply = await tryHandleInterestGameChat(payload.message);
-  if (interestGameReply) return interestGameReply;
-  const virtualLifeReply = await tryHandleVirtualLifeChat(payload.message);
-  if (virtualLifeReply) return virtualLifeReply;
-  const diaryReply = await tryHandleDiaryChat(payload.message);
-  if (diaryReply) return diaryReply;
+  const interestReply = await autonomousCreationService.handleChat(payload.message);
+  if (interestReply) return interestReply;
   if (String(chatState.lastReplyMeta?.localTool || "").startsWith("proactive_")) {
     const feedback = detectProactiveFeedback(payload.message);
     if (feedback) await recordProactiveFeedback(app.getPath("userData"), feedback);
@@ -2404,10 +2024,9 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   const isAction = route.type !== "chat";
   const isQuery = /查询|查看|看看|检查|状态|多少|有没有|在运行吗|还在吗/.test(payload.message);
   const pendingText = isAction ? (isQuery ? "正在查询本机状态..." : "正在执行...") : "";
-  const assistantPlaceholder = { role: "assistant", content: pendingText };
   chatState = {
     ...chatState,
-    messages: [...chatState.messages, userMessage, assistantPlaceholder],
+    messages: [...chatState.messages, userMessage, { role: "assistant", content: pendingText }],
     lastReplyMeta: {
       responseMode: isAction ? "local_tool" : "deepseek_chat",
       usedKnowledge: false,
@@ -2420,89 +2039,55 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   };
   broadcastChatState();
   wakeBubbleWindow();
-
-  // Stage 1: react locally before any network/LLM work starts. This gives the
-  // character an immediate, deliberately subtle acknowledgement of the user.
-  const fastReaction = classifyFastReaction(payload.message);
-  broadcastMoodUpdate({
-    phase: "anticipation",
-    ...fastReaction
-  });
+  broadcastMoodUpdate({ phase: "anticipation", ...classifyFastReaction(payload.message) });
 
   let result;
   agentTaskRunning = true;
   try {
-    result = await buildAgentReply(app.getPath("userData"), {
-      ...payload,
-      ragClient: ragTaskClient,
-      scheduleClient: {
-        afterMutation: () => scheduleService.afterMutation(),
-        abortPowerAction: () => scheduleService.abortPowerAction()
-      },
+    result = await modelConversationService.generateReply(payload, {
       stream: true,
       onDelta: (partialReply) => {
         const nextMessages = [...chatState.messages];
-        nextMessages[nextMessages.length - 1] = {
-          role: "assistant",
-          content: partialReply
-        };
-        chatState = {
-          ...chatState,
-          messages: nextMessages
-        };
+        nextMessages[nextMessages.length - 1] = { role: "assistant", content: partialReply };
+        chatState = { ...chatState, messages: nextMessages };
         broadcastChatState();
       }
     });
-    await updateInterestSession(app.getPath("userData"), { lastTaskCompletedAt: new Date().toISOString() });
+    await autonomousCreationService.markOwnerTaskCompleted();
   } finally {
     agentTaskRunning = false;
   }
 
-  if (result.meta?.personaChanged) {
-    await refreshRuntimePersona();
-  }
-
+  if (result.meta?.personaChanged) await refreshRuntimePersona();
   chatState = {
-    messages: [
-      ...chatState.messages.slice(0, -1),
-      { role: "assistant", content: result.reply }
-    ],
+    messages: [...chatState.messages.slice(0, -1), { role: "assistant", content: result.reply }],
     knowledge: result.knowledge,
-    lastReplyMeta: {
-      ...result.meta,
-      sourceLabel: getReplySourceLabel(result.meta)
-    }
+    lastReplyMeta: { ...result.meta, sourceLabel: getReplySourceLabel(result.meta) }
   };
   broadcastChatState();
-  if (result.meta?.relationship) {
-    broadcastRelationshipProfile(result.meta.relationship);
-  }
-
+  if (result.meta?.relationship) broadcastRelationshipProfile(result.meta.relationship);
   activeManualExpressions = new Set(
     [...activeManualExpressions].filter((name) => persistentShapeExpressions.has(name))
   );
   broadcastActiveExpressions();
-
-  // Keep whichever Live2D surface is visible in sync. The chat model needs the
-  // same finite speaking cue as the desktop pet or its mouth animation never ends.
   broadcastMoodUpdate({
     phase: "final",
     mood: result.meta?.detectedMood || "happy",
     faceParams: result.meta?.faceParams || null,
     reply: result.reply
   });
-
   return chatState;
-});
+}
 
 ipcMain.handle("agent:pet-touch", async () => {
   await markOwnerInteraction();
-  if (currentInterestActivity) {
+  if (autonomousCreationService.isBusy()) {
+    const reply = await autonomousCreationService.caughtReply();
     return {
       ok: true,
       busy: true,
       interestBusy: true,
-      reply: publishInterestInteraction(await caughtInterestReply(), "surprised").messages.at(-1).content,
+      reply: publishInterestInteraction(reply, "surprised").messages.at(-1).content,
       mood: "surprised"
     };
   }
@@ -2556,8 +2141,12 @@ app.on("before-quit", (event) => {
   if (!shutdownCleanupDone) {
     shutdownCleanupDone = true;
     stopProactiveLifeEngine();
-    scheduleService.dispose();
-    stopInterestSandbox();
+    const scheduleShutdown = scheduleService.dispose();
+    phase4cShutdownPromise = Promise.allSettled([
+      scheduleShutdown,
+      autonomousCreationService.dispose(),
+      modelConversationService.dispose()
+    ]).then(() => undefined);
     stopGlobalCursorTracking();
     modelDirectoryWatcher?.close();
     modelDirectoryWatcher = null;
@@ -2570,8 +2159,10 @@ app.on("before-quit", (event) => {
   if (gptSovitsShutdownStarted) return;
   event.preventDefault();
   gptSovitsShutdownStarted = true;
-  void speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
-    .catch((error) => console.warn("[voice] GPT-SoVITS shutdown failed:", error))
+  void Promise.allSettled([
+    phase4cShutdownPromise,
+    speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
+  ])
     .finally(() => app.quit());
 });
 
@@ -2584,55 +2175,6 @@ ipcMain.handle("agent:get-life-state", async () => {
   return currentLifeState;
 });
 
-ipcMain.handle("agent:get-interest-sandbox", async () => getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()));
-
-ipcMain.handle("agent:run-interest-activity", async (_event, type) => {
-  return executeInterestActivity(type, { manual: true });
-});
-
-ipcMain.handle("agent:get-interest-state", async () => broadcastInterestState());
-
-ipcMain.handle("agent:cleanup-interest-sandbox", async (_event, mode) => {
-  const result = await cleanupInterestSandbox(app.getPath("userData"), mode);
-  return { result, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()) };
-});
-
-ipcMain.handle("agent:play-interest-game", async (_event, activityId) => {
-  const activity = await getInterestActivity(app.getPath("userData"), activityId);
-  return executeExistingGamePlaytest(activity);
-});
-
-ipcMain.handle("agent:interrupt-interest-activity", async () => {
-  if (!currentInterestActivity) return { interrupted: false, state: broadcastInterestState() };
-  const label = currentInterestActivity.label || interestStatusLabel(currentInterestActivity.type);
-  currentInterestActivity.phase = "stopping";
-  currentInterestActivity.label = "正在停止试玩并保存当前记录";
-  currentInterestActivity.logs = [...(currentInterestActivity.logs || []), { stage: "stopping", label: "收到停止请求，正在关闭隔离窗口", at: new Date().toISOString() }].slice(-24);
-  currentInterestActivity.controller.abort(new Error("用户从桌面气泡终止活动"));
-  broadcastInterestState();
-  return { interrupted: true, label };
-});
-
-ipcMain.handle("agent:update-interest-location", async (_event, location) => {
-  const label = await resolveLocationLabel(location);
-  await saveInterestLocation(app.getPath("userData"), { ...location, ...label });
-  return getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
-});
-
-ipcMain.handle("agent:open-interest-sandbox", async () => {
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
-  await shell.openPath(snapshot.root);
-  return snapshot.root;
-});
-
-ipcMain.handle("agent:open-interest-artifact", async (_event, artifactPath) => {
-  if (!isSafeInterestArtifact(app.getPath("userData"), artifactPath)) throw new Error("只能打开兴趣沙盒内的作品。");
-  const exists = await fs.stat(path.resolve(artifactPath)).then((stat) => stat.isFile()).catch(() => false);
-  if (!exists) throw new Error("作品文件已经被移除。请在“空间管理”中清理游戏文件夹，以同步活动记录。");
-  const error = await shell.openPath(path.resolve(artifactPath));
-  if (error) throw new Error(error);
-  return true;
-});
 
 ipcMain.handle("agent:pause-proactive-today", async () => {
   currentLifeState = await pauseProactiveForToday(app.getPath("userData"));
@@ -2683,9 +2225,6 @@ ipcMain.handle("agent:open-external", async (_event, url) => {
   return true;
 });
 
-ipcMain.handle("agent:test-deepseek", async () => {
-  return testDeepSeekConnection(app.getPath("userData"));
-});
 
 ipcMain.handle("agent:open-settings-window", async () => {
   return openSettingsWindow();
@@ -2880,17 +2419,6 @@ ipcMain.handle("agent:open-data-folder", async () => {
   const dataDir = path.join(app.getPath("userData"), "agent-data");
   await shell.openPath(dataDir);
   return true;
-});
-
-ipcMain.handle("agent:open-interest-category", async (_event, category) => {
-  const names = { diary: "diary", drawing: "drawings", mini_game: "games" };
-  const directory = names[category];
-  if (!directory) throw new Error("不支持的兴趣作品分类。");
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
-  const target = path.join(snapshot.root, directory);
-  const error = await shell.openPath(target);
-  if (error) throw new Error(error);
-  return target;
 });
 
 ipcMain.handle("agent:open-persona-folder", async () => {

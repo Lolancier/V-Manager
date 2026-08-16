@@ -532,10 +532,11 @@ function mergeModelUsage(current, next) {
   return { ...merged, cacheHitRate: merged.promptTokens > 0 ? merged.cacheHitTokens / merged.promptTokens : 0 };
 }
 
-async function requestDeepSeek(config, messages, onUsage, fetchImpl = fetch) {
+async function requestDeepSeek(config, messages, onUsage, fetchImpl = fetch, signal) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const response = await fetchImpl(endpoint, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${config.deepseek.apiKey}`
@@ -577,7 +578,7 @@ export async function generateAsmrScript(baseDir, { mode = "custom", prompt = ""
   return content.replace(/^\s*\[(?:mood|face):.*\]\s*$/gim, "").trim();
 }
 
-async function callDeepSeekWithTools(config, messages, tools, onUsage) {
+async function callDeepSeekWithTools(config, messages, tools, onUsage, fetchImpl = fetch, signal) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const body = {
     model: config.deepseek.model,
@@ -590,8 +591,9 @@ async function callDeepSeekWithTools(config, messages, tools, onUsage) {
     body.tool_choice = "auto";
   }
 
-  const response = await fetch(endpoint, {
+  const response = await fetchImpl(endpoint, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${config.deepseek.apiKey}`
@@ -609,10 +611,11 @@ async function callDeepSeekWithTools(config, messages, tools, onUsage) {
   return normalizeToolCallMessage(data.choices?.[0]?.message ?? { content: "模型没有返回有效内容。" }, tools || []);
 }
 
-export async function requestDeepSeekStream(config, messages, onDelta, allowRetry = true, onUsage) {
+export async function requestDeepSeekStream(config, messages, onDelta, allowRetry = true, onUsage, fetchImpl = fetch, signal) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const response = await fetch(endpoint, {
+  const response = await fetchImpl(endpoint, {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${config.deepseek.apiKey}`
@@ -714,13 +717,13 @@ export async function requestDeepSeekStream(config, messages, onDelta, allowRetr
       receivedReasoning,
       firstReplyLength: reply.length
     });
-    return requestDeepSeekStream(retryConfig, messages, onDelta, false, onUsage);
+    return requestDeepSeekStream(retryConfig, messages, onDelta, false, onUsage, fetchImpl, signal);
   }
 
   return reply.trim() || INCOMPLETE_MODEL_REPLY;
 }
 
-export async function testDeepSeekConnection(baseDir) {
+export async function testDeepSeekConnection(baseDir, fetchImpl = fetch, signal) {
   const config = await loadConfig(baseDir);
 
   if (!config.deepseek.apiKey) {
@@ -734,8 +737,9 @@ export async function testDeepSeekConnection(baseDir) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
 
   try {
-    const response = await fetch(endpoint, {
+    const response = await fetchImpl(endpoint, {
       method: "POST",
+      signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.deepseek.apiKey}`
@@ -769,6 +773,7 @@ export async function testDeepSeekConnection(baseDir) {
       config
     };
   } catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
     return {
       ok: false,
       message: `DeepSeek 连通性测试异常：${error.message}`,
@@ -1364,8 +1369,8 @@ export async function buildAgentReply(baseDir, payload) {
     };
     try {
       reply = payload.stream
-        ? await requestDeepSeekStream(fastConfig, messages, payload.onDelta, true, captureUsage)
-        : await requestDeepSeek(fastConfig, messages, captureUsage);
+        ? await requestDeepSeekStream(fastConfig, messages, payload.onDelta, true, captureUsage, payload.fetchImpl, payload.signal)
+        : await requestDeepSeek(fastConfig, messages, captureUsage, payload.fetchImpl, payload.signal);
       const moodResult = parseMoodTag(reply);
       const faceResult = parseFaceTag(moodResult.cleanReply);
       reply = faceResult.cleanReply;
@@ -1379,6 +1384,7 @@ export async function buildAgentReply(baseDir, payload) {
         faceParams: safeFaceParams || undefined
       };
     } catch (error) {
+      if (payload.signal?.aborted) throw payload.signal.reason || error;
       fallbackReason = error.message;
       reply = `${buildFallbackReplyV2(config, payload.message, knowledge, { hasApiKey: true })}\n\n模型调用报错：${error.message}`;
       meta = { ...meta, fallbackReason };
@@ -1386,7 +1392,7 @@ export async function buildAgentReply(baseDir, payload) {
   } else if (config.deepseek.apiKey) {
     try {
       // Function calling loop: up to 5 rounds of tool calls
-      let response = await callDeepSeekWithTools(responseConfig, messages, routeTools, captureUsage);
+      let response = await callDeepSeekWithTools(responseConfig, messages, routeTools, captureUsage, payload.fetchImpl, payload.signal);
       let round = 0;
       const maxRounds = codeContext?.mode === "agent" ? 12 : 6;
 
@@ -1432,6 +1438,7 @@ export async function buildAgentReply(baseDir, payload) {
 
         // Execute each tool call
         for (const tc of response.tool_calls) {
+          payload.signal?.throwIfAborted();
           let args = {};
           try {
             args = JSON.parse(tc.function.arguments || "{}");
@@ -1460,7 +1467,7 @@ export async function buildAgentReply(baseDir, payload) {
         }
 
         // Next round
-        response = await callDeepSeekWithTools(responseConfig, messages, round < maxRounds - 1 ? routeTools : null, captureUsage);
+        response = await callDeepSeekWithTools(responseConfig, messages, round < maxRounds - 1 ? routeTools : null, captureUsage, payload.fetchImpl, payload.signal);
       }
 
       // Final reply
@@ -1468,7 +1475,7 @@ export async function buildAgentReply(baseDir, payload) {
         // LLM only called set_mood without text — use mood as reply hint
         reply = {happy:"嗯嗯~", sad:"呜呜…", surprised:"诶？！", angry:"哼！", blush:"诶嘿~", thinking:"嗯…"}[interceptedMood] || "好的~";
       } else if (payload.stream && toolUseCount === 0) {
-        reply = await requestDeepSeekStream(responseConfig, messages, payload.onDelta, true, captureUsage);
+        reply = await requestDeepSeekStream(responseConfig, messages, payload.onDelta, true, captureUsage, payload.fetchImpl, payload.signal);
       } else {
         reply = response.content || "模型没有返回有效内容。";
         if (payload.stream && payload.onDelta) {
@@ -1511,6 +1518,7 @@ export async function buildAgentReply(baseDir, payload) {
         faceParams: faceParams || undefined,
       };
     } catch (error) {
+      if (payload.signal?.aborted) throw payload.signal.reason || error;
       fallbackReason = error.message;
       reply = `${buildFallbackReplyV2(config, payload.message, knowledge, { hasApiKey: true })}\n\n模型调用报错：${error.message}`;
       meta = {
@@ -1547,6 +1555,7 @@ export async function buildAgentReply(baseDir, payload) {
     }
   }
 
+  payload.signal?.throwIfAborted();
   await appendHistory(baseDir, {
     timestamp: new Date().toISOString(),
     user: payload.message,

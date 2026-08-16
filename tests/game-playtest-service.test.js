@@ -19,7 +19,6 @@ test("game playtest service injects the isolated driver and tracks active work",
   assert.deepEqual(await result, { ok: true });
   assert.deepEqual(service.snapshot(), { disposed: false, active: 0 });
 });
-
 test("disposing the playtest service aborts active work and rejects new runs", async () => {
   let observedSignal;
   let finish;
