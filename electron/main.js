@@ -51,6 +51,7 @@ import { createFileManagerService } from "./services/file-manager-service.js";
 import { createHostShellService } from "./services/host-shell-service.js";
 import { createSystemResourceService } from "./services/system-resource-service.js";
 import { createCompanionLifeService } from "./services/companion-life-service.js";
+import { createWindowIntentService } from "./services/window-intent-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -1206,6 +1207,16 @@ const companionLifeService = createCompanionLifeService({
   now: () => Date.now()
 });
 
+const windowIntentService = createWindowIntentService({
+  trustedIpc,
+  openSettingsWindow: () => openSettingsWindow(),
+  openComposerWindow: () => openComposerWindow(),
+  openChatWindow: () => openChatWindow(),
+  openCodeWindow: () => openCodeWindow(),
+  openScaleWindow: () => openScaleWindow(),
+  openExpressionWindow: () => openExpressionWindow()
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1253,6 +1264,7 @@ systemResourceService.registerIpc().start();
 fileManagerService.registerIpc().start();
 hostShellService.registerIpc().start();
 companionLifeService.registerIpc().start();
+windowIntentService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1935,7 +1947,8 @@ app.on("before-quit", (event) => {
       systemResourceService.dispose(),
       fileManagerService.dispose(),
       hostShellService.dispose(),
-      companionLifeService.dispose()
+      companionLifeService.dispose(),
+      windowIntentService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();
@@ -1952,22 +1965,6 @@ app.on("before-quit", (event) => {
     speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
   ])
     .finally(() => app.quit());
-});
-
-ipcMain.handle("agent:open-settings-window", async () => {
-  return openSettingsWindow();
-});
-
-ipcMain.handle("agent:open-composer-window", async () => {
-  return openComposerWindow();
-});
-
-ipcMain.handle("agent:open-chat-window", async () => {
-  return openChatWindow();
-});
-
-ipcMain.handle("agent:open-code-window", async () => {
-  return openCodeWindow();
 });
 
 ipcMain.handle("agent:get-code-workspace", async () => {

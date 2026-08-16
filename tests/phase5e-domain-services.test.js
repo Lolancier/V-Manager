@@ -19,6 +19,10 @@ import {
   COMPANION_LIFE_HANDLE_CHANNELS,
   createCompanionLifeService
 } from "../electron/services/companion-life-service.js";
+import {
+  WINDOW_INTENT_HANDLE_CHANNELS,
+  createWindowIntentService
+} from "../electron/services/window-intent-service.js";
 
 function ipcDouble() {
   const handlers = new Map();
@@ -331,4 +335,38 @@ test("companion pet-touch preserves autonomous busy return shape", async () => {
     mood: "surprised"
   });
   assert.throws(() => ipc.handlers.get("agent:pet-touch")(trustedEvent("https://example.com")), /拒绝/);
+});
+
+test("window intent service forwards open requests through the trust boundary", async () => {
+  const calls = [];
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createWindowIntentService({
+    trustedIpc,
+    openSettingsWindow: async () => { calls.push("settings"); return true; },
+    openComposerWindow: async () => { calls.push("composer"); return true; },
+    openChatWindow: async () => { calls.push("chat"); return true; },
+    openCodeWindow: async () => { calls.push("code"); return true; },
+    openScaleWindow: async () => { calls.push("scale"); return true; },
+    openExpressionWindow: async () => { calls.push("expression"); return true; }
+  });
+  service.registerIpc().start();
+
+  for (const channel of WINDOW_INTENT_HANDLE_CHANNELS) {
+    assert.equal(await ipc.handlers.get(channel)(trustedEvent()), true);
+  }
+  assert.throws(() => ipc.handlers.get("agent:open-settings-window")(trustedEvent("https://example.com")), /拒绝/);
+  assert.deepEqual(calls, ["settings", "composer", "chat", "code", "scale", "expression"]);
+  assert.deepEqual(service.snapshot().requests, {
+    "agent:open-settings-window": 1,
+    "agent:open-composer-window": 1,
+    "agent:open-chat-window": 1,
+    "agent:open-code-window": 1,
+    "agent:open-scale-window": 1,
+    "agent:open-expression-window": 1
+  });
+  service.stop();
+  await assert.rejects(ipc.handlers.get("agent:open-settings-window")(trustedEvent()), /尚未启动/);
+  service.start();
+  service.dispose();
+  assert.equal(ipc.handlers.has("agent:open-settings-window"), false);
 });
