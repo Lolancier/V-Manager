@@ -14,7 +14,7 @@ import {
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
-import { loadRelationshipProfile, recordPetTouch } from "../src-agent/relationship-engine.js";
+import { loadRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { classifyFastReaction } from "../src-agent/fast-reaction.js";
 import {
@@ -29,9 +29,7 @@ import {
 import {
   evaluateLifeTick,
   loadLifeState,
-  pauseProactiveForToday,
   recordOwnerInteraction,
-  resetWorkSession,
   saveLifeState
 } from "../src-agent/proactive-engine.js";
 import { normalizeInterestConfig } from "../src-agent/interest-sandbox.js";
@@ -52,6 +50,7 @@ import { createSettingsService } from "./services/settings-service.js";
 import { createFileManagerService } from "./services/file-manager-service.js";
 import { createHostShellService } from "./services/host-shell-service.js";
 import { createSystemResourceService } from "./services/system-resource-service.js";
+import { createCompanionLifeService } from "./services/companion-life-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -233,7 +232,6 @@ async function initializeStartupConversation(baseDir) {
   startupDiagnostics.deepseek = greeting.mode === "model" ? "ready" : currentAgentConfig.deepseek?.apiKey ? "unavailable" : "not_configured";
   startupDiagnostics.historyRestored = history.length;
 }
-let lastPetTouchAt = 0;
 
 function getTitleBarOverlay(theme = currentAppearanceTheme, forceDark = false) {
   const dark = forceDark || theme === "dark";
@@ -1189,6 +1187,25 @@ const hostShellService = createHostShellService({
   showItemInFolder: (target) => shell.showItemInFolder(target)
 });
 
+const companionLifeService = createCompanionLifeService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getLifeState: () => currentLifeState,
+  setLifeState: (state) => { currentLifeState = state; },
+  onLifeStateUpdated: (state) => broadcastLifeState(state),
+  markOwnerInteraction,
+  isAutonomousBusy: () => autonomousCreationService.isBusy(),
+  getCaughtInterestReply: () => autonomousCreationService.caughtReply(),
+  publishInterestInteraction: (reply, mood) => publishInterestInteraction(reply, mood),
+  getChatState: () => chatState,
+  setChatState: (state) => { chatState = state; },
+  broadcastChatState,
+  broadcastRelationshipProfile,
+  broadcastMoodUpdate,
+  mergeConfig: mergeAgentConfig,
+  now: () => Date.now()
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1235,6 +1252,7 @@ settingsService.registerIpc();
 systemResourceService.registerIpc().start();
 fileManagerService.registerIpc().start();
 hostShellService.registerIpc().start();
+companionLifeService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1901,63 +1919,6 @@ async function handleChat(payload) {
   return chatState;
 }
 
-ipcMain.handle("agent:pet-touch", async () => {
-  await markOwnerInteraction();
-  if (autonomousCreationService.isBusy()) {
-    const reply = await autonomousCreationService.caughtReply();
-    return {
-      ok: true,
-      busy: true,
-      interestBusy: true,
-      reply: publishInterestInteraction(reply, "surprised").messages.at(-1).content,
-      mood: "surprised"
-    };
-  }
-  if (/^(生成中|正在执行|正在查询)/.test(chatState.lastReplyMeta?.sourceLabel || "")) {
-    return { ok: false, busy: true };
-  }
-  const now = Date.now();
-  const cooldownMs = 1400;
-  if (now - lastPetTouchAt < cooldownMs) {
-    return { ok: false, cooldownMs: cooldownMs - (now - lastPetTouchAt) };
-  }
-  lastPetTouchAt = now;
-
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  const reaction = await recordPetTouch(app.getPath("userData"), {
-    grow: config.relationship?.enabled !== false
-  });
-  const replacePreviousTouch = chatState.lastReplyMeta?.sourceLabel === "触碰互动"
-    && chatState.messages.at(-1)?.role === "assistant";
-  const nextMessages = replacePreviousTouch
-    ? [...chatState.messages.slice(0, -1), { role: "assistant", content: reaction.reply }]
-    : [...chatState.messages, { role: "assistant", content: reaction.reply }];
-  chatState = {
-    ...chatState,
-    messages: nextMessages,
-    lastReplyMeta: {
-      responseMode: "local_tool",
-      usedKnowledge: false,
-      knowledgeCount: 0,
-      knowledgeFiles: [],
-      fallbackReason: "",
-      model: "local-relationship-engine",
-      detectedMood: reaction.mood,
-      relationship: reaction.profile,
-      sourceLabel: "触碰互动"
-    }
-  };
-  broadcastChatState();
-  broadcastRelationshipProfile(reaction.profile);
-  broadcastMoodUpdate({
-    phase: "final",
-    mood: reaction.mood,
-    faceParams: reaction.faceParams,
-    reply: reaction.reply
-  });
-  return { ok: true, ...reaction };
-});
-
 app.on("before-quit", (event) => {
   app.isQuiting = true;
   if (!shutdownCleanupDone) {
@@ -1973,7 +1934,8 @@ app.on("before-quit", (event) => {
       live2dModelService.dispose(),
       systemResourceService.dispose(),
       fileManagerService.dispose(),
-      hostShellService.dispose()
+      hostShellService.dispose(),
+      companionLifeService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();
@@ -1990,24 +1952,6 @@ app.on("before-quit", (event) => {
     speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
   ])
     .finally(() => app.quit());
-});
-
-ipcMain.handle("agent:get-life-state", async () => {
-  currentLifeState = currentLifeState ?? await loadLifeState(app.getPath("userData"));
-  return currentLifeState;
-});
-
-
-ipcMain.handle("agent:pause-proactive-today", async () => {
-  currentLifeState = await pauseProactiveForToday(app.getPath("userData"));
-  broadcastLifeState(currentLifeState);
-  return currentLifeState;
-});
-
-ipcMain.handle("agent:reset-work-session", async () => {
-  currentLifeState = await resetWorkSession(app.getPath("userData"));
-  broadcastLifeState(currentLifeState);
-  return currentLifeState;
 });
 
 ipcMain.handle("agent:open-settings-window", async () => {

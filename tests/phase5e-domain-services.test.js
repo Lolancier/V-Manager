@@ -15,6 +15,10 @@ import {
   HOST_SHELL_HANDLE_CHANNELS,
   createHostShellService
 } from "../electron/services/host-shell-service.js";
+import {
+  COMPANION_LIFE_HANDLE_CHANNELS,
+  createCompanionLifeService
+} from "../electron/services/companion-life-service.js";
 
 function ipcDouble() {
   const handlers = new Map();
@@ -207,4 +211,124 @@ test("host shell service validates external URLs and owns data-path side effects
     ["show", path.join("C:/userData", "agent-data", "storage", "vivi.sqlite")]
   ]);
   service.dispose();
+});
+
+test("companion life service preserves pet-touch state transitions and cooldowns", async () => {
+  const calls = [];
+  let currentLifeState = null;
+  let chatState = {
+    messages: [{ role: "assistant", content: "旧触碰" }],
+    lastReplyMeta: { sourceLabel: "触碰互动" }
+  };
+  const broadcasts = [];
+  const reaction = {
+    reply: "新触碰",
+    mood: "happy",
+    faceParams: { mouth: 1 },
+    profile: { affection: 2 }
+  };
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createCompanionLifeService({
+    trustedIpc,
+    getBaseDir: () => "base",
+    dependencies: {
+      loadConfig: async () => ({ relationship: { enabled: true } }),
+      loadLifeState: async () => ({ paused: false }),
+      pauseProactiveForToday: async () => ({ paused: true }),
+      resetWorkSession: async () => ({ workSession: null }),
+      recordPetTouch: async (_baseDir, input) => { calls.push(["touch", input]); return reaction; }
+    },
+    getLifeState: () => currentLifeState,
+    setLifeState: (state) => { currentLifeState = state; },
+    onLifeStateUpdated: (state) => broadcasts.push(state),
+    markOwnerInteraction: async () => { calls.push(["owner"]); },
+    isAutonomousBusy: () => false,
+    getCaughtInterestReply: async () => ({}),
+    publishInterestInteraction: (reply, mood) => { calls.push(["interest", reply, mood]); },
+    getChatState: () => chatState,
+    setChatState: (state) => { chatState = state; },
+    broadcastChatState: () => broadcasts.push("chat"),
+    broadcastRelationshipProfile: (profile) => broadcasts.push(profile),
+    broadcastMoodUpdate: (payload) => broadcasts.push(payload),
+    mergeConfig: (config) => config,
+    now: (() => {
+      let current = 2000;
+      return () => {
+        current += 600;
+        return current;
+      };
+    })()
+  });
+  service.registerIpc().start();
+
+  assert.deepEqual(await ipc.handlers.get("agent:get-life-state")(trustedEvent()), { paused: false });
+  assert.deepEqual(await ipc.handlers.get("agent:pause-proactive-today")(trustedEvent()), { paused: true });
+  assert.deepEqual(await ipc.handlers.get("agent:reset-work-session")(trustedEvent()), { workSession: null });
+
+  const result = await ipc.handlers.get("agent:pet-touch")(trustedEvent());
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, "新触碰");
+  assert.deepEqual(chatState.messages, [{ role: "assistant", content: "新触碰" }]);
+  assert.equal(chatState.lastReplyMeta.model, "local-relationship-engine");
+  assert.deepEqual(await ipc.handlers.get("agent:pet-touch")(trustedEvent()), {
+    ok: false,
+    cooldownMs: 800
+  });
+  assert.deepEqual(COMPANION_LIFE_HANDLE_CHANNELS, [
+    "agent:pet-touch",
+    "agent:get-life-state",
+    "agent:pause-proactive-today",
+    "agent:reset-work-session"
+  ]);
+  assert.deepEqual(calls, [
+    ["owner"],
+    ["touch", { grow: true }],
+    ["owner"]
+  ]);
+  assert.equal(service.snapshot().petTouchCooldownActive, true);
+  service.dispose();
+});
+
+test("companion pet-touch preserves autonomous busy return shape", async () => {
+  let chatState = { messages: [], lastReplyMeta: null };
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createCompanionLifeService({
+    trustedIpc,
+    getBaseDir: () => "base",
+    dependencies: {
+      loadConfig: async () => ({}),
+      loadLifeState: async () => ({}),
+      pauseProactiveForToday: async () => ({}),
+      resetWorkSession: async () => ({}),
+      recordPetTouch: async () => ({})
+    },
+    getLifeState: () => null,
+    setLifeState: () => {},
+    markOwnerInteraction: async () => {},
+    isAutonomousBusy: () => true,
+    getCaughtInterestReply: async () => ({ message: "caught" }),
+    publishInterestInteraction: (reply, mood) => {
+      chatState = {
+        ...chatState,
+        messages: [...chatState.messages, { role: "assistant", content: `${reply.message}-${mood}` }]
+      };
+    },
+    getChatState: () => chatState,
+    setChatState: (state) => { chatState = state; },
+    broadcastChatState: () => {},
+    broadcastRelationshipProfile: () => {},
+    broadcastMoodUpdate: () => {},
+    mergeConfig: (config) => config,
+    now: () => 0
+  });
+  service.registerIpc().start();
+
+  assert.deepEqual(await ipc.handlers.get("agent:pet-touch")(trustedEvent()), {
+    ok: true,
+    busy: true,
+    interestBusy: true,
+    reply: "caught-surprised",
+    mood: "surprised"
+  });
+  assert.throws(() => ipc.handlers.get("agent:pet-touch")(trustedEvent("https://example.com")), /拒绝/);
 });
