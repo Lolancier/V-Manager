@@ -121,6 +121,53 @@ Phase 5A 已完成的门禁：
 
 本阶段明确不包含普通 IPC handler/listener 迁移，也不包含设置、代码、聊天等 renderer 独立入口拆分。这些工作应在 Electron 版本阶梯稳定后另开阶段执行。
 
+## Phase 5B：Electron 33 到 43 升级记录
+
+Phase 5B 按大版本逐级执行 `33 -> 34 -> ... -> 43`，没有跳过任何失败或未验证的大版本。每个大版本独立提交，并在提交前运行同一组自动化门禁。`43.4.0` 是本轮确认的当前受支持稳定目标，不是 EOL 过渡点。
+
+### 版本矩阵与提交
+
+| Electron | Node | Chromium | modules / ABI | 提交 |
+| --- | --- | --- | --- | --- |
+| 33.4.11 | 20.18.3 | 130.0.6723.191 | 130 | `f7b7321` |
+| 34.5.8 | 20.19.1 | 132.0.6834.210 | 132 | `1b68bb1` |
+| 35.7.5 | 22.16.0 | 134.0.6998.205 | 133 | `7811398` |
+| 36.9.5 | 22.19.0 | 136.0.7103.177 | 135 | `ffbea28` |
+| 37.10.3 | 22.21.1 | 138.0.7204.251 | 136 | `d2d5b24` |
+| 38.8.6 | 22.22.0 | 140.0.7339.249 | 139 | `49d1570` |
+| 39.8.10 | 22.22.1 | 142.0.7444.265 | 140 | `ae3c383` |
+| 40.10.6 | 24.15.0 | 144.0.7559.236 | 143 | `ee40358` |
+| 41.10.5 | 24.18.0 | 146.0.7680.216 | 145 | `093fa7a` |
+| 42.9.1 | 24.18.1 | 148.0.7778.280 | 146 | `cbbb6b0` |
+| 43.4.0 | 24.18.1 | 150.0.7871.224 | 148 | `078a618` |
+
+Electron 40 的 npm 包把下载栈迁到 `@electron/get` 5，并通过 `@electron-internal/extract-zip` 取代旧的 `extract-zip` 依赖链；`@types/node` 随包元数据进入 24 系列。Electron 42 开始，npm 包不再声明旧 `postinstall`，改为提供 `install-electron` / `node_modules/electron/install.js` 入口，因此干净安装后必须显式执行该入口或等价打包器下载步骤，不能只检查 npm 退出码。
+
+### 每级通过的门禁
+
+以上每个大版本均通过：
+
+1. `npm run verify`：架构审计 0 critical、249/249 测试通过、Vite 生产构建通过。
+2. `npm run verify:electron`：真实 Electron 主进程与 `utilityProcess` 的 Electron/Node/Chromium/modules 版本一致，且 `sherpa-onnx-node` 可加载，`OfflineTts` 与 `OfflineRecognizer` 导出存在。
+3. `npm run pack`：Windows x64 `--dir` 打包成功。
+4. asar 布局：`electron/main.js`、`electron/preload.cjs`、`electron/workers/utility-entry.js`、`dist/index.html`、`src-agent/core.js`、`package.json` 均在应用 asar 内。
+5. unpacked 原生布局：`sherpa-onnx-win-x64` 中包含 `sherpa-onnx.node`、`onnxruntime.dll`、`sherpa-onnx-c-api.dll`、`sherpa-onnx-cxx-api.dll`、`onnxruntime_providers_shared.dll`。
+
+打包仍输出的非致命警告包括：传递依赖重复引用、非 Windows sherpa 可选平台包未进入 Win x64 包、缺少 `sherpa-onnx-win-ia32`、缺少 author 元数据、默认 Electron 图标以及 signtool 签名提示。这些警告在本阶段未改变应用退出码或布局断言结果。
+
+### 剩余人工发布门禁
+
+自动化冒烟不能替代真实桌面与安装器检查。发布前还需要完成：
+
+1. NSIS 干净安装、覆盖升级与卸载，并确认用户数据保留策略。
+2. 透明窗口多显示器、DPI 缩放、置顶、拖拽和鼠标穿透测试。
+3. Live2D 加密资源与中文路径加载。
+4. 真实 TTS/STT 模型推理与语音包安装、切换、缓存失效。
+5. 游戏试玩、模拟输入、截图、取消与协议联网拦截。
+6. 记录启动时间、空闲内存、逐窗口打开后的 renderer 数量和峰值内存。
+
+本阶段只升级 Electron 运行时、锁定运行时冒烟矩阵和记录验证证据，不包含普通 IPC handler/listener 迁移、renderer 独立入口拆分、窗口宿主重构或其他依赖升级。主进程仍保留 55 个直接 IPC handler、3 个直接 IPC listener 和单一 React renderer 入口，应作为后续独立阶段处理。
+
 ## Electron 分阶段升级门禁
 
 Electron 官方建议一次迁移一个大版本并逐项检查 Breaking Changes。建议每个大版本单独提交，至少运行：
