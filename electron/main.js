@@ -6,29 +6,17 @@ import {
   clearConversationHistory,
   defaultConfig,
   ensureDataFiles,
-  getAppRegistrySnapshot,
   getActiveWorkspaceDir,
-  getFileManagerSnapshot,
   getRagStatus,
-  getSystemResourceSnapshot,
   loadConfig,
-  rebuildAppRegistry,
   saveConfig,
   setActiveWorkspaceDir,
-  searchLocalFiles,
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
 import { loadRelationshipProfile, recordPetTouch } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { classifyFastReaction } from "../src-agent/fast-reaction.js";
-import {
-  createOrganizationPreview,
-  executeOrganizationPreview,
-  listFileOperations,
-  scanManagedDirectory,
-  undoFileOperation
-} from "../src-agent/safe-file-manager.js";
 import {
   clearCompanionMemory,
   detectProactiveFeedback,
@@ -61,6 +49,9 @@ import { createAutonomousCreationService, interestStatusLabel } from "./services
 import { createLive2DModelService } from "./services/live2d-model-service.js";
 import { createPersonaCardService } from "./services/persona-card-service.js";
 import { createSettingsService } from "./services/settings-service.js";
+import { createFileManagerService } from "./services/file-manager-service.js";
+import { createHostShellService } from "./services/host-shell-service.js";
+import { createSystemResourceService } from "./services/system-resource-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -1178,6 +1169,26 @@ const settingsService = createSettingsService({
   broadcastRelationshipProfile: (profile) => broadcastRelationshipProfile(profile)
 });
 
+const systemResourceService = createSystemResourceService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  isAutoLaunchEnabled,
+  setAutoLaunchEnabled
+});
+
+const fileManagerService = createFileManagerService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData")
+});
+
+const hostShellService = createHostShellService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  openExternal: (target) => shell.openExternal(target),
+  openPath: (target) => shell.openPath(target),
+  showItemInFolder: (target) => shell.showItemInFolder(target)
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1221,6 +1232,9 @@ autonomousCreationService.registerIpc();
 live2dModelService.registerIpc();
 personaCardService.registerIpc();
 settingsService.registerIpc();
+systemResourceService.registerIpc().start();
+fileManagerService.registerIpc().start();
+hostShellService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1956,7 +1970,10 @@ app.on("before-quit", (event) => {
       modelConversationService.dispose(),
       settingsService.dispose(),
       personaCardService.dispose(),
-      live2dModelService.dispose()
+      live2dModelService.dispose(),
+      systemResourceService.dispose(),
+      fileManagerService.dispose(),
+      hostShellService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();
@@ -1975,10 +1992,6 @@ app.on("before-quit", (event) => {
     .finally(() => app.quit());
 });
 
-ipcMain.handle("agent:get-auto-launch", () => isAutoLaunchEnabled());
-
-ipcMain.handle("agent:set-auto-launch", (_event, enabled) => setAutoLaunchEnabled(enabled));
-
 ipcMain.handle("agent:get-life-state", async () => {
   currentLifeState = currentLifeState ?? await loadLifeState(app.getPath("userData"));
   return currentLifeState;
@@ -1996,44 +2009,6 @@ ipcMain.handle("agent:reset-work-session", async () => {
   broadcastLifeState(currentLifeState);
   return currentLifeState;
 });
-
-ipcMain.handle("agent:search-files", async (_event, query) => {
-  return searchLocalFiles(query);
-});
-
-ipcMain.handle("agent:get-app-registry", async () => {
-  return getAppRegistrySnapshot(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:refresh-app-registry", async () => {
-  return rebuildAppRegistry(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:get-system-resource-snapshot", async () => {
-  return getSystemResourceSnapshot();
-});
-
-ipcMain.handle("agent:get-file-manager-snapshot", async () => {
-  return getFileManagerSnapshot();
-});
-
-ipcMain.handle("agent:scan-managed-directory", async (_event, target) => scanManagedDirectory(target));
-ipcMain.handle("agent:preview-file-organization", async (_event, target, mode, quarantine) => {
-  return createOrganizationPreview(app.getPath("userData"), target, { mode, quarantine: Boolean(quarantine) });
-});
-ipcMain.handle("agent:execute-file-organization", async (_event, previewId) => {
-  return executeOrganizationPreview(app.getPath("userData"), previewId);
-});
-ipcMain.handle("agent:list-file-operations", async () => listFileOperations(app.getPath("userData")));
-ipcMain.handle("agent:undo-file-operation", async (_event, operationId) => undoFileOperation(app.getPath("userData"), operationId));
-
-ipcMain.handle("agent:open-external", async (_event, url) => {
-  const target = new URL(String(url || ""));
-  if (!["http:", "https:"].includes(target.protocol)) throw new Error("只能打开 HTTP 或 HTTPS 网页。");
-  await shell.openExternal(target.toString());
-  return true;
-});
-
 
 ipcMain.handle("agent:open-settings-window", async () => {
   return openSettingsWindow();
@@ -2204,39 +2179,4 @@ ipcMain.on("agent:show-pet-context-menu", (event) => {
   buildPetContextMenu().popup({
     window: targetWindow ?? undefined
   });
-});
-
-// ---- Data path management ----
-
-ipcMain.handle("agent:get-data-path", async () => {
-  const baseDir = app.getPath("userData");
-  const dataDir = path.join(baseDir, "agent-data");
-  return {
-    baseDir,
-    dataDir,
-    configPath: path.join(dataDir, "config.json"),
-    memoryPath: path.join(dataDir, "memory", "conversation.jsonl"),
-    knowledgeDir: path.join(dataDir, "knowledge"),
-    personaKnowledgePath: path.join(dataDir, "knowledge", "persona.md"),
-    personaDatabasePath: path.join(dataDir, "storage", "vivi.sqlite"),
-    ragDir: path.join(dataDir, "rag"),
-    registryDir: path.join(dataDir, "registry")
-  };
-});
-
-ipcMain.handle("agent:open-data-folder", async () => {
-  const dataDir = path.join(app.getPath("userData"), "agent-data");
-  await shell.openPath(dataDir);
-  return true;
-});
-
-ipcMain.handle("agent:open-persona-folder", async () => {
-  const personaDatabasePath = path.join(app.getPath("userData"), "agent-data", "storage", "vivi.sqlite");
-  await fs.mkdir(path.dirname(personaDatabasePath), { recursive: true });
-  if (await fs.stat(personaDatabasePath).then(() => true).catch(() => false)) {
-    shell.showItemInFolder(personaDatabasePath);
-  } else {
-    await shell.openPath(path.dirname(personaDatabasePath));
-  }
-  return personaDatabasePath;
 });
