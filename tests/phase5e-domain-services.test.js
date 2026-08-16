@@ -31,6 +31,11 @@ import {
   EXPRESSION_CHAT_STATE_HANDLE_CHANNELS,
   createExpressionChatStateService
 } from "../electron/services/expression-chat-state-service.js";
+import {
+  PET_WINDOW_LAYOUT_HANDLE_CHANNELS,
+  PET_WINDOW_LAYOUT_LISTENER_CHANNELS,
+  createPetWindowLayoutService
+} from "../electron/services/pet-window-layout-service.js";
 
 function ipcDouble() {
   const handlers = new Map();
@@ -479,4 +484,99 @@ test("expression chat state service preserves toggle and state shapes", async ()
   service.stop();
   await assert.rejects(ipc.handlers.get("agent:get-chat-state")(trustedEvent()), /尚未启动/);
   service.dispose();
+});
+
+test("pet window layout service preserves bounds, sender checks, and listeners", async () => {
+  const calls = [];
+  const petSender = { id: "pet", mainFrame: { url: "http://localhost:5173" } };
+  const bubbleSender = { id: "bubble", mainFrame: { url: "http://localhost:5173" } };
+  const eventFor = (sender) => ({ senderFrame: sender.mainFrame, sender });
+  let petScale = 1.25;
+  let positionLocked = false;
+  let bubbleContentSize = { width: 330, height: 180 };
+  let petBounds = { x: 100, y: 100, width: 640, height: 960 };
+  let nextBounds = null;
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createPetWindowLayoutService({
+    trustedIpc,
+    getPetScale: () => petScale,
+    setPetScale: (scale) => { petScale = scale; },
+    getPositionLocked: () => positionLocked,
+    setPositionLocked: (locked) => { positionLocked = locked; },
+    broadcastPositionLock: (locked) => calls.push(["lock-broadcast", locked]),
+    isPetWindowActive: () => true,
+    getPetWindowBounds: () => petBounds,
+    setPetWindowBounds: (bounds) => { nextBounds = bounds; petBounds = bounds; },
+    setPetWindowPosition: (x, y) => calls.push(["position", x, y]),
+    updateBubbleWindowLayout: () => calls.push(["bubble-layout"]),
+    getPetWindowSize: (scale) => ({
+      width: Math.round(640 * scale),
+      height: Math.round(960 * scale)
+    }),
+    getWorkAreaForBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+    broadcastPetScale: (scale) => calls.push(["scale-broadcast", scale]),
+    isBubbleWindowActive: () => true,
+    isSenderBubbleWindow: (event) => event.sender === bubbleSender,
+    setBubbleContentSize: (size) => { bubbleContentSize = size; },
+    getBubbleWindowBounds: () => ({ ...bubbleContentSize, placement: "right" }),
+    isSenderPetWindow: (event) => event.sender === petSender,
+    isHoverAutoHideEnabled: () => false,
+    setPetMousePassthrough: (ignore) => calls.push(["passthrough", ignore]),
+    showPetContextMenu: (event) => calls.push(["menu", event.sender.id])
+  });
+  service.registerIpc().start();
+
+  assert.equal(await ipc.handlers.get("agent:get-pet-scale")(eventFor(petSender)), 1.25);
+  assert.equal(await ipc.handlers.get("agent:get-position-lock")(eventFor(petSender)), false);
+  assert.equal(await ipc.handlers.get("agent:set-position-lock")(eventFor(petSender), 1), true);
+  assert.deepEqual(await ipc.handlers.get("agent:get-pet-window-bounds")(eventFor(petSender)), petBounds);
+  assert.equal(await ipc.handlers.get("agent:set-pet-window-position")(eventFor(petSender), { x: 10.4, y: 20.6 }), true);
+  assert.deepEqual(await ipc.handlers.get("agent:update-pet-window-layout")(eventFor(petSender), { scale: 2 }), {
+    width: 960,
+    height: 1440
+  });
+  assert.deepEqual(nextBounds, { x: 0, y: 0, width: 960, height: 1440 });
+  assert.equal(await ipc.handlers.get("agent:update-bubble-window-size")(eventFor(petSender), { width: 700, height: 90 }), null);
+  assert.deepEqual(await ipc.handlers.get("agent:update-bubble-window-size")(eventFor(bubbleSender), { width: 700, height: 90 }), {
+    width: 680,
+    height: 100,
+    placement: "right"
+  });
+  ipc.listeners.get("agent:set-pet-mouse-passthrough").at(-1)(eventFor(bubbleSender), true);
+  ipc.listeners.get("agent:set-pet-mouse-passthrough").at(-1)(eventFor(petSender), false);
+  ipc.listeners.get("agent:set-pet-mouse-passthrough").at(-1)(eventFor(petSender), true);
+  ipc.listeners.get("agent:show-pet-context-menu").at(-1)(eventFor(petSender));
+
+  assert.throws(() => ipc.handlers.get("agent:get-pet-scale")(trustedEvent("https://example.com")), /拒绝/);
+  ipc.listeners.get("agent:set-pet-mouse-passthrough").at(-1)(trustedEvent("https://example.com"), true);
+  assert.deepEqual(calls, [
+    ["lock-broadcast", true],
+    ["position", 10, 21],
+    ["bubble-layout"],
+    ["scale-broadcast", 1.5],
+    ["bubble-layout"],
+    ["bubble-layout"],
+    ["passthrough", false],
+    ["passthrough", true],
+    ["menu", "pet"]
+  ]);
+  assert.deepEqual(PET_WINDOW_LAYOUT_HANDLE_CHANNELS, [
+    "agent:get-pet-scale",
+    "agent:get-position-lock",
+    "agent:set-position-lock",
+    "agent:get-pet-window-bounds",
+    "agent:set-pet-window-position",
+    "agent:update-pet-window-layout",
+    "agent:update-bubble-window-size"
+  ]);
+  assert.deepEqual(PET_WINDOW_LAYOUT_LISTENER_CHANNELS, [
+    "agent:set-pet-mouse-passthrough",
+    "agent:show-pet-context-menu"
+  ]);
+  service.stop();
+  await assert.rejects(ipc.handlers.get("agent:get-pet-scale")(eventFor(petSender)), /尚未启动/);
+  service.start();
+  service.dispose();
+  assert.deepEqual(ipc.listeners.get("agent:set-pet-mouse-passthrough"), []);
+  assert.deepEqual(ipc.listeners.get("agent:show-pet-context-menu"), []);
 });

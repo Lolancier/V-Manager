@@ -53,6 +53,7 @@ import { createCompanionLifeService } from "./services/companion-life-service.js
 import { createWindowIntentService } from "./services/window-intent-service.js";
 import { createCodeWorkspaceService } from "./services/code-workspace-service.js";
 import { createExpressionChatStateService } from "./services/expression-chat-state-service.js";
+import { createPetWindowLayoutService } from "./services/pet-window-layout-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -1113,7 +1114,6 @@ const speechService = registerSpeechServiceIpc({
   broadcastGptSovitsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:gpt-sovits-progress", progress),
   runBackgroundTask: (type, payload, runOptions) => utilityTaskSupervisor.run(type, payload, runOptions)
 });
-
 const live2dModelService = createLive2DModelService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1240,6 +1240,39 @@ const expressionChatStateService = createExpressionChatStateService({
   getChatState: () => chatState
 });
 
+const petWindowLayoutService = createPetWindowLayoutService({
+  trustedIpc,
+  getPetScale: () => petWindowScale,
+  setPetScale: (scale) => { petWindowScale = scale; },
+  getPositionLocked: () => positionLocked,
+  setPositionLocked: (locked) => { positionLocked = locked; },
+  broadcastPositionLock: (locked) => petWindow?.webContents.send("agent:position-lock-updated", locked),
+  isPetWindowActive: () => Boolean(petWindow && !petWindow.isDestroyed()),
+  getPetWindowBounds: () => petWindow.getBounds(),
+  setPetWindowBounds: (bounds) => petWindow.setBounds(bounds),
+  setPetWindowPosition: (x, y) => petWindow.setPosition(x, y),
+  updateBubbleWindowLayout,
+  getPetWindowSize,
+  getWorkAreaForBounds: (bounds) => screen.getDisplayMatching(bounds).workArea,
+  broadcastPetScale,
+  isBubbleWindowActive: () => Boolean(bubbleWindow && !bubbleWindow.isDestroyed()),
+  isSenderBubbleWindow: (event) => event.sender === bubbleWindow?.webContents,
+  setBubbleContentSize: (size) => { bubbleContentSize = size; },
+  getBubbleWindowBounds,
+  isSenderPetWindow: (event) => event.sender === petWindow?.webContents,
+  isHoverAutoHideEnabled: () => currentAgentConfig.appearance?.hoverAutoHide === true,
+  setPetMousePassthrough: (ignore) => {
+    if (ignore) petWindow.setIgnoreMouseEvents(true, { forward: true });
+    else petWindow.setIgnoreMouseEvents(false);
+  },
+  showPetContextMenu: (event) => {
+    const targetWindow = BrowserWindow.fromWebContents(event.sender) ?? petWindow;
+    buildPetContextMenu().popup({
+      window: targetWindow ?? undefined
+    });
+  }
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1290,6 +1323,7 @@ companionLifeService.registerIpc().start();
 windowIntentService.registerIpc().start();
 codeWorkspaceService.registerIpc().start();
 expressionChatStateService.registerIpc().start();
+petWindowLayoutService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1975,7 +2009,8 @@ app.on("before-quit", (event) => {
       companionLifeService.dispose(),
       windowIntentService.dispose(),
       codeWorkspaceService.dispose(),
-      expressionChatStateService.dispose()
+      expressionChatStateService.dispose(),
+      petWindowLayoutService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();
@@ -1992,91 +2027,4 @@ app.on("before-quit", (event) => {
     speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
   ])
     .finally(() => app.quit());
-});
-
-ipcMain.handle("agent:get-pet-scale", async () => {
-  return petWindowScale;
-});
-
-ipcMain.handle("agent:get-position-lock", async () => {
-  return positionLocked;
-});
-
-ipcMain.handle("agent:set-position-lock", async (_event, locked) => {
-  positionLocked = Boolean(locked);
-  petWindow?.webContents.send("agent:position-lock-updated", positionLocked);
-  return positionLocked;
-});
-
-ipcMain.handle("agent:get-pet-window-bounds", async () => {
-  if (!petWindow || petWindow.isDestroyed()) {
-    return { x: 0, y: 0, width: 0, height: 0 };
-  }
-
-  const bounds = petWindow.getBounds();
-  return bounds;
-});
-
-ipcMain.handle("agent:set-pet-window-position", async (_event, { x, y }) => {
-  if (!petWindow || petWindow.isDestroyed()) {
-    return false;
-  }
-
-  petWindow.setPosition(Math.round(x), Math.round(y));
-  updateBubbleWindowLayout();
-  return true;
-});
-
-ipcMain.on("agent:set-pet-mouse-passthrough", (event, ignore) => {
-  if (!petWindow || petWindow.isDestroyed() || event.sender !== petWindow.webContents) return;
-  const shouldIgnore = currentAgentConfig.appearance?.hoverAutoHide === true || Boolean(ignore);
-  if (shouldIgnore) petWindow.setIgnoreMouseEvents(true, { forward: true });
-  else petWindow.setIgnoreMouseEvents(false);
-});
-
-ipcMain.handle("agent:update-pet-window-layout", async (_event, { scale }) => {
-  if (!petWindow || petWindow.isDestroyed()) {
-    return null;
-  }
-
-  petWindowScale = Math.max(0.8, Math.min(1.5, Number(scale) || 1));
-  const nextSize = getPetWindowSize(petWindowScale);
-  const currentBounds = petWindow.getBounds();
-  const workArea = screen.getDisplayMatching(currentBounds).workArea;
-  const centeredX = Math.round(currentBounds.x - (nextSize.width - currentBounds.width) / 2);
-  const bottomAnchoredY = Math.round(currentBounds.y - (nextSize.height - currentBounds.height));
-  const nextX = Math.max(workArea.x, Math.min(centeredX, workArea.x + workArea.width - nextSize.width));
-  const nextY = Math.max(workArea.y, bottomAnchoredY);
-
-  petWindow.setBounds({
-    x: nextX,
-    y: nextY,
-    width: nextSize.width,
-    height: nextSize.height
-  });
-
-  broadcastPetScale(petWindowScale);
-  updateBubbleWindowLayout();
-
-  return nextSize;
-});
-
-ipcMain.handle("agent:update-bubble-window-size", async (event, size) => {
-  if (!bubbleWindow || bubbleWindow.isDestroyed() || event.sender !== bubbleWindow.webContents) {
-    return null;
-  }
-
-  bubbleContentSize = {
-    width: Math.max(280, Math.min(680, Math.ceil(Number(size?.width) || 330))),
-    height: Math.max(100, Math.ceil(Number(size?.height) || 180))
-  };
-  updateBubbleWindowLayout();
-  return getBubbleWindowBounds();
-});
-
-ipcMain.on("agent:show-pet-context-menu", (event) => {
-  const targetWindow = BrowserWindow.fromWebContents(event.sender) ?? petWindow;
-  buildPetContextMenu().popup({
-    window: targetWindow ?? undefined
-  });
 });
