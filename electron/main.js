@@ -1982,14 +1982,6 @@ app.on("before-quit", (event) => {
     .finally(() => app.quit());
 });
 
-ipcMain.handle("agent:open-scale-window", async () => {
-  return openScaleWindow();
-});
-
-ipcMain.handle("agent:open-expression-window", async () => {
-  return openExpressionWindow();
-});
-
 ipcMain.handle("agent:trigger-expression", async (_event, expressionName) => {
   const name = String(expressionName || "");
   if (!name) return false;
