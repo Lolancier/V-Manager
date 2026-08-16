@@ -11,6 +11,8 @@
         "dev:electron": "wait-on tcp:5173 && electron .",
         "build": "vite build",
         "preview": "vite preview",
+        "audit:architecture": "node scripts/audit-electron-architecture.mjs",
+        "verify": "npm run audit:architecture && npm test && npm run build",
         "tts:gpt-sovits:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-gpt-sovits.ps1",
         "tts:gpt-sovits:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-gpt-sovits.ps1",
         "pack": "vite build && cross-env ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ electron-builder --dir",

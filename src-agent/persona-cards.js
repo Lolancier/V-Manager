@@ -205,14 +205,33 @@ export function buildPersonaCardPrompt(card) {
 
 export function applyPersonaCardToConfig(config, card) {
   if (!card?.payload) return config;
+  const payload = normalizePersonaPayload(card.payload);
+  const normalizedCard = { ...card, payload };
+  const voicePackId = String(payload.voicePackId || "").trim();
+  const voice = { ...config.voice };
+  if (voicePackId) {
+    if (/^gpt[_-]?sovits:/i.test(voicePackId)) {
+      voice.provider = "gpt_sovits";
+      voice.gptSovitsProfileId = voicePackId.replace(/^gpt[_-]?sovits:/i, "").trim();
+    } else if (/^elevenlabs:/i.test(voicePackId)) {
+      voice.provider = "elevenlabs";
+      voice.voice = voicePackId.replace(/^elevenlabs:/i, "").trim();
+    } else {
+      const [packId, speakerId] = voicePackId.split(":");
+      voice.provider = "local";
+      voice.localPackId = packId.trim();
+      if (/^\d+$/.test(speakerId || "")) voice.localSpeakerId = Number(speakerId);
+    }
+  }
   return {
     ...config,
-    personaName: card.payload.identityName || config.personaName,
-    personaPrompt: buildPersonaCardPrompt(card),
+    personaName: payload.identityName || config.personaName,
+    personaPrompt: buildPersonaCardPrompt(normalizedCard),
     appearance: {
       ...config.appearance,
-      live2dModel: card.payload.live2dModelId || config.appearance?.live2dModel
+      live2dModel: payload.live2dModelId || config.appearance?.live2dModel
     },
+    voice,
     activePersonaCard: { id: card.id, version: card.version, name: card.name }
   };
 }

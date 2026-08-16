@@ -69,3 +69,18 @@ test("two empty streams degrade to a friendly recovery message", async (t) => {
   const reply = await requestDeepSeekStream(config, [{ role: "user", content: "说说话" }]);
   assert.equal(reply, "刚刚的话没有生成完整，再和我说一次好吗？");
 });
+
+test("stream parser exposes DeepSeek prompt cache usage", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => streamResponse([
+    'data: {"choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}',
+    'data: {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":8,"total_tokens":1008,"prompt_cache_hit_tokens":750,"prompt_cache_miss_tokens":250}}',
+    "data: [DONE]"
+  ]);
+  let usage = null;
+  const reply = await requestDeepSeekStream(config, [{ role: "user", content: "你好" }], undefined, true, (value) => { usage = value; });
+  assert.equal(reply, "好");
+  assert.equal(usage.cacheHitTokens, 750);
+  assert.equal(usage.cacheHitRate, 0.75);
+});

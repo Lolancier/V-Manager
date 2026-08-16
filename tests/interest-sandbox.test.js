@@ -324,6 +324,22 @@ test("failed log cleanup preserves completed works", async (t) => {
   assert.equal(await fs.readFile(completed.activity.artifactPath, "utf-8").then(() => true), true);
 });
 
+test("current persona gets an independent daily ledger and game cleanup synchronizes records", async (t) => {
+  const baseDir = await tempBase(t);
+  const now = new Date("2026-08-08T12:00:00");
+  for (const persona of [{ cardId: "card-a", version: 1, name: "A" }, { cardId: "card-b", version: 1, name: "B" }]) {
+    await runInterestActivity(baseDir, baseAgentConfig, "drawing", { manual: true, now, persona, modelFetch: async () => jsonResponse({ title: `画作-${persona.name}`, description: persona.name, svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>' }) });
+  }
+  const game = await runInterestActivity(baseDir, baseAgentConfig, "mini_game", { manual: true, now, persona: { cardId: "card-a", version: 1, name: "A" }, modelFetch: async () => jsonResponse({ title: "文字问答", description: "低操作问答", html: "<button>选择 A</button>", css: "", js: "window.__VIVI_GAME__={getState(){return {status:'playing',score:0,recommendedActions:['选择 A']}}};" }) });
+  const personaSnapshot = await getInterestSandboxSnapshot(baseDir, now, { ...baseAgentConfig.interests, personaCardId: "card-b" });
+  assert.equal(personaSnapshot.today.taskCount, 1);
+  await fs.rm(path.dirname(game.activity.artifactPath), { recursive: true, force: true });
+  const cleaned = await cleanupInterestSandbox(baseDir, "game_content");
+  assert.equal(cleaned.removedLogs, 1);
+  const synced = await getInterestSandboxSnapshot(baseDir, now);
+  assert.equal(synced.activities.some((item) => item.type === "mini_game"), false);
+});
+
 test("legacy persona-first folders migrate into visible category folders and keep log paths valid", async (t) => {
   const baseDir = await tempBase(t);
   const root = path.join(baseDir, "agent-data", "vivi-sandbox");

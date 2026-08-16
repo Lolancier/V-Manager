@@ -1,5 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray } from "electron";
-import { createHash } from "node:crypto";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, utilityProcess } from "electron";
 import { watch } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -9,18 +8,15 @@ import {
   clearConversationHistory,
   defaultConfig,
   ensureDataFiles,
-  ensureRagIndexFresh,
   getAppRegistrySnapshot,
   getActiveWorkspaceDir,
   getConfigPath,
   getFileManagerSnapshot,
   getRagStatus,
   getSystemResourceSnapshot,
-  generateAsmrScript,
   listKnowledgeFiles,
   loadConfig,
   rebuildAppRegistry,
-  rebuildKnowledgeIndex,
   saveConfig,
   setActiveWorkspaceDir,
   searchLocalFiles,
@@ -28,22 +24,6 @@ import {
   testEmbeddingConnection
 } from "../src-agent/core.js";
 import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
-import { listElevenLabsVoices, synthesizeElevenLabsSpeech } from "../src-agent/elevenlabs.js";
-import {
-  installLocalTtsPack,
-  listLocalTtsPacks,
-  synthesizeLocalSpeech
-} from "../src-agent/local-tts.js";
-import {
-  importGptSovitsProfile,
-  installGptSovitsProfile,
-  listGptSovitsProfiles,
-  synthesizeGptSovitsSpeech
-} from "../src-agent/gpt-sovits.js";
-import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../src-agent/local-stt.js";
-import { pruneAudioCache, touchAudioCacheFile } from "../src-agent/audio-cache.js";
-import { sanitizeSpeechText } from "../src-agent/speech-text.js";
-import { ensureGptSovitsService, isGptSovitsServiceReady, stopGptSovitsService } from "../src-agent/gpt-sovits-runtime.js";
 import { classifyDiaryRequest, diaryOpenReply, diaryStatusReply } from "../src-agent/diary-privacy.js";
 import { loadRelationshipProfile, recordPetTouch, resetRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
@@ -62,6 +42,7 @@ import {
   getFollowUpCandidate,
   loadCompanionMemory,
   markCommitmentFollowedUp,
+  resolveCommitmentsByText,
   recordProactiveFeedback
 } from "../src-agent/companion-memory.js";
 import {
@@ -72,21 +53,6 @@ import {
   resetWorkSession,
   saveLifeState
 } from "../src-agent/proactive-engine.js";
-import {
-  abortWindowsPowerAction,
-  cancelSchedule,
-  executeWindowsPowerAction,
-  listSchedulesForDay,
-  listSchedules,
-  markPowerResult,
-  processDueSchedules,
-  updateScheduleIntegration
-} from "../src-agent/schedule-engine.js";
-import {
-  buildScheduledLaunchSpec,
-  registerWindowsScheduleTask,
-  unregisterWindowsScheduleTask
-} from "../src-agent/windows-task-scheduler.js";
 import {
   cleanupInterestSandbox,
   generatePlaytestReflection,
@@ -120,9 +86,37 @@ import {
 } from "../src-agent/persona-cards.js";
 import { generatePersonaCardDraft } from "../src-agent/persona-generator.js";
 import { generateStartupGreeting } from "../src-agent/startup-greeting.js";
+import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
+import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
+import { registerMemoryServiceIpc } from "./services/memory-service.js";
+import { registerSpeechServiceIpc } from "./services/speech-service.js";
+import { createScheduleService } from "./services/schedule-service.js";
+import { createGamePlaytestService } from "./services/game-playtest-service.js";
+import { createRagTaskClient } from "./services/rag-task-client.js";
+import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
+import { createTrustedIpcRegistrar } from "./ipc-security.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const PRELOAD_PATH = path.join(__dirname, "preload.cjs");
+const UTILITY_ENTRY_PATH = resolveUtilityEntryPoint(__dirname);
+const utilityTaskSupervisor = createUtilityTaskSupervisor({
+  entryPoint: UTILITY_ENTRY_PATH,
+  fork: (entryPoint, args, options) => utilityProcess.fork(entryPoint, args, options),
+  serviceName: "Vivi Background Tasks",
+  timeoutMs: 10 * 60 * 1000
+});
+const ragTaskClient = createRagTaskClient({ supervisor: utilityTaskSupervisor });
+const gamePlaytestService = createGamePlaytestService({
+  runPlaytest: runGamePlaytest,
+  createDriver: createIsolatedGameDriver
+});
+
+configureDesktopShell({
+  openExternal: (...args) => shell.openExternal(...args),
+  openPath: (...args) => shell.openPath(...args),
+  trashItem: (...args) => shell.trashItem(...args)
+});
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "vivi-model", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
@@ -131,6 +125,29 @@ protocol.registerSchemesAsPrivileged([
 
 const isDev = !app.isPackaged;
 const devServerUrl = "http://localhost:5173";
+const trustedIpc = createTrustedIpcRegistrar(ipcMain, {
+  isDev,
+  devServerUrl,
+  rendererRoot: path.join(app.getAppPath(), "dist")
+});
+const scheduleService = createScheduleService({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  isHostReady: () => app.isReady(),
+  platform: process.platform,
+  getExecutablePath: () => process.execPath,
+  getAppPath: () => app.getAppPath(),
+  isPackaged: () => app.isPackaged,
+  resolveCommitmentsByText,
+  loadCompanionMemory,
+  publishProactiveEvent: (event) => publishProactiveEvent(event),
+  broadcastSchedules: (items) => {
+    for (const win of [settingsWindow, chatWindow]) {
+      if (win && !win.isDestroyed()) win.webContents.send("agent:schedules-updated", items);
+    }
+  },
+  onError: (scope, error) => console.error(`[schedule] ${scope} failed:`, error)
+});
 const isBackgroundScheduleLaunch = process.argv.includes("--vivi-background-schedule");
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
@@ -169,8 +186,6 @@ let currentLifeState = null;
 let proactiveTickRunning = false;
 let ownerInteractionRevision = 0;
 let ownerInteractionUpdateRunning = false;
-let scheduleTimer = null;
-let scheduleTickRunning = false;
 let interestTimer = null;
 let interestTickRunning = false;
 let currentInterestActivity = null;
@@ -222,63 +237,6 @@ function mergeAgentConfig(nextConfig = {}) {
     interests: normalizeInterestConfig(nextConfig.interests),
     memory: { ...defaultConfig.memory, ...(nextConfig.memory ?? {}) }
   };
-}
-
-async function synthesizeSpeechWithCache(voiceConfig, text, asmr) {
-  const cacheDir = path.join(app.getPath("userData"), "agent-data", "audio-cache");
-  const speechText = sanitizeSpeechText(text);
-  if (!speechText) throw new Error("回复中只有舞台动作或内心独白，没有可朗读的正文。");
-  await fs.mkdir(cacheDir, { recursive: true });
-  await pruneAudioCache(cacheDir);
-  const cacheKey = createHash("sha256").update(JSON.stringify({
-    text: speechText,
-    asmr,
-    provider: voiceConfig.provider,
-    localPackId: voiceConfig.localPackId,
-    localSpeakerId: voiceConfig.localSpeakerId,
-    localSpeed: voiceConfig.localSpeed,
-    localSilenceScale: voiceConfig.localSilenceScale,
-    gptSovitsBaseUrl: voiceConfig.gptSovitsBaseUrl,
-    gptSovitsProfileId: voiceConfig.gptSovitsProfileId,
-    gptSovitsSpeed: voiceConfig.gptSovitsSpeed,
-    baseUrl: voiceConfig.baseUrl,
-    model: voiceConfig.model,
-    voice: voiceConfig.voice,
-    outputFormat: voiceConfig.outputFormat,
-    speed: voiceConfig.speed,
-    stability: voiceConfig.stability,
-    similarityBoost: voiceConfig.similarityBoost
-  })).digest("hex");
-  const usesWav = voiceConfig.provider === "local" || voiceConfig.provider === "gpt_sovits";
-  const audioPath = path.join(cacheDir, `${cacheKey}.${usesWav ? "wav" : "mp3"}`);
-  const cached = await fs.readFile(audioPath).catch(() => null);
-  if (cached) {
-    await touchAudioCacheFile(audioPath);
-    await pruneAudioCache(cacheDir, { preserve: [audioPath] });
-    return { audioBase64: cached.toString("base64"), mimeType: usesWav ? "audio/wav" : "audio/mpeg", requestId: "cache", characterCost: "0", cached: true };
-  }
-
-  if (voiceConfig.provider === "gpt_sovits") {
-    if (voiceConfig.gptSovitsAutoStart !== false) {
-      await ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl);
-    } else if (!await isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl)) {
-      throw new Error("GPT-SoVITS 当前未运行。请到“设置 → 语音与 ASMR”手动启动，或开启“随 V-Manager 启动”。");
-    }
-  }
-  const result = voiceConfig.provider === "local"
-    ? await synthesizeLocalSpeech(app.getPath("userData"), voiceConfig, speechText)
-    : voiceConfig.provider === "gpt_sovits"
-      ? await synthesizeGptSovitsSpeech(app.getPath("userData"), voiceConfig, speechText)
-      : await synthesizeElevenLabsSpeech(voiceConfig, speechText, { asmr });
-  await fs.writeFile(audioPath, Buffer.from(result.audioBase64, "base64"));
-  await pruneAudioCache(cacheDir, { preserve: [audioPath] });
-  return { ...result, cached: false };
-}
-
-function broadcastSttProgress(progress) {
-  for (const win of [settingsWindow, chatWindow, composerWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:local-stt-progress", progress);
-  }
 }
 
 function getLive2DModelsDirectory() {
@@ -391,17 +349,6 @@ function getModelContentType(filePath) {
   return "application/octet-stream";
 }
 
-function broadcastLocalTtsProgress(progress) {
-  for (const win of [settingsWindow, chatWindow, composerWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:local-tts-progress", progress);
-  }
-}
-
-function broadcastGptSovitsProgress(progress) {
-  for (const win of [settingsWindow, chatWindow, composerWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:gpt-sovits-progress", progress);
-  }
-}
 let chatState = {
   messages: [],
   knowledge: [],
@@ -598,7 +545,7 @@ function createStartupWindow() {
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -658,7 +605,7 @@ function createPetWindow() {
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -715,7 +662,7 @@ function createSettingsWindow() {
     show: false,
     title: "V-Manager 设置",
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -723,16 +670,13 @@ function createSettingsWindow() {
 
   loadView(win, "settings");
 
-  win.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      win.hide();
-    }
-  });
-
-  win.on("closed", () => {
+  attachWindowLifecycle(win, {
+    lifecycle: WINDOW_LIFECYCLE.disposable,
+    isQuitting: () => app.isQuiting,
+    onDestroyed: () => {
     if (settingsWindow === win) {
       settingsWindow = null;
+    }
     }
   });
 
@@ -759,7 +703,7 @@ function createScaleWindow() {
     alwaysOnTop: true,
     title: "模型大小",
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -767,16 +711,13 @@ function createScaleWindow() {
 
   loadView(win, "scale");
 
-  win.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      win.hide();
-    }
-  });
-
-  win.on("closed", () => {
+  attachWindowLifecycle(win, {
+    lifecycle: WINDOW_LIFECYCLE.disposable,
+    isQuitting: () => app.isQuiting,
+    onDestroyed: () => {
     if (scaleWindow === win) {
       scaleWindow = null;
+    }
     }
   });
 
@@ -807,7 +748,7 @@ function createComposerWindow() {
     show: false,
     title: "对话窗口",
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -815,16 +756,13 @@ function createComposerWindow() {
 
   loadView(win, "composer");
 
-  win.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      win.hide();
-    }
-  });
-
-  win.on("closed", () => {
+  attachWindowLifecycle(win, {
+    lifecycle: WINDOW_LIFECYCLE.disposable,
+    isQuitting: () => app.isQuiting,
+    onDestroyed: () => {
     if (composerWindow === win) {
       composerWindow = null;
+    }
     }
   });
 
@@ -849,7 +787,7 @@ function createChatWindow() {
     show: false,
     title: "聊天栏",
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -857,11 +795,13 @@ function createChatWindow() {
 
   loadView(win, "chat");
 
-  win.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      win.hide();
-      restorePetAfterChat();
+  attachWindowLifecycle(win, {
+    lifecycle: WINDOW_LIFECYCLE.disposable,
+    isQuitting: () => app.isQuiting,
+    onBeforeDestroy: restorePetAfterChat,
+    onDestroyed: () => {
+      if (chatWindow === win) chatWindow = null;
+      syncGlobalCursorTracking();
     }
   });
 
@@ -871,13 +811,6 @@ function createChatWindow() {
   for (const eventName of ["show", "hide", "minimize", "restore"]) {
     win.on(eventName, syncGlobalCursorTracking);
   }
-
-  win.on("closed", () => {
-    if (chatWindow === win) {
-      chatWindow = null;
-    }
-    syncGlobalCursorTracking();
-  });
 
   chatWindow = win;
   return win;
@@ -896,7 +829,7 @@ function createCodeWindow() {
     show: false,
     title: "Vivi Code",
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -904,15 +837,12 @@ function createCodeWindow() {
 
   loadView(win, "code");
 
-  win.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      win.hide();
+  attachWindowLifecycle(win, {
+    lifecycle: WINDOW_LIFECYCLE.disposable,
+    isQuitting: () => app.isQuiting,
+    onDestroyed: () => {
+      if (codeWindow === win) codeWindow = null;
     }
-  });
-
-  win.on("closed", () => {
-    if (codeWindow === win) codeWindow = null;
   });
 
   codeWindow = win;
@@ -940,7 +870,7 @@ function createBubbleWindow() {
     backgroundColor: "#00000000",
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -1022,7 +952,7 @@ function createExpressionWindow() {
     resizable: true,
     title: "表情与动作",
     webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -1034,16 +964,13 @@ function createExpressionWindow() {
     win.webContents.send("agent:expressions-updated", getActiveExpressions());
   });
 
-  win.on("close", (event) => {
-    if (!app.isQuiting) {
-      event.preventDefault();
-      win.hide();
-    }
-  });
-
-  win.on("closed", () => {
+  attachWindowLifecycle(win, {
+    lifecycle: WINDOW_LIFECYCLE.disposable,
+    isQuitting: () => app.isQuiting,
+    onDestroyed: () => {
     if (expressionWindow === win) {
       expressionWindow = null;
+    }
     }
   });
 
@@ -1314,20 +1241,27 @@ function broadcastMoodUpdate(payload) {
   chatWindow?.webContents.send("agent:mood-updated", payload);
 }
 
-function broadcastSpeechSignal(signal) {
-  const payload = {
-    active: Boolean(signal?.active),
-    level: Math.max(0, Math.min(1, Number(signal?.level) || 0)),
-    phase: ["start", "end", "fallback"].includes(signal?.phase) ? signal.phase : undefined,
-    text: typeof signal?.text === "string" ? signal.text : undefined,
-    durationMs: Number.isFinite(Number(signal?.durationMs)) ? Number(signal.durationMs) : undefined,
-    finalSegment: Boolean(signal?.finalSegment),
-    mood: typeof signal?.mood === "string" ? signal.mood : undefined,
-    faceParams: signal?.faceParams && typeof signal.faceParams === "object" ? signal.faceParams : undefined
-  };
-  petWindow?.webContents.send("agent:speech-signal-updated", payload);
-  chatWindow?.webContents.send("agent:speech-signal-updated", payload);
+function broadcastToWindows(windows, channel, payload) {
+  for (const win of windows) {
+    if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  }
 }
+
+const speechService = registerSpeechServiceIpc({
+  trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getCurrentConfig: () => currentAgentConfig,
+  loadConfig,
+  mergeConfig: mergeAgentConfig,
+  showOpenDialog: (options) => dialog.showOpenDialog(settingsWindow ?? undefined, options),
+  openPath: (target) => shell.openPath(target),
+  fetch: (url, options) => net.fetch(url, options),
+  broadcastSpeechSignal: (payload) => broadcastToWindows([petWindow, chatWindow], "agent:speech-signal-updated", payload),
+  broadcastSttProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:local-stt-progress", progress),
+  broadcastLocalTtsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:local-tts-progress", progress),
+  broadcastGptSovitsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:gpt-sovits-progress", progress),
+  runBackgroundTask: (type, payload, runOptions) => utilityTaskSupervisor.run(type, payload, runOptions)
+});
 
 async function resolveLocationLabel(location) {
   try {
@@ -1369,57 +1303,11 @@ function broadcastLifeState(state) {
   }
 }
 
-async function broadcastSchedules() {
-  const items = await listSchedules(app.getPath("userData"));
-  for (const win of [settingsWindow, chatWindow]) {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:schedules-updated", items);
-  }
-  return items;
-}
-
-async function syncWindowsScheduleTasks() {
-  if (process.platform !== "win32") return [];
-  const baseDir = app.getPath("userData");
-  const items = await listSchedules(baseDir, { includeHistory: true });
-  const launchSpecFor = (id) => buildScheduledLaunchSpec({
-    executablePath: process.execPath,
-    appPath: app.getAppPath(),
-    isPackaged: app.isPackaged,
-    scheduleId: id
+function currentInterestSettings() {
+  return normalizeInterestConfig({
+    ...currentAgentConfig.interests,
+    personaCardId: currentAgentConfig.activePersonaCard?.id || ""
   });
-  const results = [];
-
-  for (const item of items) {
-    const windowsState = item.integration?.windows || {};
-    const shouldRegister = item.status === "scheduled" && new Date(item.dueAt) > new Date();
-    if (shouldRegister) {
-      if (windowsState.status === "registered" && windowsState.dueAt === item.dueAt) continue;
-      const result = await registerWindowsScheduleTask(item, launchSpecFor(item.id));
-      await updateScheduleIntegration(baseDir, item.id, {
-        windows: {
-          status: result.ok ? "registered" : "failed",
-          taskName: result.taskName || "",
-          dueAt: item.dueAt,
-          error: result.error || ""
-        }
-      });
-      results.push({ id: item.id, ...result });
-      continue;
-    }
-
-    if (windowsState.status === "registered") {
-      const result = await unregisterWindowsScheduleTask(item.id);
-      await updateScheduleIntegration(baseDir, item.id, {
-        windows: { ...windowsState, status: result.ok ? "removed" : "remove_failed", error: result.error || "" }
-      });
-      results.push({ id: item.id, ...result });
-    }
-  }
-  return results;
-}
-
-async function syncScheduleIntegrations() {
-  return syncWindowsScheduleTasks();
 }
 
 function publishProactiveEvent(event) {
@@ -1455,23 +1343,6 @@ function publishProactiveEvent(event) {
   }
 }
 
-async function publishTodayAgendaOnStartup() {
-  const items = (await listSchedulesForDay(app.getPath("userData")))
-    .filter((item) => item.status === "scheduled")
-    .sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt));
-  if (!items.length) return;
-  const lines = items.slice(0, 5).map((item) => {
-    const time = new Date(item.dueAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-    return `${time} ${item.title}`;
-  });
-  const remaining = items.length > 5 ? `，另外还有 ${items.length - 5} 项` : "";
-  publishProactiveEvent({
-    kind: "today_agenda",
-    message: `今天有 ${items.length} 项安排：${lines.join("；")}${remaining}。我会按时通过 Windows 通知提醒你。`,
-    mood: "happy"
-  });
-}
-
 async function tickProactiveLife() {
   if (proactiveTickRunning || ownerInteractionUpdateRunning || !app.isReady()) return;
   proactiveTickRunning = true;
@@ -1479,9 +1350,10 @@ async function tickProactiveLife() {
     const interactionRevisionAtStart = ownerInteractionRevision;
     const now = new Date();
     const previous = currentLifeState ?? await loadLifeState(app.getPath("userData"), now);
+    await scheduleService.reconcileCompletedReminderCommitments();
     const companion = await getFollowUpCandidate(app.getPath("userData"), now);
     const relationship = await loadRelationshipProfile(app.getPath("userData"));
-    const interestSettings = normalizeInterestConfig(currentAgentConfig.interests);
+    const interestSettings = currentInterestSettings();
     const result = evaluateLifeTick(previous, currentAgentConfig.proactive, {
       now,
       interactionIdleSeconds: ownerInteractionIdleSeconds(previous, now),
@@ -1536,60 +1408,11 @@ async function markOwnerInteraction(now = new Date()) {
   }
 }
 
-async function tickSchedules() {
-  if (scheduleTickRunning || !app.isReady()) return;
-  scheduleTickRunning = true;
-  try {
-    const due = await processDueSchedules(app.getPath("userData"));
-    for (const item of due) {
-      if (item.type === "reminder") {
-        publishProactiveEvent({
-          kind: "reminder",
-          message: `提醒时间到了：${item.message}`,
-          mood: "surprised"
-        });
-        continue;
-      }
-
-      try {
-        await executeWindowsPowerAction(item.action);
-        publishProactiveEvent({
-          kind: `power_${item.action}`,
-          message: `定时${item.action === "restart" ? "重启" : "关机"}将在 60 秒后执行。需要取消的话，请马上说“取消定时${item.action === "restart" ? "重启" : "关机"}”。`,
-          mood: "surprised"
-        });
-        setTimeout(() => { void markPowerResult(app.getPath("userData"), item.id, true).then(broadcastSchedules); }, 65_000);
-      } catch (error) {
-        await markPowerResult(app.getPath("userData"), item.id, false, error.message);
-        publishProactiveEvent({ kind: "power_failed", message: `定时电源操作没有执行成功：${error.message}`, mood: "sad" });
-      }
-    }
-    if (due.length) {
-      await syncScheduleIntegrations();
-      await broadcastSchedules();
-    }
-  } catch (error) {
-    console.error("[schedule] tick failed:", error);
-  } finally {
-    scheduleTickRunning = false;
-  }
-}
-
-function startScheduleEngine() {
-  if (scheduleTimer) return;
-  scheduleTimer = setInterval(() => { void tickSchedules(); }, 10_000);
-}
-
-function stopScheduleEngine() {
-  if (scheduleTimer) clearInterval(scheduleTimer);
-  scheduleTimer = null;
-}
-
 async function tickInterestSandbox() {
-  if (interestTickRunning || currentInterestActivity || agentTaskRunning || scheduleTickRunning || proactiveTickRunning || !app.isReady()) return;
+  if (interestTickRunning || currentInterestActivity || agentTaskRunning || scheduleService.snapshot().tickRunning || proactiveTickRunning || !app.isReady()) return;
   interestTickRunning = true;
   try {
-    const settings = normalizeInterestConfig(currentAgentConfig.interests);
+    const settings = currentInterestSettings();
     if (!settings.enabled || !settings.autonomousLifeEnabled) return;
     const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), settings);
     const diaryDue = Boolean(snapshot.session?.diaryDueAt)
@@ -1686,7 +1509,7 @@ async function playtestInterestGame(activity, options = {}) {
   if (!activity || activity.type !== "mini_game" || !isSafeInterestArtifact(app.getPath("userData"), activity.artifactPath)) {
     throw new Error("只能试玩兴趣沙盒中的 HTML 小游戏。");
   }
-  const settings = normalizeInterestConfig(currentAgentConfig.interests);
+  const settings = currentInterestSettings();
   let repairAttempts = 0;
   let extraTokens = 0;
   let playtest;
@@ -1701,14 +1524,13 @@ async function playtestInterestGame(activity, options = {}) {
     options.onProgress?.(entry);
   };
   while (true) {
-    playtest = await runGamePlaytest({
+    playtest = await gamePlaytestService.run({
       artifactPath: activity.artifactPath,
       screenshotPath: path.join(path.dirname(activity.artifactPath), "playtest.png"),
       maxSeconds: settings.selfPlayMaxSeconds,
       maxActions: settings.selfPlayMaxActions,
       signal: options.signal,
-      onProgress,
-      createDriver: createIsolatedGameDriver
+      onProgress
     });
     if (playtest.cancelled || options.signal?.aborted) {
       const completed = {
@@ -1817,7 +1639,7 @@ async function executeExistingGamePlaytest(activity) {
   broadcastMoodUpdate({ phase: "final", mood: "thinking", reply: `我正在玩《${activity.title}》。` });
   try {
     const result = await playtestInterestGame(activity, { signal: currentInterestActivity.controller.signal });
-    const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+    const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
     publishProactiveEvent({
       kind: "interest_playtest",
       message: `${result.playtest.reflection}${result.playtest.repairAttempts ? ` 我还自己修了 ${result.playtest.repairAttempts} 次。` : ""}`,
@@ -1841,7 +1663,7 @@ function matchingInterestGames(snapshot, message) {
 async function tryHandleVirtualLifeChat(message) {
   const text = String(message || "").trim();
   if (!/(?:你(?:现在)?在(?:做|忙|干)什么|你在干嘛|虚拟日程|你今天有什么安排|接下来做什么)/.test(text)) return null;
-  const settings = normalizeInterestConfig(currentAgentConfig.interests);
+  const settings = currentInterestSettings();
   if (!settings.enabled) return publishInterestInteraction("我现在就是安静陪着你。自主生活还没有开启，所以不会背着你安排沙盒活动。", "idle", text);
   const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), settings);
   const next = snapshot.routine?.find((item) => item.status !== "completed");
@@ -1861,7 +1683,7 @@ async function tryHandleInterestGameChat(message) {
   const wantsPlay = /(?:你|自己).{0,5}(?:玩|试玩).{0,12}(?:小游戏|游戏)?|(?:试玩|再玩一次).{0,12}(?:小游戏|游戏)/.test(text);
   const wantsCreate = /(?:做|写|制作|生成|设计).{0,10}(?:小游戏|文字游戏).{0,10}(?:给我玩|你自己玩|试玩|玩玩)?/.test(text);
   if (!wantsRevision && !wantsPlay && !wantsCreate) return null;
-  const settings = normalizeInterestConfig(currentAgentConfig.interests);
+  const settings = currentInterestSettings();
   if (!settings.enabled || !settings.activities.miniGames) {
     return publishInterestInteraction("小游戏沙盒目前没有开启。请先在“私密空间”里启用小游戏创作，我才会在隔离空间里制作和试玩。", "sad", text);
   }
@@ -1896,7 +1718,7 @@ async function tryHandleInterestGameChat(message) {
 }
 
 async function executeInterestActivity(type, options = {}) {
-  if (agentTaskRunning || scheduleTickRunning) throw new Error("当前还有主人交代的任务正在执行，请稍后再开始创作。");
+  if (agentTaskRunning || scheduleService.snapshot().tickRunning) throw new Error("当前还有主人交代的任务正在执行，请稍后再开始创作。");
   if (currentInterestActivity) throw new Error("Vivi 正在进行另一项创作。");
   const controller = new AbortController();
   currentInterestActivity = { type, startedAt: new Date().toISOString(), controller };
@@ -1918,16 +1740,16 @@ async function executeInterestActivity(type, options = {}) {
         const played = await playtestInterestGame(lifeResult.target, { signal: controller.signal, separateActivityRecord: true });
         const record = await recordDelegatedAutonomousActivity(app.getPath("userData"), type, lifeResult.target, played.playtest, { routineId: options.routineId, tokens: played.tokensUsed });
         await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
-        return { activity: record, playtest: played.playtest, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests) };
+        return { activity: record, playtest: played.playtest, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()) };
       }
       if (lifeResult.delegated === "improve_existing_game") {
         currentInterestActivity.label = `正在改进《${lifeResult.target.title}》`;
         broadcastInterestState();
         const revised = await reviseInterestGame(app.getPath("userData"), currentAgentConfig, lifeResult.target, "根据最近一次试玩感想和运行状态，小幅改进玩法、反馈或平衡，保持原主题。", { signal: controller.signal, separateActivityRecord: true });
-        const played = normalizeInterestConfig(currentAgentConfig.interests).selfPlayGames ? await playtestInterestGame(revised.activity, { signal: controller.signal, separateActivityRecord: true }) : null;
+        const played = currentInterestSettings().selfPlayGames ? await playtestInterestGame(revised.activity, { signal: controller.signal, separateActivityRecord: true }) : null;
         const record = await recordDelegatedAutonomousActivity(app.getPath("userData"), type, lifeResult.target, played?.playtest || { summary: "完成了一次小幅改进。" }, { routineId: options.routineId, tokens: revised.tokens + (played?.tokensUsed || 0) });
         await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
-        return { activity: record, playtest: played?.playtest, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests) };
+        return { activity: record, playtest: played?.playtest, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()) };
       }
       await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
       return lifeResult;
@@ -1937,7 +1759,7 @@ async function executeInterestActivity(type, options = {}) {
       persona,
       signal: controller.signal
     });
-    if (type === "mini_game" && normalizeInterestConfig(currentAgentConfig.interests).selfPlayGames) {
+    if (type === "mini_game" && currentInterestSettings().selfPlayGames) {
       currentInterestActivity.label = `正在玩《${result.activity.title}》`;
       currentInterestActivity.title = result.activity.title;
       currentInterestActivity.activityId = result.activity.id;
@@ -1946,7 +1768,7 @@ async function executeInterestActivity(type, options = {}) {
       const played = await playtestInterestGame(result.activity, { signal: controller.signal });
       result.activity = played.activity;
       result.playtest = played.playtest;
-      result.snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+      result.snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
     }
     await updateInterestSession(app.getPath("userData"), { pendingActivity: null });
     if (type !== "diary") {
@@ -1956,7 +1778,7 @@ async function executeInterestActivity(type, options = {}) {
         mood: "happy"
       });
     }
-    const settings = normalizeInterestConfig(currentAgentConfig.interests);
+    const settings = currentInterestSettings();
     if (type !== "diary" && settings.permissionLevel === "preview" && settings.autoOpenPreview && isSafeInterestArtifact(app.getPath("userData"), result.activity.artifactPath)) {
       await shell.openPath(result.activity.artifactPath);
     }
@@ -1976,7 +1798,7 @@ async function executeInterestActivity(type, options = {}) {
 async function tryHandleDiaryChat(message) {
   const intent = classifyDiaryRequest(message);
   if (!intent) return null;
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
   const profile = await loadRelationshipProfile(app.getPath("userData"));
   const diary = snapshot.activities.find((item) => item.type === "diary" && item.day === snapshot.today.date && item.status === "completed" && item.artifactPath);
   const written = Boolean(diary || snapshot.today.diaryWritten);
@@ -1999,7 +1821,7 @@ async function tryHandleDiaryChat(message) {
 
 function startInterestSandbox() {
   if (interestTimer) return;
-  void initializeInterestSession(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+  void initializeInterestSession(app.getPath("userData"), new Date(), currentInterestSettings());
   interestTimer = setInterval(() => { void tickInterestSandbox(); }, 5 * 60_000);
 }
 
@@ -2246,7 +2068,7 @@ function buildPetContextMenu() {
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
-  await ensureDataFiles(app.getPath("userData"));
+  await ensureDataFiles(app.getPath("userData"), { ensureRag: false });
   session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
     if (permission === "geolocation") {
       return currentAgentConfig.interests?.enabled === true
@@ -2276,7 +2098,7 @@ app.whenReady().then(async () => {
   if (!isBackgroundScheduleLaunch && currentAgentConfig.voice?.enabled && currentAgentConfig.voice?.provider === "gpt_sovits" && currentAgentConfig.voice?.gptSovitsAutoStart !== false) {
     publishStartupStatus({ phase: "voice", progress: 22, title: "正在准备声音", detail: "启动 GPT-SoVITS 本地语音服务，首次加载可能需要一会儿。" });
     try {
-      const voiceRuntime = await ensureGptSovitsService(currentAgentConfig.voice.gptSovitsBaseUrl);
+      const voiceRuntime = await speechService.ensureGptSovitsRuntime(currentAgentConfig.voice.gptSovitsBaseUrl);
       publishStartupStatus({
         phase: "voice",
         progress: 50,
@@ -2350,7 +2172,7 @@ app.whenReady().then(async () => {
   startLive2DModelWatcher();
   publishStartupStatus({ phase: "data", progress: 72, title: "正在整理本地状态", detail: "恢复工作区、日程与陪伴记忆…" });
   try {
-    startupDiagnostics.rag = await ensureRagIndexFresh(app.getPath("userData"));
+    startupDiagnostics.rag = await ragTaskClient.ensure(app.getPath("userData"));
   } catch (error) {
     startupDiagnostics.rag = { error: String(error?.message || error) };
   }
@@ -2363,10 +2185,7 @@ app.whenReady().then(async () => {
   syncGlobalCursorTracking();
   currentLifeState = await loadLifeState(app.getPath("userData"));
   startProactiveLifeEngine();
-  await syncScheduleIntegrations();
-  await tickSchedules();
-  if (!isBackgroundScheduleLaunch) await publishTodayAgendaOnStartup();
-  startScheduleEngine();
+  await scheduleService.start({ publishAgenda: !isBackgroundScheduleLaunch });
   startInterestSandbox();
   if (!isBackgroundScheduleLaunch) {
     publishStartupStatus({ phase: "renderer", progress: 90, title: "正在加载 Vivi", detail: "等待 Live2D 模型完成渲染…" });
@@ -2390,7 +2209,7 @@ app.on("window-all-closed", () => {
 app.on("second-instance", (_event, argv) => {
   if (!app.isReady()) return;
   if (argv.includes("--vivi-background-schedule")) {
-    void tickSchedules();
+    void scheduleService.tick().catch((error) => console.error("[schedule] background tick failed:", error));
     return;
   }
   showPetWindow();
@@ -2467,8 +2286,7 @@ ipcMain.handle("agent:save-config", async (_event, nextConfig) => {
   updateTitleBarOverlays();
   broadcastConfigUpdated(currentAgentConfig);
   refreshTrayMenu();
-  await syncScheduleIntegrations();
-  await broadcastSchedules();
+  await scheduleService.afterMutation();
   return currentAgentConfig;
 });
 
@@ -2510,7 +2328,22 @@ ipcMain.handle("agent:restore-persona-card", async (_event, cardId) => {
   await restorePersonaCard(app.getPath("userData"), cardId);
   return listPersonaCards(app.getPath("userData"));
 });
-ipcMain.handle("agent:get-memory-database-stats", async () => getMemoryDatabaseStats(app.getPath("userData")));
+registerMemoryServiceIpc({
+  ipcMain: trustedIpc,
+  getBaseDir: () => app.getPath("userData"),
+  getMemoryDatabaseStats,
+  reconcileCompletedReminderCommitments: () => scheduleService.reconcileCompletedReminderCommitments(),
+  getRagStatus,
+  ragClient: ragTaskClient,
+  testEmbeddingConnection,
+  clearConversationHistory,
+  clearCompanionMemory,
+  onCleared: () => {
+    chatState = { messages: [], knowledge: [], lastReplyMeta: null };
+    broadcastChatState();
+    return true;
+  }
+});
 
 ipcMain.handle("agent:test-astrbot", async (_event, astrbotOverride) => {
   const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
@@ -2540,102 +2373,6 @@ ipcMain.handle("agent:open-live2d-models-folder", async () => {
   const modelsDirectory = getLive2DModelsDirectory();
   await fs.mkdir(modelsDirectory, { recursive: true });
   return shell.openPath(modelsDirectory);
-});
-
-ipcMain.handle("agent:select-asmr-text-file", async () => {
-  const result = await dialog.showOpenDialog(settingsWindow ?? undefined, {
-    title: "导入 ASMR 文本",
-    properties: ["openFile"],
-    filters: [{ name: "文本", extensions: ["txt", "md"] }]
-  });
-  if (result.canceled || !result.filePaths[0]) return null;
-  const content = await fs.readFile(result.filePaths[0], "utf8");
-  return { path: result.filePaths[0], content: content.slice(0, 200000) };
-});
-
-ipcMain.handle("agent:generate-asmr-script", async (_event, payload) => {
-  return generateAsmrScript(app.getPath("userData"), payload ?? {});
-});
-
-ipcMain.handle("agent:list-elevenlabs-voices", async (_event, voiceOverride) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return listElevenLabsVoices({ ...config.voice, ...(voiceOverride ?? {}) });
-});
-
-ipcMain.handle("agent:synthesize-speech", async (_event, payload) => {
-  const baseDir = app.getPath("userData");
-  const config = mergeAgentConfig(await loadConfig(baseDir));
-  const voiceConfig = { ...config.voice, ...(payload?.voiceConfig ?? {}) };
-  return synthesizeSpeechWithCache(voiceConfig, payload?.text, Boolean(payload?.asmr));
-});
-
-ipcMain.on("agent:speech-signal", (_event, signal) => {
-  broadcastSpeechSignal(signal);
-});
-
-ipcMain.handle("agent:list-local-tts-packs", async () => listLocalTtsPacks(app.getPath("userData")));
-ipcMain.handle("agent:install-local-tts-pack", async (_event, packId) => installLocalTtsPack(
-  app.getPath("userData"),
-  packId,
-  (progress) => broadcastLocalTtsProgress(progress)
-));
-ipcMain.handle("agent:open-local-tts-folder", async () => {
-  const target = path.join(app.getPath("userData"), "agent-data", "tts-models");
-  await fs.mkdir(target, { recursive: true });
-  await shell.openPath(target);
-  return target;
-});
-ipcMain.handle("agent:list-gpt-sovits-profiles", async () => listGptSovitsProfiles(app.getPath("userData")));
-ipcMain.handle("agent:install-gpt-sovits-profile", async (_event, profileId) => installGptSovitsProfile(
-  app.getPath("userData"), profileId, (progress) => broadcastGptSovitsProgress(progress)
-));
-ipcMain.handle("agent:import-gpt-sovits-profile", async (_event, input) => {
-  const result = await dialog.showOpenDialog(settingsWindow ?? undefined, {
-    title: "选择 GPT、SoVITS 权重和参考音频（共 3 个文件）",
-    properties: ["openFile", "multiSelections"],
-    filters: [
-      { name: "GPT-SoVITS 声线文件", extensions: ["ckpt", "pth", "wav", "mp3", "flac", "ogg", "m4a"] }
-    ]
-  });
-  if (result.canceled) return null;
-  return importGptSovitsProfile(app.getPath("userData"), input, result.filePaths);
-});
-
-ipcMain.handle("agent:get-gpt-sovits-runtime-status", async (_event, baseUrl) => ({
-  ready: await isGptSovitsServiceReady(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl)
-}));
-
-ipcMain.handle("agent:start-gpt-sovits-runtime", async (_event, baseUrl) => {
-  return ensureGptSovitsService(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl);
-});
-
-ipcMain.handle("agent:stop-gpt-sovits-runtime", async (_event, baseUrl) => {
-  return stopGptSovitsService(baseUrl || currentAgentConfig.voice.gptSovitsBaseUrl);
-});
-
-ipcMain.handle("agent:get-local-stt-status", async (_event, modelId) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return getLocalSttStatus(app.getPath("userData"), modelId || config.speechInput.model);
-});
-
-ipcMain.handle("agent:install-local-stt", async (_event, modelId) => {
-  return installLocalStt(
-    app.getPath("userData"),
-    modelId,
-    broadcastSttProgress,
-    (url, options) => net.fetch(url, options)
-  );
-});
-
-ipcMain.handle("agent:transcribe-local-speech", async (_event, audioBytes) => {
-  const config = mergeAgentConfig(await loadConfig(app.getPath("userData")));
-  return transcribeLocalSpeech(app.getPath("userData"), audioBytes, config.speechInput);
-});
-
-ipcMain.handle("agent:open-local-stt-folder", async () => {
-  const status = await getLocalSttStatus(app.getPath("userData"), currentAgentConfig.speechInput.model);
-  await fs.mkdir(status.root, { recursive: true });
-  return shell.openPath(status.root);
 });
 
 ipcMain.handle("agent:chat", async (_event, payload) => {
@@ -2697,6 +2434,11 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
   try {
     result = await buildAgentReply(app.getPath("userData"), {
       ...payload,
+      ragClient: ragTaskClient,
+      scheduleClient: {
+        afterMutation: () => scheduleService.afterMutation(),
+        abortPowerAction: () => scheduleService.abortPowerAction()
+      },
       stream: true,
       onDelta: (partialReply) => {
         const nextMessages = [...chatState.messages];
@@ -2732,11 +2474,6 @@ ipcMain.handle("agent:chat", async (_event, payload) => {
     }
   };
   broadcastChatState();
-  if (route.type === "schedule") {
-    await syncScheduleIntegrations();
-    await broadcastSchedules();
-  }
-
   if (result.meta?.relationship) {
     broadcastRelationshipProfile(result.meta.relationship);
   }
@@ -2819,18 +2556,21 @@ app.on("before-quit", (event) => {
   if (!shutdownCleanupDone) {
     shutdownCleanupDone = true;
     stopProactiveLifeEngine();
-    stopScheduleEngine();
+    scheduleService.dispose();
     stopInterestSandbox();
     stopGlobalCursorTracking();
     modelDirectoryWatcher?.close();
     modelDirectoryWatcher = null;
+    utilityTaskSupervisor.close();
+    gamePlaytestService.dispose();
+    speechService.dispose();
     tray?.destroy();
     tray = null;
   }
   if (gptSovitsShutdownStarted) return;
   event.preventDefault();
   gptSovitsShutdownStarted = true;
-  void stopGptSovitsService(currentAgentConfig.voice?.gptSovitsBaseUrl)
+  void speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
     .catch((error) => console.warn("[voice] GPT-SoVITS shutdown failed:", error))
     .finally(() => app.quit());
 });
@@ -2844,9 +2584,7 @@ ipcMain.handle("agent:get-life-state", async () => {
   return currentLifeState;
 });
 
-ipcMain.handle("agent:get-companion-memory", async () => loadCompanionMemory(app.getPath("userData")));
-
-ipcMain.handle("agent:get-interest-sandbox", async () => getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests));
+ipcMain.handle("agent:get-interest-sandbox", async () => getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()));
 
 ipcMain.handle("agent:run-interest-activity", async (_event, type) => {
   return executeInterestActivity(type, { manual: true });
@@ -2856,7 +2594,7 @@ ipcMain.handle("agent:get-interest-state", async () => broadcastInterestState())
 
 ipcMain.handle("agent:cleanup-interest-sandbox", async (_event, mode) => {
   const result = await cleanupInterestSandbox(app.getPath("userData"), mode);
-  return { result, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests) };
+  return { result, snapshot: await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings()) };
 });
 
 ipcMain.handle("agent:play-interest-game", async (_event, activityId) => {
@@ -2878,17 +2616,19 @@ ipcMain.handle("agent:interrupt-interest-activity", async () => {
 ipcMain.handle("agent:update-interest-location", async (_event, location) => {
   const label = await resolveLocationLabel(location);
   await saveInterestLocation(app.getPath("userData"), { ...location, ...label });
-  return getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+  return getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
 });
 
 ipcMain.handle("agent:open-interest-sandbox", async () => {
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
   await shell.openPath(snapshot.root);
   return snapshot.root;
 });
 
 ipcMain.handle("agent:open-interest-artifact", async (_event, artifactPath) => {
   if (!isSafeInterestArtifact(app.getPath("userData"), artifactPath)) throw new Error("只能打开兴趣沙盒内的作品。");
+  const exists = await fs.stat(path.resolve(artifactPath)).then((stat) => stat.isFile()).catch(() => false);
+  if (!exists) throw new Error("作品文件已经被移除。请在“空间管理”中清理游戏文件夹，以同步活动记录。");
   const error = await shell.openPath(path.resolve(artifactPath));
   if (error) throw new Error(error);
   return true;
@@ -2906,16 +2646,6 @@ ipcMain.handle("agent:reset-work-session", async () => {
   return currentLifeState;
 });
 
-ipcMain.handle("agent:list-schedules", async () => listSchedules(app.getPath("userData")));
-
-ipcMain.handle("agent:cancel-schedule", async (_event, id) => {
-  const item = await cancelSchedule(app.getPath("userData"), id);
-  if (item.wasExecuting) await abortWindowsPowerAction();
-  await syncScheduleIntegrations();
-  await broadcastSchedules();
-  return item;
-});
-
 ipcMain.handle("agent:search-files", async (_event, query) => {
   return searchLocalFiles(query);
 });
@@ -2926,18 +2656,6 @@ ipcMain.handle("agent:get-app-registry", async () => {
 
 ipcMain.handle("agent:refresh-app-registry", async () => {
   return rebuildAppRegistry(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:get-rag-status", async () => {
-  return getRagStatus(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:rebuild-rag-index", async () => {
-  return rebuildKnowledgeIndex(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:test-embedding", async () => {
-  return testEmbeddingConnection(app.getPath("userData"));
 });
 
 ipcMain.handle("agent:get-system-resource-snapshot", async () => {
@@ -2967,18 +2685,6 @@ ipcMain.handle("agent:open-external", async (_event, url) => {
 
 ipcMain.handle("agent:test-deepseek", async () => {
   return testDeepSeekConnection(app.getPath("userData"));
-});
-
-ipcMain.handle("agent:clear-memory", async () => {
-  await clearConversationHistory(app.getPath("userData"));
-  await clearCompanionMemory(app.getPath("userData"));
-  chatState = {
-    messages: [],
-    knowledge: [],
-    lastReplyMeta: null
-  };
-  broadcastChatState();
-  return true;
 });
 
 ipcMain.handle("agent:open-settings-window", async () => {
@@ -3180,7 +2886,7 @@ ipcMain.handle("agent:open-interest-category", async (_event, category) => {
   const names = { diary: "diary", drawing: "drawings", mini_game: "games" };
   const directory = names[category];
   if (!directory) throw new Error("不支持的兴趣作品分类。");
-  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentAgentConfig.interests);
+  const snapshot = await getInterestSandboxSnapshot(app.getPath("userData"), new Date(), currentInterestSettings());
   const target = path.join(snapshot.root, directory);
   const error = await shell.openPath(target);
   if (error) throw new Error(error);

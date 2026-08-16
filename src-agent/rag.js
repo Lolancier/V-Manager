@@ -305,7 +305,13 @@ export async function saveRagIndex(baseDir, indexPayload) {
     files: Array.isArray(indexPayload.files) ? indexPayload.files : [],
     embeddedCount: indexPayload.embeddedCount ?? 0
   };
-  await fs.writeFile(ragIndexPath, JSON.stringify(payload, null, 2), "utf-8");
+  const temporaryPath = `${ragIndexPath}.${process.pid}.tmp`;
+  await fs.writeFile(temporaryPath, JSON.stringify(payload, null, 2), "utf-8");
+  try {
+    await fs.rename(temporaryPath, ragIndexPath);
+  } finally {
+    await fs.unlink(temporaryPath).catch(() => {});
+  }
   return payload;
 }
 

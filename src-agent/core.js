@@ -29,6 +29,7 @@ import {
 } from "./relationship-engine.js";
 import { DEFAULT_INTEREST_CONFIG, normalizeInterestConfig } from "./interest-sandbox.js";
 import { deriveConversationStyle } from "./conversation-style.js";
+import { estimateMessageTokens, estimateTokens, trimKnowledgeToTokenBudget, truncateToTokenBudget } from "./token-budget.js";
 import {
   appendRawConversationTurn,
   clearRawConversationMemory,
@@ -125,7 +126,11 @@ export const defaultConfig = {
   interests: DEFAULT_INTEREST_CONFIG,
   memory: {
     maxMessages: 40,
-    knowledgeTopK: 3
+    knowledgeTopK: 3,
+    maxInputTokens: 12000,
+    historyTokenBudget: 6000,
+    companionTokenBudget: 1000,
+    knowledgeTokenBudget: 1800
   }
 };
 
@@ -148,6 +153,23 @@ const LEGACY_DEEPSEEK_MODELS = {
 export function normalizeDeepSeekModel(model, fallback) {
   const value = String(model || "").trim() || fallback;
   return LEGACY_DEEPSEEK_MODELS[value] || value;
+}
+
+function boundedInteger(value, fallback, min, max) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
+}
+
+export function normalizeMemoryConfig(raw = {}) {
+  const maxInputTokens = boundedInteger(raw.maxInputTokens, defaultConfig.memory.maxInputTokens, 6000, 100000);
+  return {
+    maxMessages: boundedInteger(raw.maxMessages, defaultConfig.memory.maxMessages, 4, 200),
+    knowledgeTopK: boundedInteger(raw.knowledgeTopK, defaultConfig.memory.knowledgeTopK, 1, 20),
+    maxInputTokens,
+    historyTokenBudget: Math.floor(Math.min(maxInputTokens * 0.55, boundedInteger(raw.historyTokenBudget, defaultConfig.memory.historyTokenBudget, 1000, 50000))),
+    companionTokenBudget: Math.floor(Math.min(maxInputTokens * 0.15, boundedInteger(raw.companionTokenBudget, defaultConfig.memory.companionTokenBudget, 200, 8000))),
+    knowledgeTokenBudget: Math.floor(Math.min(maxInputTokens * 0.2, boundedInteger(raw.knowledgeTokenBudget, defaultConfig.memory.knowledgeTokenBudget, 300, 16000)))
+  };
 }
 
 function mergeConfig(rawConfig = {}) {
@@ -195,10 +217,7 @@ function mergeConfig(rawConfig = {}) {
       ...(rawConfig.proactive ?? {})
     },
     interests: normalizeInterestConfig(rawConfig.interests),
-    memory: {
-      ...defaultConfig.memory,
-      ...(rawConfig.memory ?? {})
-    }
+    memory: normalizeMemoryConfig(rawConfig.memory)
   };
 }
 
@@ -208,7 +227,7 @@ function getPaths(baseDir) {
 
 // ---- Data bootstrap / config IO ----
 
-export async function ensureDataFiles(baseDir) {
+export async function ensureDataFiles(baseDir, { ensureRag = true } = {}) {
   const { dataDir, configPath, memoryPath, knowledgeDir } = getPaths(baseDir);
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(path.dirname(memoryPath), { recursive: true });
@@ -351,7 +370,7 @@ export async function ensureDataFiles(baseDir) {
   }
 
   await ensureAppRegistry(baseDir);
-  await ensureRagFiles(baseDir);
+  if (ensureRag) await ensureRagFiles(baseDir);
   await loadRelationshipProfile(baseDir);
   await initializeLocalDatabase(baseDir);
   await ensureDefaultPersonaCard(baseDir, await loadConfig(baseDir));
@@ -486,9 +505,36 @@ function normalizeModelContent(content) {
   }).join("");
 }
 
-async function requestDeepSeek(config, messages) {
+function normalizeModelUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const promptTokens = Number(usage.prompt_tokens) || 0;
+  const cacheHitTokens = Number(usage.prompt_cache_hit_tokens) || 0;
+  const cacheMissTokens = Number(usage.prompt_cache_miss_tokens) || Math.max(0, promptTokens - cacheHitTokens);
+  return {
+    promptTokens,
+    completionTokens: Number(usage.completion_tokens) || 0,
+    totalTokens: Number(usage.total_tokens) || promptTokens + (Number(usage.completion_tokens) || 0),
+    cacheHitTokens,
+    cacheMissTokens,
+    cacheHitRate: promptTokens > 0 ? cacheHitTokens / promptTokens : 0
+  };
+}
+
+function mergeModelUsage(current, next) {
+  if (!next) return current;
+  const merged = {
+    promptTokens: (current?.promptTokens || 0) + next.promptTokens,
+    completionTokens: (current?.completionTokens || 0) + next.completionTokens,
+    totalTokens: (current?.totalTokens || 0) + next.totalTokens,
+    cacheHitTokens: (current?.cacheHitTokens || 0) + next.cacheHitTokens,
+    cacheMissTokens: (current?.cacheMissTokens || 0) + next.cacheMissTokens
+  };
+  return { ...merged, cacheHitRate: merged.promptTokens > 0 ? merged.cacheHitTokens / merged.promptTokens : 0 };
+}
+
+async function requestDeepSeek(config, messages, onUsage, fetchImpl = fetch) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const response = await fetch(endpoint, {
+  const response = await fetchImpl(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -508,10 +554,11 @@ async function requestDeepSeek(config, messages) {
   }
 
   const data = await response.json();
+  onUsage?.(normalizeModelUsage(data.usage));
   return normalizeModelContent(data.choices?.[0]?.message?.content).trim() || EMPTY_MODEL_REPLY;
 }
 
-export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}) {
+export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}, fetchImpl = fetch) {
   const config = await loadConfig(baseDir);
   if (!config.deepseek.apiKey) throw new Error("请先配置 DeepSeek API Key。");
   const scene = mode === "sleep" ? "温柔哄睡" : mode === "casual" ? "放松休闲谈话" : "用户指定主题";
@@ -526,11 +573,11 @@ export async function generateAsmrScript(baseDir, { mode = "custom", prompt = ""
       ].join("\n")
     },
     { role: "user", content: prompt.trim() || `生成一段约 3 分钟的${scene}文本。` }
-  ]);
+  ], undefined, fetchImpl);
   return content.replace(/^\s*\[(?:mood|face):.*\]\s*$/gim, "").trim();
 }
 
-async function callDeepSeekWithTools(config, messages, tools) {
+async function callDeepSeekWithTools(config, messages, tools, onUsage) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const body = {
     model: config.deepseek.model,
@@ -558,10 +605,11 @@ async function callDeepSeekWithTools(config, messages, tools) {
   }
 
   const data = await response.json();
+  onUsage?.(normalizeModelUsage(data.usage));
   return normalizeToolCallMessage(data.choices?.[0]?.message ?? { content: "模型没有返回有效内容。" }, tools || []);
 }
 
-export async function requestDeepSeekStream(config, messages, onDelta, allowRetry = true) {
+export async function requestDeepSeekStream(config, messages, onDelta, allowRetry = true, onUsage) {
   const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const response = await fetch(endpoint, {
     method: "POST",
@@ -593,10 +641,15 @@ export async function requestDeepSeekStream(config, messages, onDelta, allowRetr
   let reply = "";
   let finishReason = "";
   let receivedReasoning = false;
+  let usageReported = false;
 
   const consumePayload = (payload) => {
     if (!payload || payload === "[DONE]") return;
     const data = JSON.parse(payload);
+    if (data.usage && !usageReported) {
+      usageReported = true;
+      onUsage?.(normalizeModelUsage(data.usage));
+    }
     const choice = data.choices?.[0];
     if (choice?.finish_reason) finishReason = choice.finish_reason;
     if (normalizeModelContent(choice?.delta?.reasoning_content)) receivedReasoning = true;
@@ -661,7 +714,7 @@ export async function requestDeepSeekStream(config, messages, onDelta, allowRetr
       receivedReasoning,
       firstReplyLength: reply.length
     });
-    return requestDeepSeekStream(retryConfig, messages, onDelta, false);
+    return requestDeepSeekStream(retryConfig, messages, onDelta, false, onUsage);
   }
 
   return reply.trim() || INCOMPLETE_MODEL_REPLY;
@@ -802,10 +855,12 @@ function normalizeCodeContext(codeContext) {
   return { mode, activeFile };
 }
 
-export function buildRecentHistoryMessages(history, maxMessages = 40, includeToolHistory = true) {
+export function buildRecentHistoryMessages(history, maxMessages = 40, includeToolHistory = true, tokenBudget = 6000) {
   const seenToolCallIds = new Set();
   const recentHistory = [];
   const limit = Math.max(2, Number(maxMessages) || 40);
+  const budget = Math.max(256, Number(tokenBudget) || 6000);
+  let usedTokens = 0;
 
   for (const item of [...history].reverse()) {
     const assistantText = String(item.assistant || "").trim();
@@ -842,13 +897,19 @@ export function buildRecentHistoryMessages(history, maxMessages = 40, includeToo
 
     // A tool-call round is atomic. Truncating from its tail can leave an orphaned
     // `tool` message, which OpenAI-compatible APIs correctly reject with HTTP 400.
-    if (recentHistory.length + entries.length > limit) {
+    const entryTokens = entries.reduce((sum, entry) => sum + estimateMessageTokens(entry), 0);
+    if (recentHistory.length + entries.length > limit || usedTokens + entryTokens > budget) {
       if (recentHistory.length === 0) {
-        recentHistory.unshift(entries[0], entries.at(-1));
+        const textBudget = Math.max(64, Math.floor((budget - 24) / 2));
+        recentHistory.unshift(
+          { ...entries[0], content: truncateToTokenBudget(entries[0].content, textBudget, { keepEnd: true }) },
+          { ...entries.at(-1), content: truncateToTokenBudget(entries.at(-1).content, textBudget, { keepEnd: true }) }
+        );
       }
       break;
     }
     recentHistory.unshift(...entries);
+    usedTokens += entryTokens;
   }
   return recentHistory;
 }
@@ -875,7 +936,7 @@ function buildCodeModePrompt(codeContext) {
   ].join("\n");
 }
 
-function buildSystemPromptV3(config, knowledge, relationshipProfile, companionMemory, toolsEnabled = true, codeContext = null, conversationStyle = null) {
+export function buildSystemPromptsV3(config, knowledge, relationshipProfile, companionMemory, query, toolsEnabled = true, codeContext = null, conversationStyle = null) {
   const now = new Date();
   const knowledgeBlock = knowledge.length
     ? knowledge.map((item, index) => `【知识片段 ${index + 1} | ${item.file}】\n${item.content}`).join("\n\n")
@@ -900,21 +961,29 @@ function buildSystemPromptV3(config, knowledge, relationshipProfile, companionMe
       "回复保持贴近日常交谈的长度，除非用户明确要求详细说明。"
     ];
 
-  return [
+  const stable = [
     `你的人设名为 ${config.personaName}。`,
-    config.personaPrompt,
+    truncateToTokenBudget(config.personaPrompt, Math.min(3000, Math.max(900, config.memory.maxInputTokens * 0.2))),
     "",
-    buildTemporalContext(now),
     "身份设定优先级：当前启用的人物卡是名字、自称、用户称呼、关系和表达风格的唯一主设定。知识库中的 persona.md 与其他知识片段只补充背景、经历和偏好；若与人物卡冲突，必须以人物卡为准，不得让知识片段改写当前身份。",
+    "",
+    ...behaviorRules,
+  ].join("\n");
+  const companion = buildCompanionMemoryPrompt(companionMemory, query, { tokenBudget: config.memory.companionTokenBudget });
+  const dynamic = [
+    buildTemporalContext(now),
     config.relationship?.enabled ? buildRelationshipPrompt(relationshipProfile) : "",
-    buildCompanionMemoryPrompt(companionMemory),
+    companion.prompt,
     buildCodeModePrompt(codeContext),
     conversationStyle?.instruction || "",
     "",
-    ...behaviorRules,
-    "",
-    knowledgeBlock,
-  ].join("\n");
+    knowledgeBlock
+  ].filter(Boolean).join("\n");
+  return {
+    messages: [{ role: "system", content: stable }, { role: "system", content: dynamic }],
+    companionSelection: companion.selection,
+    estimatedTokens: estimateTokens(stable) + estimateTokens(dynamic) + 8
+  };
 }
 
 function hasExplicitCodeAgentConfirmation(message) {
@@ -1156,6 +1225,8 @@ export async function buildAgentReply(baseDir, payload) {
     history: personaHistory,
     config,
     workspaceDir: activeWorkspaceDir,
+    ragClient: payload.ragClient,
+    scheduleClient: payload.scheduleClient,
     codeAgentConfirmed: codeContext?.mode === "agent" || hasExplicitCodeAgentConfirmation(payload.message),
     currentUserMessage: payload.message
   };
@@ -1221,31 +1292,48 @@ export async function buildAgentReply(baseDir, payload) {
       knowledgeTopK,
       (query, topK) => retrieveKnowledge(baseDir, query, topK)
     );
-  const knowledge = ragResult.items;
+  const knowledgeBudget = trimKnowledgeToTokenBudget(ragResult.items, config.memory.knowledgeTokenBudget);
+  const knowledge = knowledgeBudget.items;
   const maxMsgs = config.memory.maxMessages || 40;
   const includeToolHistory = route.type !== "chat";
-  const recentHistory = buildRecentHistoryMessages(personaHistory, maxMsgs, includeToolHistory);
+  const systemPrompts = buildSystemPromptsV3(
+    config, knowledge, relationshipProfile, companionMemory, effectiveMessage,
+    route.type !== "chat", codeContext, conversationStyle
+  );
+  const userContent = effectiveMessage === payload.message
+    ? payload.message
+    : `用户原话：${payload.message}\n结合最近上下文扩写后：${effectiveMessage}`;
+  const routeTools = route.type === "chat" ? [] : getToolsForRoute(route.type, codeContext);
+  const toolTokens = estimateTokens(routeTools.length ? JSON.stringify(routeTools) : "");
+  const availableHistoryTokens = Math.max(256, config.memory.maxInputTokens - systemPrompts.estimatedTokens - estimateTokens(userContent) - toolTokens - 256);
+  const historyTokenBudget = Math.min(config.memory.historyTokenBudget, availableHistoryTokens);
+  const recentHistory = buildRecentHistoryMessages(personaHistory, maxMsgs, includeToolHistory, historyTokenBudget);
 
   const messages = [
-    {
-      role: "system",
-      content: buildSystemPromptV3(config, knowledge, relationshipProfile, companionMemory, route.type !== "chat", codeContext, conversationStyle)
-    },
+    ...systemPrompts.messages,
     ...recentHistory,
     {
       role: "user",
-      content:
-        effectiveMessage === payload.message
-          ? payload.message
-          : `用户原话：${payload.message}\n结合最近上下文扩写后：${effectiveMessage}`
+      content: userContent
     }
   ];
+  const inputBudget = {
+    maxInputTokens: config.memory.maxInputTokens,
+    estimatedInputTokens: messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0) + toolTokens,
+    historyTokens: recentHistory.reduce((sum, message) => sum + estimateMessageTokens(message), 0),
+    companionTokens: systemPrompts.companionSelection.estimatedTokens,
+    knowledgeTokens: knowledgeBudget.estimatedTokens,
+    toolTokens,
+    selectedMemoryCount: systemPrompts.companionSelection.items.length
+  };
 
   let reply;
   let responseMode = "fallback_local";
   let fallbackReason = "";
   let toolUseCount = 0;
   let personaChanged = false;
+  let modelUsage = null;
+  const captureUsage = (usage) => { modelUsage = mergeModelUsage(modelUsage, usage); };
   let meta = {
     responseMode,
     usedKnowledge: knowledge.length > 0,
@@ -1258,7 +1346,8 @@ export async function buildAgentReply(baseDir, payload) {
     embeddingProvider: ragResult.meta.embeddingProvider,
     detectedMood: relationshipProfile.emotion.suggestedMood,
     relationship: relationshipProfile,
-    codeMode: codeContext?.mode
+    codeMode: codeContext?.mode,
+    inputBudget
   };
 
   // Track where history-derived messages end — only tool calls added
@@ -1275,8 +1364,8 @@ export async function buildAgentReply(baseDir, payload) {
     };
     try {
       reply = payload.stream
-        ? await requestDeepSeekStream(fastConfig, messages, payload.onDelta)
-        : await requestDeepSeek(fastConfig, messages);
+        ? await requestDeepSeekStream(fastConfig, messages, payload.onDelta, true, captureUsage)
+        : await requestDeepSeek(fastConfig, messages, captureUsage);
       const moodResult = parseMoodTag(reply);
       const faceResult = parseFaceTag(moodResult.cleanReply);
       reply = faceResult.cleanReply;
@@ -1297,8 +1386,7 @@ export async function buildAgentReply(baseDir, payload) {
   } else if (config.deepseek.apiKey) {
     try {
       // Function calling loop: up to 5 rounds of tool calls
-      const routeTools = getToolsForRoute(route.type, codeContext);
-      let response = await callDeepSeekWithTools(responseConfig, messages, routeTools);
+      let response = await callDeepSeekWithTools(responseConfig, messages, routeTools, captureUsage);
       let round = 0;
       const maxRounds = codeContext?.mode === "agent" ? 12 : 6;
 
@@ -1372,7 +1460,7 @@ export async function buildAgentReply(baseDir, payload) {
         }
 
         // Next round
-        response = await callDeepSeekWithTools(responseConfig, messages, round < maxRounds - 1 ? routeTools : null);
+        response = await callDeepSeekWithTools(responseConfig, messages, round < maxRounds - 1 ? routeTools : null, captureUsage);
       }
 
       // Final reply
@@ -1380,7 +1468,7 @@ export async function buildAgentReply(baseDir, payload) {
         // LLM only called set_mood without text — use mood as reply hint
         reply = {happy:"嗯嗯~", sad:"呜呜…", surprised:"诶？！", angry:"哼！", blush:"诶嘿~", thinking:"嗯…"}[interceptedMood] || "好的~";
       } else if (payload.stream && toolUseCount === 0) {
-        reply = await requestDeepSeekStream(responseConfig, messages, payload.onDelta);
+        reply = await requestDeepSeekStream(responseConfig, messages, payload.onDelta, true, captureUsage);
       } else {
         reply = response.content || "模型没有返回有效内容。";
         if (payload.stream && payload.onDelta) {
@@ -1477,7 +1565,7 @@ export async function buildAgentReply(baseDir, payload) {
   return {
     reply,
     knowledge,
-    meta
+    meta: { ...meta, usage: modelUsage, inputBudget }
   };
 }
 

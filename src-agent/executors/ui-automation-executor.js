@@ -2,10 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import electron from "electron";
+import { getDesktopShell } from "../platform/desktop-shell.js";
 import { normalizeText, pathExists, stripWrappingQuotes } from "../shared/utils.js";
-
-const { shell } = electron;
 
 const SEARCH_ENGINES = {
   bing: "https://www.bing.com/search?q=",
@@ -45,13 +43,13 @@ export function normalizeBrowserUrl(input) {
 
 export async function openBrowserUrl(url) {
   const targetUrl = normalizeBrowserUrl(url);
-  await shell.openExternal(targetUrl);
+  await getDesktopShell().openExternal(targetUrl);
   return { ok: true, targetUrl, action: "open_url" };
 }
 
 export async function searchWeb(query, engine = "bing") {
   const targetUrl = buildSearchUrl(query, engine);
-  await shell.openExternal(targetUrl);
+  await getDesktopShell().openExternal(targetUrl);
   return {
     ok: true,
     query: String(query).trim(),

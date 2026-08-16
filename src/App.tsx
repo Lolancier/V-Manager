@@ -173,7 +173,11 @@ const previewConfig: AgentConfig = {
   },
   memory: {
     maxMessages: 40,
-    knowledgeTopK: 3
+    knowledgeTopK: 3,
+    maxInputTokens: 12000,
+    historyTokenBudget: 6000,
+    companionTokenBudget: 1000,
+    knowledgeTokenBudget: 1800
   }
 };
 
@@ -679,6 +683,8 @@ function App() {
   const bubbleAudioRef = useRef<HTMLAudioElement | null>(null);
   const chatAutomaticAudioRef = useRef<HTMLAudioElement | null>(null);
   const chatAutomaticVoiceTokenRef = useRef(0);
+  const activePersonaVoiceRef = useRef("");
+  const memoryRefreshTimerRef = useRef<number | null>(null);
   const voicePreviewAudioRef = useRef<HTMLAudioElement | null>(null);
   const voicePreviewTokenRef = useRef(0);
   const messageVoiceAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -739,6 +745,12 @@ function App() {
     const theme = configDraft?.appearance?.theme ?? "light";
     document.documentElement.dataset.theme = theme;
   }, [configDraft?.appearance?.theme]);
+
+  useEffect(() => {
+    if (!activePersonaVoiceRef.current && configDraft?.activePersonaCard?.id) {
+      activePersonaVoiceRef.current = configDraft.activePersonaCard.id;
+    }
+  }, [configDraft?.activePersonaCard?.id]);
 
   useEffect(() => {
     if (!bridge || viewMode !== "pet") return;
@@ -913,7 +925,7 @@ function App() {
     stopSpeechLipSync();
     pendingSpeechPerformanceRef.current = { reply: replyText, mood, faceParams: requestedFaceParams };
 
-    bridge?.synthesizeSpeech(replyText, Boolean(configDraft?.voice.asmrEnabled))
+    bridge?.synthesizeSpeech(replyText, Boolean(configDraft?.voice.asmrEnabled), configDraft?.voice)
       .then((result) => {
         if (token !== chatAutomaticVoiceTokenRef.current || viewMode !== "chat") return;
         const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
@@ -1099,6 +1111,7 @@ function App() {
     return () => {
       clearBubbleTimers(bubbleTimersRef);
       clearTimer(bubbleSegmentTimerRef);
+      if (memoryRefreshTimerRef.current !== null) window.clearTimeout(memoryRefreshTimerRef.current);
       bubbleAudioRef.current?.pause();
       voicePreviewAudioRef.current?.pause();
       messageVoiceAudioRef.current?.pause();
@@ -1169,6 +1182,16 @@ function App() {
     }
 
     const offConfig = bridge.onConfigUpdated((nextConfig) => {
+      const nextPersonaId = nextConfig.activePersonaCard?.id || "";
+      if (activePersonaVoiceRef.current && activePersonaVoiceRef.current !== nextPersonaId) {
+        chatAutomaticVoiceTokenRef.current += 1;
+        chatAutomaticAudioRef.current?.pause();
+        bubbleAudioRef.current?.pause();
+        messageVoiceTokenRef.current += 1;
+        messageVoiceAudioRef.current?.pause();
+        stopSpeechLipSync();
+      }
+      activePersonaVoiceRef.current = nextPersonaId;
       setConfigDraft(nextConfig);
       setBootstrap((current) => (current ? { ...current, config: nextConfig } : current));
     });
@@ -1183,6 +1206,13 @@ function App() {
       setMessages(nextState.messages);
       setKnowledge(nextState.knowledge);
       setLastReplyMeta(nextState.lastReplyMeta);
+      if (viewMode === "settings") {
+        if (memoryRefreshTimerRef.current !== null) window.clearTimeout(memoryRefreshTimerRef.current);
+        memoryRefreshTimerRef.current = window.setTimeout(() => {
+          memoryRefreshTimerRef.current = null;
+          void bridge.getCompanionMemory().then(setCompanionMemory).catch(() => {});
+        }, 350);
+      }
     });
 
     const offRelationship = bridge.onRelationshipUpdated(setRelationshipProfile);
@@ -1549,7 +1579,7 @@ function App() {
     };
 
     if (voiceReady && voiceBridge) {
-      voiceBridge.synthesizeSpeech(bubbleSegmentText, Boolean(configDraft?.voice.asmrEnabled))
+      voiceBridge.synthesizeSpeech(bubbleSegmentText, Boolean(configDraft?.voice.asmrEnabled), configDraft?.voice)
         .then((result) => {
           if (cancelled) return;
           const audio = new Audio(`data:${result.mimeType};base64,${result.audioBase64}`);
@@ -1608,7 +1638,7 @@ function App() {
       bubbleAudioRef.current = null;
       stopSpeechLipSync();
     };
-  }, [bridge, bubbleSegmentText, configDraft?.voice.apiKey, configDraft?.voice.asmrEnabled, configDraft?.voice.enabled, configDraft?.voice.model, configDraft?.voice.voice, viewMode]);
+  }, [bridge, bubbleSegmentText, configDraft?.activePersonaCard?.id, configDraft?.voice.apiKey, configDraft?.voice.asmrEnabled, configDraft?.voice.enabled, configDraft?.voice.gptSovitsProfileId, configDraft?.voice.localPackId, configDraft?.voice.localSpeakerId, configDraft?.voice.model, configDraft?.voice.provider, configDraft?.voice.voice, viewMode]);
 
   useEffect(() => {
     if (viewMode !== "bubble") {
@@ -1779,6 +1809,12 @@ function App() {
   async function handleActivatePersonaCard() {
     if (!bridge || !personaDraft.id) return;
     try {
+      chatAutomaticVoiceTokenRef.current += 1;
+      chatAutomaticAudioRef.current?.pause();
+      bubbleAudioRef.current?.pause();
+      messageVoiceTokenRef.current += 1;
+      messageVoiceAudioRef.current?.pause();
+      stopSpeechLipSync();
       const result = await bridge.activatePersonaCard(personaDraft.id);
       setPersonaCards(result.cards);
       setPersonaDraft(personaDraftFromCard(result.card));
@@ -2638,9 +2674,10 @@ function App() {
     }
   }
 
-  async function handleCleanupInterest(mode: "failed_logs" | "all_content") {
+  async function handleCleanupInterest(mode: "failed_logs" | "game_content" | "all_content") {
     if (!bridge || cleaningInterest) return;
     if (mode === "all_content" && !window.confirm("确认清空私密空间中的全部日记、绘画、小游戏和活动记录？此操作不可撤销。")) return;
+    if (mode === "game_content" && !window.confirm("确认清空小游戏文件夹，并同步移除小游戏及其试玩/改进记录？此操作不可撤销。")) return;
     setCleaningInterest(true);
     try {
       const result = await bridge.cleanupInterestSandbox(mode);
@@ -2648,7 +2685,9 @@ function App() {
       setInterestLogPage(1);
       setInterestMessage(mode === "failed_logs"
         ? `已清理 ${result.result.removedLogs} 条失败或终止记录，完成作品保持不变。`
-        : `已清空私密空间，释放 ${(result.result.reclaimedBytes / 1024 / 1024).toFixed(1)} MB。`);
+        : mode === "game_content"
+          ? `已清空游戏文件夹并同步移除 ${result.result.removedLogs} 条游戏记录，释放 ${(result.result.reclaimedBytes / 1024).toFixed(1)} KB。`
+          : `已清空私密空间，释放 ${(result.result.reclaimedBytes / 1024 / 1024).toFixed(1)} MB。`);
     } catch (error) {
       setInterestMessage(error instanceof Error ? error.message : String(error));
       try { setInterestSnapshot(await bridge.getInterestSandbox()); } catch {}
@@ -3359,6 +3398,10 @@ function App() {
             </section>
             <div className="inline-grid">
               <label>
+                单轮输入上限（估算 Token）
+                <input type="number" min={6000} max={100000} step={1000} value={configDraft.memory.maxInputTokens} onChange={(event) => setConfigDraft({ ...configDraft, memory: { ...configDraft.memory, maxInputTokens: Number(event.target.value) } })} />
+              </label>
+              <label>
                 最大消息数
                 <input
                   type="number"
@@ -3388,7 +3431,27 @@ function App() {
                   }
                 />
               </label>
+              <label>
+                近期对话预算
+                <input type="number" min={1000} max={50000} step={500} value={configDraft.memory.historyTokenBudget} onChange={(event) => setConfigDraft({ ...configDraft, memory: { ...configDraft.memory, historyTokenBudget: Number(event.target.value) } })} />
+              </label>
+              <label>
+                陪伴记忆预算
+                <input type="number" min={200} max={8000} step={100} value={configDraft.memory.companionTokenBudget} onChange={(event) => setConfigDraft({ ...configDraft, memory: { ...configDraft.memory, companionTokenBudget: Number(event.target.value) } })} />
+              </label>
+              <label>
+                RAG 知识预算
+                <input type="number" min={300} max={16000} step={100} value={configDraft.memory.knowledgeTokenBudget} onChange={(event) => setConfigDraft({ ...configDraft, memory: { ...configDraft.memory, knowledgeTokenBudget: Number(event.target.value) } })} />
+              </label>
             </div>
+            <p className="knowledge-hint">人物卡、关系状态、最近连续对话和未完成承诺优先保留；超出预算时先移除最旧历史与低相关知识，不会让输入随使用时间无限增长。</p>
+            {lastReplyMeta?.inputBudget ? <div className="stats-grid">
+              <article className="stat-card"><span>上轮估算输入</span><strong>{lastReplyMeta.inputBudget.estimatedInputTokens}</strong></article>
+              <article className="stat-card"><span>近期对话</span><strong>{lastReplyMeta.inputBudget.historyTokens}</strong></article>
+              <article className="stat-card"><span>陪伴记忆</span><strong>{lastReplyMeta.inputBudget.companionTokens}</strong></article>
+              <article className="stat-card"><span>RAG 知识</span><strong>{lastReplyMeta.inputBudget.knowledgeTokens}</strong></article>
+            </div> : null}
+            {lastReplyMeta?.usage?.promptTokens ? <p className="knowledge-hint">DeepSeek 上轮实际输入 {lastReplyMeta.usage.promptTokens} Token · 缓存命中 {lastReplyMeta.usage.cacheHitTokens} · 命中率 {Math.round(lastReplyMeta.usage.cacheHitRate * 100)}%</p> : <p className="knowledge-hint">缓存命中率会在 DeepSeek 响应返回 usage 统计后显示；本地语音缓存不计入这里。</p>}
             <div className="action-row">
               <button className="primary-button" type="button" onClick={handleSave} disabled={saving}>
                 {saving ? "保存中..." : "保存设置"}
@@ -4633,6 +4696,7 @@ function App() {
                 <div><strong>空间管理</strong><span>失败记录不包含作品；清理失败日志不会删除已经完成的日记、绘画或小游戏。</span></div>
                 <div className="interest-storage-actions">
                   <button className="ghost-button compact" type="button" disabled={cleaningInterest || !(interestSnapshot?.storage?.failedCount)} onClick={() => void handleCleanupInterest("failed_logs")}>清理失败记录（{interestSnapshot?.storage?.failedCount ?? 0}）</button>
+                  <button className="ghost-button compact" type="button" disabled={cleaningInterest || !interestSnapshot?.activities.some((item) => ["mini_game", "play_existing_game", "improve_existing_game"].includes(item.type))} onClick={() => void handleCleanupInterest("game_content")}>清理游戏文件夹</button>
                   <button className="ghost-button compact danger" type="button" disabled={cleaningInterest || !(interestSnapshot?.activities.length)} onClick={() => void handleCleanupInterest("all_content")}>清空全部作品</button>
                 </div>
               </div>
@@ -5133,7 +5197,7 @@ function App() {
   }
 
   function handlePetInteractionChange(interactive: boolean) {
-    if (dragStateRef.current || petTouchPointerRef.current || !bridge || viewMode !== "pet") return;
+    if (dragStateRef.current || petTouchPointerRef.current || !bridge || !configDraft || viewMode !== "pet") return;
     lastPetInteractiveRef.current = interactive;
     const hoverAutoHide = configDraft.appearance?.hoverAutoHide === true;
     setPetHoverHidden(hoverAutoHide && interactive);
