@@ -23,6 +23,10 @@ import {
   WINDOW_INTENT_HANDLE_CHANNELS,
   createWindowIntentService
 } from "../electron/services/window-intent-service.js";
+import {
+  CODE_WORKSPACE_HANDLE_CHANNELS,
+  createCodeWorkspaceService
+} from "../electron/services/code-workspace-service.js";
 
 function ipcDouble() {
   const handlers = new Map();
@@ -369,4 +373,67 @@ test("window intent service forwards open requests through the trust boundary", 
   service.start();
   service.dispose();
   assert.equal(ipc.handlers.has("agent:open-settings-window"), false);
+});
+
+test("code workspace service preserves file and workspace argument shapes", async () => {
+  const calls = [];
+  let workspaceDir = "D:/work";
+  const dependencies = {
+    listWorkspaceCodeFiles: async (options) => { calls.push(["list", options.workspaceDir]); return [{ path: "main.js" }]; },
+    readWorkspaceCode: async (relativePath, options) => {
+      calls.push(["read", relativePath, options]);
+      return { content: "source" };
+    },
+    writeWorkspaceCode: async (payload, options) => {
+      calls.push(["write", payload, options]);
+      return { written: true };
+    }
+  };
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createCodeWorkspaceService({
+    trustedIpc,
+    getActiveWorkspaceDir: () => workspaceDir,
+    setActiveWorkspaceDir: (next) => { workspaceDir = next; },
+    persistCodeWorkspace: async () => { calls.push(["persist", workspaceDir]); },
+    showOpenDialog: async (options) => {
+      calls.push(["dialog", options]);
+      return { canceled: false, filePaths: ["D:/repo"] };
+    },
+    dependencies
+  });
+  service.registerIpc().start();
+
+  assert.deepEqual(await ipc.handlers.get("agent:get-code-workspace")(trustedEvent()), [{ path: "main.js" }]);
+  assert.deepEqual(await ipc.handlers.get("agent:read-code-file")(trustedEvent(), "src/main.js"), { content: "source" });
+  assert.deepEqual(await ipc.handlers.get("agent:write-code-file")(trustedEvent(), {
+    path: "src/main.js",
+    content: "next",
+    expectedContent: "source"
+  }), { written: true });
+  assert.deepEqual(await ipc.handlers.get("agent:select-code-workspace")(trustedEvent()), [{ path: "main.js" }]);
+  assert.throws(() => ipc.handlers.get("agent:get-code-workspace")(trustedEvent("https://example.com")), /拒绝/);
+  assert.deepEqual(CODE_WORKSPACE_HANDLE_CHANNELS, [
+    "agent:get-code-workspace",
+    "agent:read-code-file",
+    "agent:write-code-file",
+    "agent:select-code-workspace"
+  ]);
+  assert.deepEqual(calls, [
+    ["list", "D:/work"],
+    ["read", "src/main.js", { workspaceDir: "D:/work" }],
+    ["write", {
+      path: "src/main.js",
+      content: "next",
+      expected_content: "source"
+    }, { workspaceDir: "D:/work", codeAgentConfirmed: true }],
+    ["dialog", {
+      title: "选择代码工作区",
+      defaultPath: "D:/work",
+      properties: ["openDirectory"]
+    }],
+    ["persist", "D:/repo"],
+    ["list", "D:/repo"]
+  ]);
+  assert.equal(service.snapshot().workspaceDir, "D:/repo");
+  service.dispose();
 });

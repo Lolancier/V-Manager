@@ -13,7 +13,6 @@ import {
   setActiveWorkspaceDir,
   testEmbeddingConnection
 } from "../src-agent/core.js";
-import { listWorkspaceCodeFiles, readWorkspaceCode, writeWorkspaceCode } from "../src-agent/code-executor.js";
 import { loadRelationshipProfile } from "../src-agent/relationship-engine.js";
 import { resolveAgentRoute } from "../src-agent/router.js";
 import { classifyFastReaction } from "../src-agent/fast-reaction.js";
@@ -52,6 +51,7 @@ import { createHostShellService } from "./services/host-shell-service.js";
 import { createSystemResourceService } from "./services/system-resource-service.js";
 import { createCompanionLifeService } from "./services/companion-life-service.js";
 import { createWindowIntentService } from "./services/window-intent-service.js";
+import { createCodeWorkspaceService } from "./services/code-workspace-service.js";
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
@@ -1217,6 +1217,19 @@ const windowIntentService = createWindowIntentService({
   openExpressionWindow: () => openExpressionWindow()
 });
 
+const codeWorkspaceService = createCodeWorkspaceService({
+  trustedIpc,
+  getActiveWorkspaceDir,
+  setActiveWorkspaceDir,
+  persistCodeWorkspace,
+  showOpenDialog: (options) => {
+    const owner = codeWindow && !codeWindow.isDestroyed() ? codeWindow : undefined;
+    return owner
+      ? dialog.showOpenDialog(owner, options)
+      : dialog.showOpenDialog(options);
+  }
+});
+
 const modelConversationService = createModelConversationService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
@@ -1265,6 +1278,7 @@ fileManagerService.registerIpc().start();
 hostShellService.registerIpc().start();
 companionLifeService.registerIpc().start();
 windowIntentService.registerIpc().start();
+codeWorkspaceService.registerIpc().start();
 
 async function resolveLocationLabel(location) {
   try {
@@ -1948,7 +1962,8 @@ app.on("before-quit", (event) => {
       fileManagerService.dispose(),
       hostShellService.dispose(),
       companionLifeService.dispose(),
-      windowIntentService.dispose()
+      windowIntentService.dispose(),
+      codeWorkspaceService.dispose()
     ]).then(() => undefined);
     stopGlobalCursorTracking();
     utilityTaskSupervisor.close();
@@ -1965,41 +1980,6 @@ app.on("before-quit", (event) => {
     speechService.stopGptSovitsRuntime(currentAgentConfig.voice?.gptSovitsBaseUrl)
   ])
     .finally(() => app.quit());
-});
-
-ipcMain.handle("agent:get-code-workspace", async () => {
-  return listWorkspaceCodeFiles({ workspaceDir: getActiveWorkspaceDir() });
-});
-
-ipcMain.handle("agent:read-code-file", async (_event, relativePath) => {
-  return readWorkspaceCode(relativePath, { workspaceDir: getActiveWorkspaceDir() });
-});
-
-ipcMain.handle("agent:write-code-file", async (_event, payload) => {
-  return writeWorkspaceCode(
-    {
-      path: payload?.path,
-      content: payload?.content,
-      expected_content: payload?.expectedContent
-    },
-    { workspaceDir: getActiveWorkspaceDir(), codeAgentConfirmed: true }
-  );
-});
-
-ipcMain.handle("agent:select-code-workspace", async () => {
-  const owner = codeWindow && !codeWindow.isDestroyed() ? codeWindow : undefined;
-  const options = {
-    title: "选择代码工作区",
-    defaultPath: getActiveWorkspaceDir(),
-    properties: ["openDirectory"]
-  };
-  const result = owner
-    ? await dialog.showOpenDialog(owner, options)
-    : await dialog.showOpenDialog(options);
-  if (result.canceled || !result.filePaths[0]) return null;
-  setActiveWorkspaceDir(result.filePaths[0]);
-  await persistCodeWorkspace();
-  return listWorkspaceCodeFiles({ workspaceDir: getActiveWorkspaceDir() });
 });
 
 ipcMain.handle("agent:open-scale-window", async () => {
