@@ -220,6 +220,9 @@ export function analyzeElectronArchitecture({
   const canonicalWindows = windowArguments.filter(usesCanonicalPreload);
   const buildFiles = analyzeBuildFiles(packageJson.build?.files, "electron/preload.cjs");
   const utilityBuildFiles = analyzeBuildFiles(packageJson.build?.files, "electron/workers/utility-entry.js");
+  const nativeSpeechTarget = "node_modules/sherpa-onnx-win-x64/sherpa-onnx.node";
+  const nativeSpeechBuildFiles = analyzeBuildFiles(packageJson.build?.files, nativeSpeechTarget);
+  const nativeSpeechUnpackFiles = analyzeBuildFiles(packageJson.build?.asarUnpack, nativeSpeechTarget);
   const maskedMain = maskCommentsAndStrings(main);
   const ragClientPropagatedThroughCore = /ragClient\s*:\s*payload\.ragClient/.test(ragSources.core || "");
   const ragRoutes = {
@@ -406,6 +409,8 @@ export function analyzeElectronArchitecture({
     utilityEntryDerivedFromModuleUrl: /fileURLToPath\s*\(\s*import\.meta\.url\s*\)/.test(maskedMain) && /resolveUtilityEntryPoint\s*\(\s*__dirname\s*\)/.test(maskedMain),
     utilityWorkerEntrypointPresent: normalizedElectronFiles.includes("electron/workers/utility-entry.js"),
     utilityWorkerPackaged: utilityBuildFiles.included && !utilityBuildFiles.explicitlyExcluded && !utilityBuildFiles.uncertainFileSet,
+    nativeSpeechPackagePackaged: nativeSpeechBuildFiles.included && !nativeSpeechBuildFiles.explicitlyExcluded && !nativeSpeechBuildFiles.uncertainFileSet,
+    nativeSpeechPackageUnpacked: nativeSpeechUnpackFiles.included && !nativeSpeechUnpackFiles.explicitlyExcluded && !nativeSpeechUnpackFiles.uncertainFileSet,
     directMainRagIndexWrites: countMatches(maskedMain, /\b(?:ensureRagIndexFresh|rebuildKnowledgeIndex|rebuildRagIndex)\s*\(/g),
     mainDataBootstrapDefersRagFiles: /ensureDataFiles\s*\([\s\S]{0,160}?ensureRag\s*:\s*false/.test(maskedMain),
     ragClientPropagatedThroughCore,
@@ -477,6 +482,7 @@ export function analyzeElectronArchitecture({
   if (metrics.browserWindowsUsingCanonicalPreload !== metrics.browserWindowConstructors) critical.push(`${metrics.browserWindowConstructors - metrics.browserWindowsUsingCanonicalPreload} 个 BrowserWindow 无法确认使用 canonical PRELOAD_PATH`);
   if (!metrics.canonicalPreloadPackaged) critical.push(metrics.canonicalPreloadExplicitlyExcluded ? "生产打包清单显式排除了 electron/preload.cjs" : metrics.canonicalPreloadFileSetUncertain ? "生产打包 FileSet 无法可靠确认包含 canonical preload" : "生产打包入口或文件清单未包含 canonical preload");
   if (!metrics.utilityProcessImported || !metrics.utilitySupervisorConfigured || !metrics.utilityEntryDerivedFromModuleUrl || !metrics.utilityWorkerEntrypointPresent || !metrics.utilityWorkerPackaged) critical.push("RAG utilityProcess 生产入口未完整配置、未从 import.meta.url 定位或未进入打包清单");
+  if (!metrics.nativeSpeechPackagePackaged || !metrics.nativeSpeechPackageUnpacked) critical.push("生产打包清单必须显式包含并解包 sherpa-onnx-win-x64 原生语音包");
   if (metrics.directMainRagIndexWrites) critical.push(`主进程仍直接执行 ${metrics.directMainRagIndexWrites} 个 RAG 写索引调用`);
   if (!metrics.mainDataBootstrapDefersRagFiles) critical.push("主进程数据初始化仍可能直接创建 RAG 索引文件");
   if (metrics.ragWriteRoutesMigrated !== 4) critical.push(`Electron RAG 写索引路径仅迁移 ${metrics.ragWriteRoutesMigrated}/4`);

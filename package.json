@@ -54,6 +54,13 @@
             "dist/**/*",
             "electron/**/*",
             "src-agent/**/*",
+            {
+                "from": "node_modules/sherpa-onnx-win-x64",
+                "to": "node_modules/sherpa-onnx-win-x64",
+                "filter": [
+                    "**/*"
+                ]
+            },
             "index.html",
             "package.json"
         ],

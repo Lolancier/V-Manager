@@ -144,6 +144,55 @@ test("shared domain IPC runtime is rollback-safe and lifecycle-idempotent", asyn
   assert.equal(service.snapshot().disposed, true);
 });
 
+test("shared domain IPC runtime makes duplicate registration a no-op and rolls back only new listeners", () => {
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createTrustedDomainIpcService({
+    serviceName: "重复注册服务",
+    trustedIpc,
+    listeners: [{ channel: "agent:one-event", listener: () => {} }],
+    handlers: [{ channel: "agent:one", listener: () => "one" }]
+  });
+  service.registerIpc();
+  const originalHandler = ipc.handlers.get("agent:one");
+  const originalListener = ipc.listeners.get("agent:one-event")[0];
+  service.registerIpc();
+  assert.equal(ipc.handlers.get("agent:one"), originalHandler);
+  assert.deepEqual(ipc.listeners.get("agent:one-event"), [originalListener]);
+
+  const registeredListeners = [];
+  const removedHandlers = [];
+  let removalAttempts = 0;
+  const failing = createTrustedDomainIpcService({
+    serviceName: "失败注册服务",
+    trustedIpc: {
+      on(_channel, listener) {
+        registeredListeners.push(listener);
+        return () => {
+          removalAttempts += 1;
+          if (removalAttempts === 1) throw new Error("transient remove failure");
+          registeredListeners.splice(registeredListeners.indexOf(listener), 1);
+        };
+      },
+      handle(channel) {
+        if (channel === "agent:second") throw new Error("registration failed");
+      },
+      removeHandler: (channel) => removedHandlers.push(channel)
+    },
+    listeners: [{ channel: "agent:failed-event", listener: () => {} }],
+    handlers: [
+      { channel: "agent:first", listener: () => "first" },
+      { channel: "agent:second", listener: () => "second" }
+    ]
+  });
+  assert.throws(() => failing.registerIpc(), /registration failed/);
+  assert.deepEqual(registeredListeners, []);
+  assert.equal(removalAttempts, 2);
+  assert.deepEqual(removedHandlers, ["agent:first"]);
+  assert.deepEqual(failing.snapshot().listeners, []);
+
+  service.dispose();
+});
+
 test("system resource service preserves arguments, returns, and trust boundary", async () => {
   const calls = [];
   let autoLaunchEnabled = true;
@@ -411,6 +460,101 @@ test("companion pet-touch dispose waits and suppresses late domain writes", asyn
   assert.equal(ipc.handlers.size, 0);
 });
 
+test("companion owner interactions serialize commits and stay busy until every request settles", async () => {
+  const firstGate = createDeferred();
+  const secondGate = createDeferred();
+  const secondStarted = createDeferred();
+  const broadcasts = [];
+  let calls = 0;
+  const service = createCompanionLifeService({
+    getBaseDir: () => "base",
+    dependencies: {
+      recordOwnerInteraction: async (_baseDir, previous, now) => {
+        calls += 1;
+        if (calls === 1) await firstGate.promise;
+        else {
+          secondStarted.resolve();
+          await secondGate.promise;
+        }
+        return { previous: previous?.sequence || 0, sequence: calls, at: now.toISOString() };
+      }
+    },
+    chatStateStore: createTestChatStateStore(),
+    onLifeStateUpdated: (state) => broadcasts.push(state),
+    now: () => 0
+  });
+  service.start();
+
+  const first = service.markOwnerInteraction(new Date("2026-08-17T01:00:00.000Z"));
+  const second = service.markOwnerInteraction(new Date("2026-08-17T02:00:00.000Z"));
+  assert.equal(calls, 0);
+  assert.equal(service.isProactiveBusy(), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  firstGate.resolve();
+  await first;
+  await secondStarted.promise;
+  assert.equal(service.isProactiveBusy(), true);
+  secondGate.resolve();
+  await second;
+
+  assert.equal(service.isProactiveBusy(), false);
+  assert.deepEqual(service.getLifeState(), {
+    previous: 1,
+    sequence: 2,
+    at: "2026-08-17T02:00:00.000Z"
+  });
+  assert.deepEqual(broadcasts.map((state) => state.sequence), [1, 2]);
+  await service.dispose();
+});
+
+test("companion dispose waits for a persisting tick and suppresses every late side effect", async () => {
+  const saveStarted = createDeferred();
+  const saveGate = createDeferred();
+  const sideEffects = [];
+  const service = createCompanionLifeService({
+    getBaseDir: () => "base",
+    isHostReady: () => true,
+    setInterval: () => 1,
+    clearInterval: () => {},
+    mergeConfig: (config) => config,
+    getInterestSettings: () => ({ enabled: false, autonomousLifeEnabled: false }),
+    chatStateStore: {
+      appendProactiveEvent: (event) => { sideEffects.push(["chat", event]); return {}; }
+    },
+    onLifeStateUpdated: (state) => sideEffects.push(["state", state]),
+    onProactiveEvent: (event) => sideEffects.push(["event", event]),
+    onError: (scope, error) => sideEffects.push([scope, error]),
+    now: () => 0,
+    dependencies: {
+      loadLifeState: async () => ({ lastInteractionAt: "2026-08-16T00:00:00.000Z" }),
+      getFollowUpCandidate: async () => ({ store: { feedback: { interruptionScore: 0 } }, candidate: { id: "commitment" } }),
+      loadRelationshipProfile: async () => ({ affection: { stage: "close" } }),
+      loadConfig: async () => ({ proactive: {} }),
+      evaluateLifeTick: () => ({ state: { saved: true }, events: [{ kind: "commitment_followup", message: "late" }] }),
+      saveLifeState: async () => {
+        saveStarted.resolve();
+        await saveGate.promise;
+        return { saved: true };
+      },
+      markCommitmentFollowedUp: async () => sideEffects.push(["commitment"])
+    }
+  });
+  await service.start();
+  await saveStarted.promise;
+  let disposed = false;
+  const disposing = service.dispose().then(() => { disposed = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposed, false);
+  assert.equal(service.isProactiveBusy(), true);
+  saveGate.resolve();
+  await disposing;
+
+  assert.equal(disposed, true);
+  assert.deepEqual(sideEffects, []);
+  assert.equal(service.isProactiveBusy(), false);
+});
+
 test("window intent service forwards open requests through the trust boundary", async () => {
   const calls = [];
   const { ipc, trustedIpc } = makeRegistrar();
@@ -557,6 +701,48 @@ test("code workspace dispose waits for pending persistence", async () => {
     ["dispose-complete"]
   ]);
   assert.equal(service.snapshot().disposed, true);
+});
+
+test("code workspace dispose waits for every concurrent persistence and suppresses late results", async () => {
+  const writeStarted = [createDeferred(), createDeferred()];
+  const writeGates = [createDeferred(), createDeferred()];
+  let writeIndex = 0;
+  const service = createCodeWorkspaceService({
+    getBaseDir: () => "audit-user-data",
+    initialWorkspaceDir: "D:/old",
+    showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+    dependencies: {
+      fs: {
+        mkdir: async () => {},
+        writeFile: async () => {
+          const index = writeIndex;
+          writeIndex += 1;
+          writeStarted[index].resolve();
+          await writeGates[index].promise;
+        }
+      },
+      path: {
+        resolve: (value) => value,
+        join: (...parts) => parts.join("/"),
+        dirname: (value) => value.split("/").slice(0, -1).join("/")
+      },
+      listWorkspaceCodeFiles: async () => []
+    }
+  });
+
+  const first = service.setWorkspaceDir("D:/first");
+  const second = service.setWorkspaceDir("D:/second");
+  await Promise.all(writeStarted.map((item) => item.promise));
+  let disposed = false;
+  const disposing = service.dispose().then(() => { disposed = true; });
+  writeGates[0].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposed, false);
+  writeGates[1].resolve();
+  assert.deepEqual(await Promise.all([first, second]), [null, null]);
+  await disposing;
+  assert.equal(disposed, true);
+  assert.equal(service.snapshot().workspaceDir, "D:/second");
 });
 
 test("expression chat state service preserves toggle and state shapes", async () => {

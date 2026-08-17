@@ -32,7 +32,7 @@ export function createCodeWorkspaceService(options) {
   const operations = new Map(CODE_WORKSPACE_HANDLE_CHANNELS.map((channel) => [channel, 0]));
   let generation = 0;
   let serviceDisposed = false;
-  let activeWorkspaceWrite = null;
+  const activeWorkspaceWrites = new Set();
 
   function workspaceStatePath() {
     return dependencies.path.join(options.getBaseDir(), "agent-data", "code-workspace.json");
@@ -85,21 +85,22 @@ export function createCodeWorkspaceService(options) {
     const writeGeneration = generation;
     workspaceDir = dependencies.path.resolve(nextWorkspaceDir || process.cwd());
     options.onWorkspaceChanged?.(workspaceDir);
+    const persistedWorkspaceDir = workspaceDir;
     let writePromise;
     writePromise = (async () => {
       try {
         await dependencies.fs.mkdir(dependencies.path.dirname(workspaceStatePath()), { recursive: true });
         await dependencies.fs.writeFile(
           workspaceStatePath(),
-          JSON.stringify({ path: workspaceDir }, null, 2),
+          JSON.stringify({ path: persistedWorkspaceDir }, null, 2),
           "utf-8"
         );
-        return writeGeneration === generation ? workspaceDir : null;
+        return writeGeneration === generation && !serviceDisposed ? persistedWorkspaceDir : null;
       } finally {
-        if (activeWorkspaceWrite === writePromise) activeWorkspaceWrite = null;
+        activeWorkspaceWrites.delete(writePromise);
       }
     })();
-    activeWorkspaceWrite = writePromise;
+    activeWorkspaceWrites.add(writePromise);
     return writePromise;
   }
 
@@ -137,7 +138,7 @@ export function createCodeWorkspaceService(options) {
     async dispose() {
       generation += 1;
       serviceDisposed = true;
-      await Promise.allSettled([activeWorkspaceWrite].filter(Boolean));
+      await Promise.allSettled([...activeWorkspaceWrites]);
       return runtime.dispose();
     },
     getWorkspaceDir: () => workspaceDir,

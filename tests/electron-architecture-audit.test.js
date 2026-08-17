@@ -152,7 +152,14 @@ const baseMain = `${canonicalDeclaration}\n${utilityConfiguration}\n${phase5dSer
 const basePackage = {
   main: "electron/main.js",
   devDependencies: { electron: "^32.3.0" },
-  build: { files: ["dist/**/*", "electron/**/*"] }
+  build: {
+    files: ["dist/**/*", "electron/**/*", {
+      from: "node_modules/sherpa-onnx-win-x64",
+      to: "node_modules/sherpa-onnx-win-x64",
+      filter: ["**/*"]
+    }],
+    asarUnpack: ["node_modules/sherpa-onnx-*/**/*"]
+  }
 };
 
 const baseRagSources = {
@@ -318,6 +325,22 @@ test("architecture audit rejects an excluded utility worker entry", () => {
   const result = audit(baseMain, packageJson);
   assert.equal(result.metrics.utilityWorkerPackaged, false);
   assert.match(result.critical.join("\n"), /utilityProcess 生产入口/);
+});
+
+test("architecture audit requires the Windows native speech package in packed and unpacked files", () => {
+  const missingPackage = audit(baseMain, {
+    ...basePackage,
+    build: { ...basePackage.build, files: ["dist/**/*", "electron/**/*"] }
+  });
+  assert.equal(missingPackage.metrics.nativeSpeechPackagePackaged, false);
+  assert.match(missingPackage.critical.join("\n"), /sherpa-onnx-win-x64/);
+
+  const missingUnpack = audit(baseMain, {
+    ...basePackage,
+    build: { ...basePackage.build, asarUnpack: [] }
+  });
+  assert.equal(missingUnpack.metrics.nativeSpeechPackageUnpacked, false);
+  assert.match(missingUnpack.critical.join("\n"), /sherpa-onnx-win-x64/);
 });
 
 test("architecture audit rejects a utility entry resolved from the current working directory", () => {

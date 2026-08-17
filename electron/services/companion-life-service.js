@@ -47,6 +47,8 @@ export function createCompanionLifeService(options) {
   let tickPromise = null;
   let tickRunning = false;
   let ownerInteractionPromise = null;
+  let ownerInteractionTail = Promise.resolve();
+  let ownerInteractionPending = 0;
   let ownerInteractionRevision = 0;
   let ownerInteractionUpdateRunning = false;
   let engineStarted = false;
@@ -85,17 +87,25 @@ export function createCompanionLifeService(options) {
     if (serviceDisposed) return lifeState;
     const interactionGeneration = generation;
     ownerInteractionRevision += 1;
+    ownerInteractionPending += 1;
     ownerInteractionUpdateRunning = true;
-    ownerInteractionPromise = (async () => {
+    const previous = ownerInteractionTail;
+    let interactionPromise;
+    interactionPromise = previous.catch(() => undefined).then(async () => {
       try {
+        if (interactionGeneration !== generation || serviceDisposed) return lifeState;
         const state = await dependencies.recordOwnerInteraction(options.getBaseDir(), lifeState, now);
-        if (interactionGeneration !== generation) return lifeState;
+        if (interactionGeneration !== generation || serviceDisposed) return lifeState;
         return commitLifeState(state);
       } finally {
-        if (interactionGeneration === generation) ownerInteractionUpdateRunning = false;
+        ownerInteractionPending = Math.max(0, ownerInteractionPending - 1);
+        ownerInteractionUpdateRunning = ownerInteractionPending > 0;
+        if (ownerInteractionPromise === interactionPromise) ownerInteractionPromise = null;
       }
-    })();
-    return ownerInteractionPromise;
+    });
+    ownerInteractionTail = interactionPromise;
+    ownerInteractionPromise = interactionPromise;
+    return interactionPromise;
   }
 
   async function tick() {
@@ -121,20 +131,24 @@ export function createCompanionLifeService(options) {
           autonomousLifeEnabled: interestSettings.enabled && interestSettings.autonomousLifeEnabled
         });
         if (tickGeneration !== generation || interactionRevisionAtStart !== ownerInteractionRevision) return;
-        commitLifeState(await dependencies.saveLifeState(options.getBaseDir(), result.state));
+        const savedState = await dependencies.saveLifeState(options.getBaseDir(), result.state);
+        if (tickGeneration !== generation || serviceDisposed) return;
+        commitLifeState(savedState);
         for (const event of result.events) {
+          if (tickGeneration !== generation || serviceDisposed) return;
           publishProactiveEvent(event);
           if (event.kind === "commitment_followup" && companion.candidate) {
             await dependencies.markCommitmentFollowedUp(options.getBaseDir(), companion.candidate.id, now);
           }
         }
       } catch (error) {
-        options.onError?.("life tick", error);
+        if (tickGeneration === generation && !serviceDisposed) options.onError?.("life tick", error);
       } finally {
-        tickRunning = false;
-        if (tickGeneration === generation) tickPromise = null;
+        if (tickGeneration === generation || serviceDisposed) tickRunning = false;
+        if (tickPromise === runningTick) tickPromise = null;
       }
     })();
+    const runningTick = tickPromise;
     return tickPromise;
   }
 
@@ -150,13 +164,17 @@ export function createCompanionLifeService(options) {
     generation += 1;
     if (proactiveTimer) options.clearInterval?.(proactiveTimer);
     proactiveTimer = null;
-    const pendingWork = [tickPromise, ownerInteractionPromise, activePetTouchPromise].filter(Boolean);
-    tickPromise = null;
-    ownerInteractionPromise = null;
+    const pendingTick = tickPromise;
+    const pendingOwnerInteraction = ownerInteractionPromise;
+    const pendingPetTouch = activePetTouchPromise;
+    const pendingWork = [pendingTick, pendingOwnerInteraction, pendingPetTouch].filter(Boolean);
     activePetTouchPromise = null;
-    tickRunning = false;
-    ownerInteractionUpdateRunning = false;
-    return pendingWork.length ? Promise.allSettled(pendingWork).then(() => undefined) : Promise.resolve();
+    return Promise.allSettled(pendingWork).then(() => {
+      if (tickPromise === pendingTick) tickPromise = null;
+      if (ownerInteractionPromise === pendingOwnerInteraction) ownerInteractionPromise = null;
+      tickRunning = false;
+      ownerInteractionUpdateRunning = ownerInteractionPending > 0;
+    });
   }
 
   async function restoreLifeState() {

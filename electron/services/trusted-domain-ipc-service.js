@@ -4,6 +4,7 @@ export function createTrustedDomainIpcService(options) {
   const listeners = options.listeners || [];
   const registeredHandlers = new Set();
   const listenerDisposers = new Map();
+  let ipcRegistered = false;
   let started = false;
   let disposed = false;
 
@@ -14,9 +15,12 @@ export function createTrustedDomainIpcService(options) {
 
   function registerIpc() {
     if (disposed) throw new Error(`${serviceName}已经释放。`);
+    if (ipcRegistered) return service;
+    const addedHandlers = new Set();
+    const addedListeners = new Map();
     try {
       for (const listener of listeners) {
-        listenerDisposers.set(listener.channel, options.trustedIpc.on(listener.channel, (event, ...args) => {
+        addedListeners.set(listener.channel, options.trustedIpc.on(listener.channel, (event, ...args) => {
           if (disposed || !started) return;
           return listener.listener(event, ...args);
         }));
@@ -26,17 +30,22 @@ export function createTrustedDomainIpcService(options) {
           ensureActive();
           return handler.listener(event, ...args);
         });
-        registeredHandlers.add(handler.channel);
+        addedHandlers.add(handler.channel);
       }
     } catch (error) {
-      for (const disposer of listenerDisposers.values()) {
-        try { disposer(); } catch {}
+      for (const disposer of addedListeners.values()) {
+        try {
+          disposer();
+        } catch {
+          try { disposer(); } catch {}
+        }
       }
-      listenerDisposers.clear();
-      for (const channel of registeredHandlers) options.trustedIpc.removeHandler(channel);
-      registeredHandlers.clear();
+      for (const channel of addedHandlers) options.trustedIpc.removeHandler(channel);
       throw error;
     }
+    for (const [channel, disposer] of addedListeners) listenerDisposers.set(channel, disposer);
+    for (const channel of addedHandlers) registeredHandlers.add(channel);
+    ipcRegistered = true;
     return service;
   }
 
@@ -61,6 +70,7 @@ export function createTrustedDomainIpcService(options) {
     listenerDisposers.clear();
     for (const channel of registeredHandlers) options.trustedIpc.removeHandler(channel);
     registeredHandlers.clear();
+    ipcRegistered = false;
     return snapshot();
   }
 

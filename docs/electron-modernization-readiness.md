@@ -210,7 +210,7 @@ Phase 5E 只拆分主进程 IPC，不改变 Electron 依赖版本，不拆分 re
 
 本阶段迁移 40 个直接 `ipcMain.handle` 和 3 个直接 `ipcMain.on`。结构复查后，聊天状态与启动会话、生活状态与主动生命周期、工作区持久化、表情状态、宠物布局和 renderer 就绪状态均已移入对应服务；`electron/main.js` 只保留窗口宿主、托盘、协议、Electron adapter 和装配逻辑，不再向 Phase 5E 服务注入 getter/setter 改写集中状态。
 
-架构审计不再依赖 channel 字符串表面匹配：九个服务导出 manifest，`scripts/phase5e-ipc-registration-collector.mjs` 用基于真实 trusted registrar 的 fake registrar 实例化服务并捕获实际 `handle/on` 注册；审计交叉验证 preload inbound channel、main 装配、每个服务 manifest 与实际注册集合，拒绝 missing、duplicate、extra 和未注册 channel，并用负向 fixture 固化“只有 channel 字符串但未注册”的绕过场景。同时新增 Phase 5E 领域状态声明回流 main 的 critical 门禁。
+架构审计不再依赖 channel 字符串表面匹配：九个服务导出 manifest，`scripts/phase5e-ipc-registration-collector.mjs` 用基于真实 trusted registrar 的 fake registrar 实例化服务并捕获实际 `handle/on` 注册；审计交叉验证 preload inbound channel、main 装配、每个服务 manifest 与实际注册集合，拒绝 missing、duplicate、extra 和未注册 channel，并用负向 fixture 固化“只有 channel 字符串但未注册”的绕过场景。同时新增 Phase 5E 领域状态声明回流 main 的 critical 门禁。最终打包复查还发现共享 worktree 依赖布局会让 electron-builder 漏收可选的 `sherpa-onnx-win-x64`，因此生产 files 清单显式包含该原生包，审计同时要求它被包含并通过 `asarUnpack` 解包。
 
 结构复查后 `electron/main.js` 为 1761 行；架构审计指标为 Phase 5E 服务 9/9、manifest 9/9、channel 所有权 43/43、实际注册 43/43、`directMainIpcHandlers=0`、`directMainIpcListeners=0`、`directMainPhase5eIpc=0`、`phase5eDomainStateInMain=0`。`tests/phase5e-domain-services.test.js` 覆盖共享运行时回滚/幂等退出、可信边界、代表性参数转发、返回形状、事件发送方检查、listener 清理、服务状态所有权和生命周期行为。
 
