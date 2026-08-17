@@ -193,6 +193,48 @@ test("shared domain IPC runtime makes duplicate registration a no-op and rolls b
   service.dispose();
 });
 
+test("shared domain IPC runtime retains failed listener cleanup for a later dispose retry", () => {
+  const handlers = new Map();
+  const listeners = [];
+  let removeAttempts = 0;
+  let businessCalls = 0;
+  const service = createTrustedDomainIpcService({
+    serviceName: "可重试清理服务",
+    trustedIpc: {
+      on(_channel, listener) {
+        listeners.push(listener);
+        return () => {
+          removeAttempts += 1;
+          if (removeAttempts === 1) throw new Error("remove failed once");
+          listeners.splice(listeners.indexOf(listener), 1);
+        };
+      },
+      handle: (channel, listener) => handlers.set(channel, listener),
+      removeHandler: (channel) => handlers.delete(channel)
+    },
+    listeners: [{ channel: "agent:retry-event", listener: () => { businessCalls += 1; } }],
+    handlers: [{ channel: "agent:retry", listener: () => true }]
+  });
+  service.registerIpc().start();
+  const wrapped = listeners[0];
+  wrapped({}, "before-dispose");
+  assert.equal(businessCalls, 1);
+
+  const firstDispose = service.dispose();
+  assert.deepEqual(firstDispose.listeners, ["agent:retry-event"]);
+  assert.equal(removeAttempts, 1);
+  assert.equal(handlers.size, 0);
+  wrapped({}, "after-failed-dispose");
+  assert.equal(businessCalls, 1);
+
+  const retried = service.stop();
+  assert.deepEqual(retried.listeners, []);
+  assert.equal(removeAttempts, 2);
+  assert.deepEqual(listeners, []);
+  service.dispose();
+  assert.equal(removeAttempts, 2);
+});
+
 test("system resource service preserves arguments, returns, and trust boundary", async () => {
   const calls = [];
   let autoLaunchEnabled = true;
@@ -664,6 +706,7 @@ test("code workspace service preserves file and workspace argument shapes", asyn
 
 test("code workspace dispose waits for pending persistence", async () => {
   const events = [];
+  const writeStarted = createDeferred();
   const writeGate = createDeferred();
   const service = createCodeWorkspaceService({
     getBaseDir: () => "audit-user-data",
@@ -674,6 +717,7 @@ test("code workspace dispose waits for pending persistence", async () => {
       fs: {
         mkdir: async () => {},
         writeFile: async () => {
+          writeStarted.resolve();
           await writeGate.promise;
           events.push(["write-complete"]);
         }
@@ -688,6 +732,7 @@ test("code workspace dispose waits for pending persistence", async () => {
   });
 
   const write = service.setWorkspaceDir("D:/next");
+  await writeStarted.promise;
   const disposing = service.dispose();
   writeGate.resolve();
   const savedDir = await write;
@@ -704,8 +749,8 @@ test("code workspace dispose waits for pending persistence", async () => {
 });
 
 test("code workspace dispose waits for every concurrent persistence and suppresses late results", async () => {
-  const writeStarted = [createDeferred(), createDeferred()];
-  const writeGates = [createDeferred(), createDeferred()];
+  const writeStarted = createDeferred();
+  const writeGate = createDeferred();
   let writeIndex = 0;
   const service = createCodeWorkspaceService({
     getBaseDir: () => "audit-user-data",
@@ -715,10 +760,9 @@ test("code workspace dispose waits for every concurrent persistence and suppress
       fs: {
         mkdir: async () => {},
         writeFile: async () => {
-          const index = writeIndex;
           writeIndex += 1;
-          writeStarted[index].resolve();
-          await writeGates[index].promise;
+          writeStarted.resolve();
+          await writeGate.promise;
         }
       },
       path: {
@@ -732,17 +776,61 @@ test("code workspace dispose waits for every concurrent persistence and suppress
 
   const first = service.setWorkspaceDir("D:/first");
   const second = service.setWorkspaceDir("D:/second");
-  await Promise.all(writeStarted.map((item) => item.promise));
+  await writeStarted.promise;
+  assert.equal(writeIndex, 1);
   let disposed = false;
   const disposing = service.dispose().then(() => { disposed = true; });
-  writeGates[0].resolve();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(disposed, false);
-  writeGates[1].resolve();
+  writeGate.resolve();
   assert.deepEqual(await Promise.all([first, second]), [null, null]);
   await disposing;
   assert.equal(disposed, true);
+  assert.equal(writeIndex, 1);
   assert.equal(service.snapshot().workspaceDir, "D:/second");
+});
+
+test("code workspace persistence follows request order when the first write would finish last", async () => {
+  const firstStarted = createDeferred();
+  const releaseFirst = createDeferred();
+  const diskWrites = [];
+  let writeIndex = 0;
+  const service = createCodeWorkspaceService({
+    getBaseDir: () => "audit-user-data",
+    initialWorkspaceDir: "D:/old",
+    showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+    dependencies: {
+      fs: {
+        mkdir: async () => {},
+        writeFile: async (_file, content) => {
+          writeIndex += 1;
+          if (writeIndex === 1) {
+            firstStarted.resolve();
+            await releaseFirst.promise;
+          }
+          diskWrites.push(JSON.parse(content).path);
+        }
+      },
+      path: {
+        resolve: (value) => value,
+        join: (...parts) => parts.join("/"),
+        dirname: (value) => value.split("/").slice(0, -1).join("/")
+      },
+      listWorkspaceCodeFiles: async () => []
+    }
+  });
+
+  const first = service.setWorkspaceDir("D:/first");
+  await firstStarted.promise;
+  const second = service.setWorkspaceDir("D:/second");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writeIndex, 1);
+  assert.equal(service.getWorkspaceDir(), "D:/second");
+  releaseFirst.resolve();
+  assert.deepEqual(await Promise.all([first, second]), ["D:/first", "D:/second"]);
+  assert.deepEqual(diskWrites, ["D:/first", "D:/second"]);
+  assert.equal(diskWrites.at(-1), service.getWorkspaceDir());
+  await service.dispose();
 });
 
 test("expression chat state service preserves toggle and state shapes", async () => {

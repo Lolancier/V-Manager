@@ -33,6 +33,7 @@ export function createCodeWorkspaceService(options) {
   let generation = 0;
   let serviceDisposed = false;
   const activeWorkspaceWrites = new Set();
+  let workspaceWriteTail = Promise.resolve();
 
   function workspaceStatePath() {
     return dependencies.path.join(options.getBaseDir(), "agent-data", "code-workspace.json");
@@ -86,9 +87,11 @@ export function createCodeWorkspaceService(options) {
     workspaceDir = dependencies.path.resolve(nextWorkspaceDir || process.cwd());
     options.onWorkspaceChanged?.(workspaceDir);
     const persistedWorkspaceDir = workspaceDir;
+    const previousWrite = workspaceWriteTail;
     let writePromise;
-    writePromise = (async () => {
+    writePromise = previousWrite.catch(() => undefined).then(async () => {
       try {
+        if (writeGeneration !== generation || serviceDisposed) return null;
         await dependencies.fs.mkdir(dependencies.path.dirname(workspaceStatePath()), { recursive: true });
         await dependencies.fs.writeFile(
           workspaceStatePath(),
@@ -99,8 +102,9 @@ export function createCodeWorkspaceService(options) {
       } finally {
         activeWorkspaceWrites.delete(writePromise);
       }
-    })();
+    });
     activeWorkspaceWrites.add(writePromise);
+    workspaceWriteTail = writePromise;
     return writePromise;
   }
 
@@ -138,7 +142,7 @@ export function createCodeWorkspaceService(options) {
     async dispose() {
       generation += 1;
       serviceDisposed = true;
-      await Promise.allSettled([...activeWorkspaceWrites]);
+      await Promise.allSettled([workspaceWriteTail, ...activeWorkspaceWrites]);
       return runtime.dispose();
     },
     getWorkspaceDir: () => workspaceDir,

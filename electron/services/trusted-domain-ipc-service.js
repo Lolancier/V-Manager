@@ -13,9 +13,28 @@ export function createTrustedDomainIpcService(options) {
     if (!started) throw new Error(`${serviceName}尚未启动。`);
   };
 
+  function removeTrackedRegistrations() {
+    for (const [channel, disposer] of listenerDisposers) {
+      try {
+        disposer();
+        listenerDisposers.delete(channel);
+      } catch {}
+    }
+    for (const channel of registeredHandlers) {
+      try {
+        options.trustedIpc.removeHandler(channel);
+        registeredHandlers.delete(channel);
+      } catch {}
+    }
+    ipcRegistered = listenerDisposers.size > 0 || registeredHandlers.size > 0;
+  }
+
   function registerIpc() {
     if (disposed) throw new Error(`${serviceName}已经释放。`);
     if (ipcRegistered) return service;
+    if (listenerDisposers.size || registeredHandlers.size) {
+      throw new Error(`${serviceName}存在尚未清理的 IPC 注册。`);
+    }
     const addedHandlers = new Set();
     const addedListeners = new Map();
     try {
@@ -57,21 +76,13 @@ export function createTrustedDomainIpcService(options) {
 
   function stop() {
     started = false;
+    if (disposed) removeTrackedRegistrations();
     return snapshot();
   }
 
   function dispose() {
-    if (disposed) return stop();
     disposed = true;
-    stop();
-    for (const disposer of listenerDisposers.values()) {
-      try { disposer(); } catch {}
-    }
-    listenerDisposers.clear();
-    for (const channel of registeredHandlers) options.trustedIpc.removeHandler(channel);
-    registeredHandlers.clear();
-    ipcRegistered = false;
-    return snapshot();
+    return stop();
   }
 
   function snapshot() {
