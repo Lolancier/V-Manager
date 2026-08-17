@@ -2,26 +2,18 @@
 
 V-Manager 是一个面向 Windows 的本地桌面 Agent。它以 Live2D 角色作为交互载体，提供人物卡、多轮对话、本地记忆与 RAG、语音交互、桌面工具和隔离的自主生活空间。
 
-> 当前版本：**0.9.4**
+> 当前版本：**0.10.0**
 > 项目状态：个人本地开发版，功能仍在持续迭代。
 
-## 0.9.4 重点
+## 0.10.0 重点（结构现代化）
 
-- 人物卡列表、版本、切换、归档以及 AI 联网生成草稿。
-- 启动时恢复当前人物卡最近的聊天，并生成符合人设、可承接近期话题的见面问候。
-- SQLite 保存完整原始聊天；默认取最近 40 条消息作为界面恢复和模型短期上下文。
-- 事实、近期经历、习惯和未完成承诺四类本地陪伴记忆。
-- 私密空间升级为可整体关闭的自主生活模块，统一管理日常、创作、娱乐和陪伴行为。
-- 每日虚拟日程自动生成；过时未执行项目标记为“已错过”，不会阻塞后续日程。
-- 离线文字小游戏支持生成、自主试玩、受限操作、错误修复、分数与感想记录。
-- 日记、画作、游戏和日常记录按人物卡 ID 隔离归档，并提供日志分页与空间清理。
-- GPT-SoVITS 语音库支持配置导入、安装、选择和服务启停；回复声线统一在“语音与 ASMR”中设置。
-- 桌面与聊天栏 Live2D 均支持情绪、表情和口型联动；聊天栏拥有独立的语音播放与失败兜底。
-- 启动时检查配置、Live2D、语音服务、聊天恢复、DeepSeek 可用性和 RAG 新鲜度。
-- 主人空闲状态按最近一次聊天或触碰模型计算，主动问候间隔最低可自定义为 5 分钟。
-- 历史对话携带真实时间戳和跨日日期锚点，“整理待办”读取真实本地日程。
-- 修复聊天栏关闭后桌宠未恢复、气泡层级不足的问题，并提高全屏覆盖时的置顶层级。
-- 新增鼠标移入模型时自动隐藏并点击穿透，可从设置页或系统托盘关闭。
+- Electron 从 32 逐大版本升级到 **43.4.0**（Node 24 / Chromium 150），每个大版本独立验证并提交。
+- 渲染层拆分为 **9 个独立窗口入口**（桌宠/启动/设置/缩放/输入/聊天/气泡/表情/代码），每个窗口只加载自己的视图与样式，不再共用一个巨型 App 入口。
+- 主进程全部 IPC 迁入 **20 个 Electron-free 领域服务**，`electron/main.js` 不再直接注册任何 `ipcMain.handle/on`，仅保留窗口宿主、托盘、协议与服务装配。
+- 新增严格类型门禁：`npx tsc --noEmit` 通过；移植的 Live2D 官方源码用 `@ts-nocheck` 隔离，不阻塞业务代码检查。
+- 架构审计（`npm run audit:architecture`）**0 critical / 0 warnings**，覆盖 IPC 通道所有权、窗口安全配置、服务生命周期与打包布局。
+- 自动化测试 **301 项全部通过**，Vite 生产构建与 Electron 打包通过。
+- 自动语音合成新增守卫：语音未启用或 GPT-SoVITS 服务未运行时直接跳过，不再静默失败。
 
 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -72,7 +64,7 @@ V-Manager 是一个面向 Windows 的本地桌面 Agent。它以 Live2D 角色�
 - 查看 CPU、内存、磁盘、进程与可见窗口。
 - 启动、定位和检查常见应用。
 - 搜索、读取、打开、创建和追加本地文件。
-- 安全文件管家采用“只读扫描 → 预览 → 明确确认 → 执行 → 可撤销”流程。
+- 安全文件管家采用"只读扫描 → 预览 → 明确确认 → 执行 → 可撤销"流程。
 - 普通删除进入 Windows 回收站；代码开发写入要求明确授权。
 - 小游戏在禁止联网和访问电脑文件的隔离窗口中运行，并限制试玩时长与操作次数。
 
@@ -94,7 +86,7 @@ npm run dev
 
 Vite 默认运行于 `http://localhost:5173`，Electron 会在渲染服务就绪后启动。
 
-### 测试、打包与安装
+### 测试、构建与安装
 
 ```powershell
 npm test
@@ -107,27 +99,26 @@ npm run pack
 npm run dist
 ```
 
-安装产物默认输出到项目同级的 `V-Manager-builds` 目录。
+产物默认输出到项目同级的 `V-Manager-builds` 目录：
 
-三种运行方式的区别：
+- `V-Manager-builds/win-unpacked/V-Manager.exe`：免安装生产目录，不依赖 Vite 或 npm，可直接运行；移动时必须携带整个 `win-unpacked` 目录。
+- `V-Manager-builds/V-Manager Setup 0.10.0.exe`：正式 NSIS 安装程序，由 Windows 管理安装目录和卸载入口。
 
-- `npm run dev`：开发环境。界面由 Vite 开发服务器提供，支持热更新和源码调试；需要 Node.js、npm、源码和开发依赖持续存在。
-- `V-Manager-builds/win-unpacked/V-Manager.exe`：已打包的生产程序，但文件仍以未压缩目录展开。它不依赖 Vite 或 npm，可以直接运行，适合测试打包结果；移动时必须携带整个 `win-unpacked` 目录，也没有正式安装与卸载流程。
-- `V-Manager-builds/V-Manager Setup 0.9.4.exe`：正式 NSIS 安装程序。安装后与 `win-unpacked` 使用相同的生产代码，但由 Windows 管理安装目录和卸载入口，适合作为日常本地版本使用。
+开发环境（`npm run dev`）由 Vite 提供热更新和源码调试，需要源码与开发依赖持续存在。
 
 安装版与开发版共用 Electron 用户数据目录，因此正常升级不会主动删除人物卡、对话、API 配置和私密空间内容。卸载或清理数据前仍建议备份 `%APPDATA%/v-manager/agent-data`。
 
-当前个人本地构建未配置商业代码签名证书，Windows 可能显示“未知发布者”或 SmartScreen 提示。请只运行自己构建或从可信仓库取得的安装包，并可用 SHA-256 校验文件是否发生变化。
+当前个人本地构建未配置商业代码签名证书，Windows 可能显示"未知发布者"或 SmartScreen 提示。请只运行自己构建或从可信仓库取得的安装包，并可用 SHA-256 校验文件是否发生变化。
 
 ## 配置说明
 
 首次启动后在设置窗口配置：
 
-1. 在“模型与记忆”填写 DeepSeek API Key、Base URL 和模型名。
+1. 在"模型与记忆"填写 DeepSeek API Key、Base URL 和模型名。
 2. 按需配置 Embedding；未配置时 RAG 自动使用关键词检索。
-3. 在“人物卡”创建或选择角色。
-4. 在“语音与 ASMR”选择回复声线。人物卡不再绑定语音模型。
-5. 如需自主活动，在“私密空间”开启完整自主生活模块并设置预算、时间和权限。
+3. 在"人物卡"创建或选择角色。
+4. 在"语音与 ASMR"选择回复声线。人物卡不再绑定语音模型。
+5. 如需自主活动，在"私密空间"开启完整自主生活模块并设置预算、时间和权限。
 
 API Key 保存在本机应用数据目录，不应提交到 Git。
 
@@ -152,20 +143,27 @@ agent-data/
    └─ activity.jsonl            活动日志
 ```
 
-设置页提供“打开数据目录”和“打开私密空间”的直达入口。
+设置页提供"打开数据目录"和"打开私密空间"的直达入口。
 
 ## 项目结构
 
 ```text
 electron/
-├─ main.js                      Electron 主进程、窗口、IPC 与后台调度
-├─ preload.cjs                  安全桥接
-└─ game-playtest-runtime.js     隔离试玩窗口
+├─ main.js                      Electron 主进程：窗口宿主、托盘、协议与服务装配
+├─ preload.cjs                  安全桥接（唯一 preload 源）
+├─ ipc-security.js              可信 IPC registrar 与边界校验
+├─ main-helpers.js              窗口尺寸、视图加载等宿主辅助
+├─ main-menus.js                桌宠与托盘菜单
+├─ main-secondary-windows.js    辅助窗口创建与生命周期
+├─ services/                    20 个 Electron-free 领域服务
+└─ workers/utility-entry.js     RAG / 语音推理后台 worker 入口
 
 src/
-├─ App.tsx                      多窗口 React UI
-├─ styles.css
-└─ pet/                         Live2D 渲染
+├─ App.tsx                      多窗口 React 根（按 viewMode 渲染）
+├─ entries/                     9 个窗口独立渲染入口
+├─ views/                       窗口视图、设置分区与运行时类型
+├─ styles/                      按窗口拆分的样式
+└─ pet/                         Live2D 渲染与官方 SDK 适配
 
 src-agent/
 ├─ core.js                      对话、路由、RAG 与模型调用
@@ -181,8 +179,20 @@ src-agent/
 ├─ gpt-sovits.js                GPT-SoVITS 语音库
 └─ executors/                   应用、文件、系统等执行器
 
-tests/                           Node.js 自动化测试
+tests/                          301 项 Node.js 自动化测试
+scripts/                        架构审计、Electron 冒烟与语音服务脚本
+docs/                           架构整备、验证清单与参考文档
 ```
+
+## 开发门禁
+
+| 命令 | 作用 |
+|---|---|
+| `npm test` | 运行 301 项自动化测试 |
+| `npm run audit:architecture` | 架构审计：IPC 所有权、窗口安全、服务生命周期、打包布局 |
+| `npx tsc --noEmit` | 严格类型检查 |
+| `npm run verify:electron` | 真实 Electron 43 运行时与原生语音模块冒烟 |
+| `npm run verify` | 架构审计 + 测试 + 构建三合一 |
 
 ## 安全说明
 
