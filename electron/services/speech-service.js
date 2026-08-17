@@ -214,7 +214,17 @@ export function registerSpeechServiceIpc(options) {
     }],
     ["agent:synthesize-speech", async (_event, payload) => {
       const config = await getConfig();
-      return synthesizeSpeech({ ...config.voice, ...(payload?.voiceConfig ?? {}) }, payload?.text, Boolean(payload?.asmr));
+      const automatic = payload?.automatic === true;
+      if (automatic && config.voice?.enabled !== true) {
+        return { skipped: true, reason: "automatic-voice-disabled" };
+      }
+      const voiceConfig = { ...config.voice, ...(payload?.voiceConfig ?? {}), enabled: config.voice?.enabled === true };
+      if (automatic && voiceConfig.provider === "gpt_sovits") {
+        const ready = await dependencies.isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl, options.fetch);
+        if (!ready) return { skipped: true, reason: "gpt-sovits-not-running" };
+        voiceConfig.gptSovitsAutoStart = false;
+      }
+      return synthesizeSpeech(voiceConfig, payload?.text, Boolean(payload?.asmr));
     }],
     ["agent:list-local-tts-packs", async () => dependencies.listLocalTtsPacks(options.getBaseDir())],
     ["agent:install-local-tts-pack", async (_event, packId) => dependencies.installLocalTtsPack(options.getBaseDir(), packId, options.broadcastLocalTtsProgress, options.fetch)],

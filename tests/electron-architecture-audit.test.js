@@ -242,6 +242,34 @@ test("architecture audit accepts canonical single-line BrowserWindow calls", () 
   assert.deepEqual(result.critical, []);
 });
 
+test("architecture audit recognizes split renderer html entrypoints", () => {
+  const result = analyzeElectronArchitecture({
+    main: baseMain,
+    electronFiles: ["electron/main.js", "electron/preload.cjs", "electron/workers/utility-entry.js", "electron/services/schedule-service.js", "electron/services/model-conversation-service.js", "electron/services/autonomous-creation-service.js", "electron/services/settings-service.js", "electron/services/persona-card-service.js", "electron/services/live2d-model-service.js", "electron/services/trusted-domain-ipc-service.js", ...phase5eElectronFiles],
+    packageJson: basePackage,
+    indexHtml: '<script type="module" src="/src/entries/pet.tsx"></script>',
+    htmlEntrypoints: [
+      { path: "index.html", content: '<script type="module" src="/src/entries/pet.tsx"></script>' },
+      { path: "settings.html", content: '<script type="module" src="/src/entries/settings.tsx"></script>' },
+      { path: "code.html", content: '<script type="module" src="/src/entries/code.tsx"></script>' }
+    ],
+    ragSources: baseRagSources,
+    scheduleService: baseScheduleService,
+    modelConversationService: baseModelService,
+    autonomousCreationService: baseAutonomousService,
+    settingsService: baseSettingsService,
+    personaCardService: basePersonaCardService,
+    live2DModelService: baseLive2DModelService,
+    trustedDomainIpcService,
+    phase5eServices,
+    preload: phase5ePreload,
+    phase5eContracts
+  });
+
+  assert.equal(result.metrics.rendererHtmlEntrypoints, 3);
+  assert.equal(result.metrics.singleRendererEntrypoint, false);
+});
+
 test("architecture audit rejects a BrowserWindow created from variable options", () => {
   const result = audit(`${baseMain}\nconst options = { webPreferences: { preload: PRELOAD_PATH } };\nnew BrowserWindow(options);`);
   assert.equal(result.metrics.browserWindowConstructors, 10);

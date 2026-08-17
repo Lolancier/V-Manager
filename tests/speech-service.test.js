@@ -235,6 +235,40 @@ test("service owns 17 handles and one listener with idempotent disposal", async 
   assert.deepEqual(listenerDisposals, [...SPEECH_EVENT_CHANNELS]);
 });
 
+test("automatic speech quietly skips when auto-read is disabled or GPT-SoVITS is stopped", async (t) => {
+  const baseDir = await temporaryBase(t);
+  const handlers = new Map();
+  let readinessChecks = 0;
+  let providerCalls = 0;
+  const options = serviceOptions(baseDir, {
+    handle: (channel, handler) => handlers.set(channel, handler),
+    removeHandler: () => {},
+    on: () => () => {}
+  });
+  options.dependencies.isGptSovitsServiceReady = async () => {
+    readinessChecks += 1;
+    return false;
+  };
+  options.dependencies.synthesizeGptSovitsSpeech = async () => {
+    providerCalls += 1;
+    return audioResult("unexpected");
+  };
+  registerSpeechServiceIpc(options);
+  const handler = handlers.get("agent:synthesize-speech");
+  const payload = {
+    text: "automatic",
+    automatic: true,
+    voiceConfig: { enabled: true, provider: "gpt_sovits", gptSovitsAutoStart: true }
+  };
+
+  assert.deepEqual(await handler({}, payload), { skipped: true, reason: "automatic-voice-disabled" });
+  assert.equal(readinessChecks, 0);
+  options.getCurrentConfig().voice.enabled = true;
+  assert.deepEqual(await handler({}, payload), { skipped: true, reason: "gpt-sovits-not-running" });
+  assert.equal(readinessChecks, 1);
+  assert.equal(providerCalls, 0);
+});
+
 test("local transcription routes through the background task supervisor when configured", async (t) => {
   const baseDir = await temporaryBase(t);
   const handlers = new Map();

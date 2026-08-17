@@ -2,6 +2,18 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const rendererEntryPages = [
+  "index.html",
+  "startup.html",
+  "settings.html",
+  "scale.html",
+  "composer.html",
+  "chat.html",
+  "bubble.html",
+  "expressions.html",
+  "code.html"
+];
+
 export default defineConfig({
   // Electron loads the production renderer through file://. Relative bundle
   // URLs keep scripts and styles inside dist instead of resolving from C:\.
@@ -13,7 +25,14 @@ export default defineConfig({
     }
   },
   optimizeDeps: {
-    entries: ["index.html"]
+    entries: rendererEntryPages
+  },
+  build: {
+    rollupOptions: {
+      input: Object.fromEntries(
+        rendererEntryPages.map((page) => [page.replace(/\.html$/, ""), path.resolve(__dirname, page)])
+      )
+    }
   },
   server: {
     port: 5173,

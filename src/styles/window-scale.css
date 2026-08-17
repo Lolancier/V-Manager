@@ -1,0 +1,74 @@
+.scale-window-shell {
+  height: 100vh;
+  min-height: 0;
+  padding: 44px 18px 18px;
+  overflow: hidden;
+  color: #2d3539;
+  background: #f3f5f6;
+}
+
+.scale-window-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #dfe3e5;
+  border-radius: 8px;
+  color: #2d3539;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(35, 44, 48, 0.1);
+  backdrop-filter: none;
+}
+
+.scale-window-card input[type="range"] {
+  padding: 0;
+  background: transparent;
+}
+
+.scale-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #16867a;
+}
+
+.scale-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #68757b;
+}
+
+.scale-window-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.scale-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.scale-presets button {
+  min-height: 34px;
+  border: 1px solid #d9dfe1;
+  border-radius: 5px;
+  color: #576267;
+  background: #f7f8f8;
+  cursor: pointer;
+}
+
+.scale-presets button:hover,
+.scale-presets button.is-active {
+  color: #fff;
+  border-color: #16867a;
+  background: #16867a;
+}
+
+.scale-window-card .eyebrow,
+.scale-window-card .scale-hint {
+  color: #68757b;
+  letter-spacing: 0;
+}

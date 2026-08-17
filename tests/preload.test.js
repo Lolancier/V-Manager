@@ -74,6 +74,13 @@ test("preload preserves IPC argument shapes and event unsubscription", async () 
     ["send", "agent:set-pet-mouse-passthrough", true]
   ]);
 
+  await api.synthesizeSpeech("automatic", false, { provider: "gpt_sovits" }, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), [
+    "invoke",
+    "agent:synthesize-speech",
+    { text: "automatic", asmr: false, voiceConfig: { provider: "gpt_sovits" }, automatic: true }
+  ]);
+
   const received = [];
   const unsubscribe = api.onConfigUpdated((value) => received.push(value));
   const listener = listeners.get("agent:config-updated");

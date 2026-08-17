@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Copyright(c) Live2D Inc. All rights reserved.
  *
@@ -51,6 +52,7 @@ export class LAppTextureManager {
         // WebKitでは同じImageのonloadを再度呼ぶには再インスタンスが必要
         // 詳細：https://stackoverflow.com/a/5024181
         this._textures[i].img = new Image();
+        this._textures[i].img.crossOrigin = 'anonymous';
         this._textures[i].img.addEventListener(
           'load',
           (): void => callback(this._textures[i]),
@@ -65,6 +67,7 @@ export class LAppTextureManager {
 
     // データのオンロードをトリガーにする
     const img = new Image();
+    img.crossOrigin = 'anonymous';
     img.addEventListener(
       'load',
       (): void => {

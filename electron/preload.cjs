@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   selectAsmrTextFile: () => ipcRenderer.invoke("agent:select-asmr-text-file"),
   generateAsmrScript: (mode, prompt) => ipcRenderer.invoke("agent:generate-asmr-script", { mode, prompt }),
   listElevenLabsVoices: (voiceConfig) => ipcRenderer.invoke("agent:list-elevenlabs-voices", voiceConfig),
-  synthesizeSpeech: (text, asmr, voiceConfig) => ipcRenderer.invoke("agent:synthesize-speech", { text, asmr, voiceConfig }),
+  synthesizeSpeech: (text, asmr, voiceConfig, automatic = false) => ipcRenderer.invoke("agent:synthesize-speech", { text, asmr, voiceConfig, automatic }),
   reportSpeechSignal: (signal) => ipcRenderer.send("agent:speech-signal", signal),
   listLocalTtsPacks: () => ipcRenderer.invoke("agent:list-local-tts-packs"),
   installLocalTtsPack: (packId) => ipcRenderer.invoke("agent:install-local-tts-pack", packId),

@@ -127,6 +127,11 @@ export function extractPreloadInboundChannels(preload) {
   return channels.sort();
 }
 
+function extractHtmlModuleEntries(html) {
+  return [...(html || "").matchAll(/<script[^>]+type=["']module["'][^>]+src=["']([^"']+)["']/g)]
+    .map((match) => match[1]);
+}
+
 function sameChannelSet(actual = [], expected = []) {
   const actualChannels = [...new Set(actual)].sort();
   const expectedChannels = [...expected].sort();
@@ -198,6 +203,7 @@ export function analyzeElectronArchitecture({
   electronFiles,
   packageJson,
   indexHtml,
+  htmlEntrypoints = [],
   directElectronImports = [],
   ragSources = {},
   scheduleService = "",
@@ -211,6 +217,12 @@ export function analyzeElectronArchitecture({
   preload = "",
   phase5eContracts = []
 }) {
+  const normalizedHtmlEntrypoints = htmlEntrypoints.length
+    ? htmlEntrypoints
+    : [{ path: "index.html", content: indexHtml || "" }];
+  const rendererModuleEntries = [...new Set(
+    normalizedHtmlEntrypoints.flatMap((entry) => extractHtmlModuleEntries(entry.content))
+  )].sort();
   const preloadSources = electronFiles
     .filter((file) => /(?:^|[\\/])preload(?:[.-][^\\/]*)?\.(?:c?js|mjs)$/.test(file))
     .map((file) => file.replaceAll("\\", "/"))
@@ -471,7 +483,9 @@ export function analyzeElectronArchitecture({
     phase5eManifestDuplicates,
     preloadInboundChannels,
     directMainPhase5eIpc,
-    singleRendererEntrypoint: /src\/main\.tsx/.test(indexHtml)
+    rendererHtmlEntrypoints: normalizedHtmlEntrypoints.length,
+    rendererModuleEntries,
+    singleRendererEntrypoint: rendererModuleEntries.length <= 1
   };
   const critical = [];
   const warnings = [];

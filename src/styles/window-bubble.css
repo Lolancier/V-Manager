@@ -1,0 +1,127 @@
+.bubble-window-shell {
+  height: 100vh;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+body:has(.bubble-window-shell),
+body:has(.bubble-window-shell) #root {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.bubble-window-card {
+  position: relative;
+  margin: 12px;
+  width: 300px;
+  min-width: 280px;
+  max-width: 640px;
+  overflow: visible;
+  scrollbar-width: none;
+  opacity: 1;
+  transition: opacity 0.55s ease, transform 0.55s ease;
+}
+
+.bubble-window-card::-webkit-scrollbar {
+  display: none;
+}
+
+.bubble-window-card::before {
+  content: "";
+  position: absolute;
+  top: 38px;
+  width: 14px;
+  height: 14px;
+  background: rgba(10, 15, 29, 0.9);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  transform: rotate(45deg);
+}
+
+.placement-right .bubble-window-card::before {
+  left: -8px;
+}
+
+.placement-left .bubble-window-card::before {
+  right: -8px;
+  transform: rotate(225deg);
+}
+
+.bubble-window-card > p {
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+
+.bubble-window-card.is-fading {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.bubble-runtime-status {
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.bubble-interest-activity {
+  display: grid;
+  gap: 7px;
+}
+
+.bubble-interest-activity > span {
+  color: var(--accent, #188f84);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bubble-interest-activity p {
+  margin: 0;
+  font-weight: 650;
+}
+
+.bubble-interest-activity small {
+  color: var(--muted-text, #687977);
+  line-height: 1.45;
+}
+
+.bubble-interest-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.bubble-interest-actions button {
+  border: 1px solid rgba(24, 143, 132, 0.28);
+  border-radius: 9px;
+  background: rgba(24, 143, 132, 0.1);
+  color: inherit;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+
+.bubble-interest-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.bubble-interest-log {
+  display: grid;
+  gap: 3px;
+  padding-left: 8px;
+  border-left: 2px solid rgba(24, 143, 132, 0.22);
+}
+
+.bubble-interest-log span {
+  overflow: hidden;
+  color: var(--muted-text, #687977);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

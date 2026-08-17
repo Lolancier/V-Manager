@@ -596,7 +596,7 @@ interface Window {
     selectAsmrTextFile: () => Promise<{ path: string; content: string } | null>;
     generateAsmrScript: (mode: string, prompt: string) => Promise<string>;
     listElevenLabsVoices: (voiceConfig?: AgentConfig["voice"]) => Promise<ElevenLabsVoiceOption[]>;
-    synthesizeSpeech: (text: string, asmr: boolean, voiceConfig?: AgentConfig["voice"]) => Promise<{ audioBase64: string; mimeType: string; requestId: string; characterCost: string; cached: boolean }>;
+    synthesizeSpeech: (text: string, asmr: boolean, voiceConfig?: AgentConfig["voice"], automatic?: boolean) => Promise<{ audioBase64?: string; mimeType?: string; requestId?: string; characterCost?: string; cached?: boolean; skipped?: boolean; reason?: string }>;
     reportSpeechSignal: (signal: { active: boolean; level: number; phase?: "start" | "end" | "fallback"; text?: string; durationMs?: number; finalSegment?: boolean; mood?: string; faceParams?: Record<string, number> | null }) => void;
     listLocalTtsPacks: () => Promise<LocalTtsPackStatus[]>;
     installLocalTtsPack: (packId: string) => Promise<LocalTtsPackStatus>;

@@ -16,12 +16,20 @@ async function listFiles(directory) {
   return result;
 }
 
-const [main, preload, electronFiles, packageJson, indexHtml, memoryService, scheduleService, modelConversationService, autonomousCreationService, settingsService, personaCardService, live2DModelService, core, appExecutor, toolExecutor] = await Promise.all([
+async function listRootHtmlFiles() {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".html"))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+const [main, preload, electronFiles, packageJson, rootHtmlFiles, memoryService, scheduleService, modelConversationService, autonomousCreationService, settingsService, personaCardService, live2DModelService, core, appExecutor, toolExecutor] = await Promise.all([
   read("electron/main.js"),
   read("electron/preload.cjs"),
   listFiles("electron"),
   read("package.json").then(JSON.parse),
-  read("index.html"),
+  listRootHtmlFiles(),
   read("electron/services/memory-service.js"),
   read("electron/services/schedule-service.js"),
   read("electron/services/model-conversation-service.js"),
@@ -33,6 +41,10 @@ const [main, preload, electronFiles, packageJson, indexHtml, memoryService, sche
   read("src-agent/executors/app-executor.js"),
   read("src-agent/tool-executor.js")
 ]);
+const htmlEntrypoints = await Promise.all(rootHtmlFiles.map(async (relativePath) => ({
+  path: relativePath,
+  content: await read(relativePath)
+})));
 const phase5eServicePaths = {
   systemResource: "electron/services/system-resource-service.js",
   fileManager: "electron/services/file-manager-service.js",
@@ -59,7 +71,8 @@ const result = analyzeElectronArchitecture({
   main,
   electronFiles,
   packageJson,
-  indexHtml,
+  indexHtml: htmlEntrypoints.find((entry) => entry.path === "index.html")?.content || "",
+  htmlEntrypoints,
   directElectronImports,
   ragSources: { memoryService, core, appExecutor, toolExecutor },
   scheduleService,

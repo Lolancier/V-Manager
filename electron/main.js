@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, Notification, protocol, screen, session, shell, Tray, utilityProcess } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, net, Notification, protocol, screen, session, shell, Tray, utilityProcess } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,6 @@ import { runGamePlaytest } from "../src-agent/game-playtest.js";
 import { createIsolatedGameDriver } from "./game-playtest-runtime.js";
 import { getMemoryDatabaseStats } from "../src-agent/local-database.js";
 import { configureDesktopShell } from "../src-agent/platform/desktop-shell.js";
-import { attachWindowLifecycle, WINDOW_LIFECYCLE } from "./window-lifecycle.js";
 import { registerMemoryServiceIpc } from "./services/memory-service.js";
 import { registerSpeechServiceIpc } from "./services/speech-service.js";
 import { createScheduleService } from "./services/schedule-service.js";
@@ -47,6 +46,31 @@ import { createRendererReadyService } from "./services/renderer-ready-service.js
 import { createRagTaskClient } from "./services/rag-task-client.js";
 import { createUtilityTaskSupervisor, resolveUtilityEntryPoint } from "./services/utility-task-supervisor.js";
 import { createTrustedIpcRegistrar } from "./ipc-security.js";
+import {
+  createViewLoader,
+  getBubbleWindowBounds as computeBubbleWindowBounds,
+  getChatWindowBounds as computeChatWindowBounds,
+  getComposerWindowBounds as computeComposerWindowBounds,
+  getModelContentType,
+  getPetWindowSize as computePetWindowSize,
+  getTitleBarOverlay,
+  mergeAgentConfig
+} from "./main-helpers.js";
+import {
+  buildPetContextMenu as createPetContextMenu,
+  buildTrayContextMenu as createTrayContextMenu,
+  createTrayIcon
+} from "./main-menus.js";
+import {
+  createBubbleWindow as createSecondaryBubbleWindow,
+  createChatWindow as createSecondaryChatWindow,
+  createCodeWindow as createSecondaryCodeWindow,
+  createComposerWindow as createSecondaryComposerWindow,
+  createExpressionWindow as createSecondaryExpressionWindow,
+  createScaleWindow as createSecondaryScaleWindow,
+  createSettingsWindow as createSecondarySettingsWindow,
+  ensureWindow
+} from "./main-secondary-windows.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -77,6 +101,11 @@ protocol.registerSchemesAsPrivileged([
 
 const isDev = !app.isPackaged;
 const devServerUrl = "http://localhost:5173";
+const { loadView } = createViewLoader({
+  isDev,
+  devServerUrl,
+  getAppPath: () => app.getAppPath()
+});
 const trustedIpc = createTrustedIpcRegistrar(ipcMain, {
   isDev,
   devServerUrl,
@@ -143,58 +172,14 @@ function publishStartupStatus(next) {
   return startupStatus;
 }
 
-function mergeAgentConfig(nextConfig = {}) {
-  const { calendar: _removedCalendar, ...supportedConfig } = nextConfig;
-  return {
-    ...defaultConfig,
-    ...supportedConfig,
-    deepseek: { ...defaultConfig.deepseek, ...(nextConfig.deepseek ?? {}) },
-    embedding: { ...defaultConfig.embedding, ...(nextConfig.embedding ?? {}) },
-    astrbot: {
-      ...defaultConfig.astrbot,
-      ...(nextConfig.astrbot ?? {}),
-      contactMap: { ...defaultConfig.astrbot.contactMap, ...(nextConfig.astrbot?.contactMap ?? {}) }
-    },
-    appearance: { ...defaultConfig.appearance, ...(nextConfig.appearance ?? {}) },
-    voice: {
-      ...defaultConfig.voice,
-      ...(nextConfig.voice ?? {}),
-      baseUrl: nextConfig.voice?.baseUrl || defaultConfig.voice.baseUrl,
-      model: nextConfig.voice?.model || defaultConfig.voice.model,
-      voice: nextConfig.voice?.voice || defaultConfig.voice.voice
-    },
-    speechInput: { ...defaultConfig.speechInput, ...(nextConfig.speechInput ?? {}) },
-    relationship: { ...defaultConfig.relationship, ...(nextConfig.relationship ?? {}) },
-    proactive: { ...defaultConfig.proactive, ...(nextConfig.proactive ?? {}) },
-    interests: normalizeInterestConfig(nextConfig.interests),
-    memory: { ...defaultConfig.memory, ...(nextConfig.memory ?? {}) }
-  };
-}
-
-function getModelContentType(filePath) {
-  const extension = path.extname(filePath).toLowerCase();
-  if (extension === ".json") return "application/json";
-  if (extension === ".js") return "application/javascript";
-  if (extension === ".css") return "text/css";
-  if (extension === ".png") return "image/png";
-  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
-  if (extension === ".webp") return "image/webp";
-  return "application/octet-stream";
-}
-
-function getTitleBarOverlay(theme = currentAppearanceTheme, forceDark = false) {
-  const dark = forceDark || theme === "dark";
-  return {
-    color: dark ? "#111417" : "#ffffff",
-    symbolColor: dark ? "#dce3e6" : "#31383c",
-    height: 36
-  };
+function mergeRuntimeConfig(nextConfig = {}) {
+  return mergeAgentConfig(nextConfig, { defaultConfig, normalizeInterestConfig });
 }
 
 function updateTitleBarOverlays() {
   const themedWindows = [settingsWindow, chatWindow, scaleWindow, expressionWindow];
   for (const win of themedWindows) {
-    if (win && !win.isDestroyed()) win.setTitleBarOverlay(getTitleBarOverlay());
+    if (win && !win.isDestroyed()) win.setTitleBarOverlay(getTitleBarOverlay(currentAppearanceTheme));
   }
   if (codeWindow && !codeWindow.isDestroyed()) {
     codeWindow.setTitleBarOverlay(getTitleBarOverlay("dark", true));
@@ -202,80 +187,23 @@ function updateTitleBarOverlays() {
 }
 
 function getPetWindowSize(scale = petWindowLayoutService.getPetScale()) {
-  const normalized = Math.max(0.8, Math.min(1.5, scale));
-  return {
-    width: Math.round(640 * normalized),
-    height: Math.round(960 * normalized)
-  };
-}
-
-function loadView(win, view) {
-  if (isDev) {
-    win.loadURL(`${devServerUrl}/?view=${view}`);
-  } else {
-    win.loadFile(path.join(app.getAppPath(), "dist", "index.html"), {
-      search: `view=${view}`
-    });
-  }
-}
-
-function getWindowBoundsNearPet(width, height, verticalOffset) {
-  if (!petWindow || petWindow.isDestroyed()) return { width, height };
-
-  const petBounds = petWindow.getBounds();
-  const workArea = screen.getDisplayMatching(petBounds).workArea;
-  const gap = 18;
-  const spaceRight = workArea.x + workArea.width - (petBounds.x + petBounds.width);
-  const spaceLeft = petBounds.x - workArea.x;
-  const placeRight = spaceRight >= width + gap || spaceRight >= spaceLeft;
-  const desiredX = placeRight
-    ? petBounds.x + petBounds.width + gap
-    : petBounds.x - width - gap;
-  const desiredY = petBounds.y + verticalOffset;
-
-  return {
-    x: Math.round(Math.max(workArea.x, Math.min(desiredX, workArea.x + workArea.width - width))),
-    y: Math.round(Math.max(workArea.y, Math.min(desiredY, workArea.y + workArea.height - height))),
-    width,
-    height
-  };
+  return computePetWindowSize(scale);
 }
 
 function getChatWindowBounds() {
-  return getWindowBoundsNearPet(1120, 720, 48);
+  return computeChatWindowBounds({ petWindow, screen });
 }
 
 function getComposerWindowBounds() {
-  return getWindowBoundsNearPet(430, 310, 180);
+  return computeComposerWindowBounds({ petWindow, screen });
 }
 
 function getBubbleWindowBounds() {
-  if (!petWindow || petWindow.isDestroyed()) {
-    return {
-      width: petWindowLayoutService.getBubbleContentSize().width,
-      height: petWindowLayoutService.getBubbleContentSize().height,
-      placement: "right"
-    };
-  }
-
-  const bounds = petWindow.getBounds();
-  const workArea = screen.getDisplayMatching(bounds).workArea;
-  const contentSize = petWindowLayoutService.getBubbleContentSize();
-  const width = Math.min(contentSize.width, workArea.width - 24);
-  const height = Math.min(contentSize.height, workArea.height - 24);
-  const petCenterX = bounds.x + bounds.width / 2;
-  const placement = petCenterX < workArea.x + workArea.width / 2 ? "right" : "left";
-  const desiredX = placement === "right"
-    ? bounds.x + bounds.width * 0.62
-    : bounds.x + bounds.width * 0.38 - width;
-  const desiredY = bounds.y + bounds.height * 0.08;
-  return {
-    x: Math.round(Math.max(workArea.x + 12, Math.min(desiredX, workArea.x + workArea.width - width - 12))),
-    y: Math.round(Math.max(workArea.y + 12, Math.min(desiredY, workArea.y + workArea.height - height - 12))),
-    width: Math.round(width),
-    height: Math.round(height),
-    placement
-  };
+  return computeBubbleWindowBounds({
+    petWindow,
+    screen,
+    getBubbleContentSize: () => petWindowLayoutService.getBubbleContentSize()
+  });
 }
 
 function createStartupWindow() {
@@ -401,339 +329,139 @@ function createPetWindow() {
 }
 
 function createSettingsWindow() {
-  const win = new BrowserWindow({
-    width: 940,
-    height: 760,
-    minWidth: 760,
-    minHeight: 620,
-    backgroundColor: "#f3f5f6",
-    titleBarStyle: "hidden",
-    titleBarOverlay: getTitleBarOverlay(),
-    autoHideMenuBar: true,
-    show: false,
-    title: "V-Manager 设置",
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  loadView(win, "settings");
-
-  attachWindowLifecycle(win, {
-    lifecycle: WINDOW_LIFECYCLE.disposable,
+  const win = createSecondarySettingsWindow({
+    PRELOAD_PATH,
+    currentAppearanceTheme,
+    getTitleBarOverlay,
+    loadView,
     isQuitting: () => app.isQuiting,
     onDestroyed: () => {
-    if (settingsWindow === win) {
-      settingsWindow = null;
-    }
+      if (settingsWindow === win) settingsWindow = null;
     }
   });
-
   settingsWindow = win;
   return win;
 }
 
 function createScaleWindow() {
-  const win = new BrowserWindow({
-    width: 420,
-    height: 380,
-    minWidth: 420,
-    minHeight: 380,
-    maxWidth: 420,
-    maxHeight: 380,
-    backgroundColor: "#0f1118",
-    titleBarStyle: "hidden",
-    titleBarOverlay: getTitleBarOverlay(),
-    autoHideMenuBar: true,
-    show: false,
-    resizable: false,
-    maximizable: false,
-    minimizable: false,
-    alwaysOnTop: true,
-    title: "模型大小",
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  loadView(win, "scale");
-
-  attachWindowLifecycle(win, {
-    lifecycle: WINDOW_LIFECYCLE.disposable,
+  const win = createSecondaryScaleWindow({
+    PRELOAD_PATH,
+    currentAppearanceTheme,
+    getTitleBarOverlay,
+    loadView,
     isQuitting: () => app.isQuiting,
     onDestroyed: () => {
-    if (scaleWindow === win) {
-      scaleWindow = null;
-    }
+      if (scaleWindow === win) scaleWindow = null;
     }
   });
-
   scaleWindow = win;
   return win;
 }
 
 function createComposerWindow() {
-  const bounds = getComposerWindowBounds();
-  const win = new BrowserWindow({
-    width: bounds.width,
-    height: bounds.height,
-    x: bounds.x,
-    y: bounds.y,
-    minWidth: 380,
-    minHeight: 240,
-    maxWidth: 520,
-    maxHeight: 360,
-    frame: false,
-    transparent: true,
-    hasShadow: true,
-    resizable: false,
-    maximizable: false,
-    minimizable: false,
-    alwaysOnTop: true,
-    backgroundColor: "#00000000",
-    autoHideMenuBar: true,
-    show: false,
-    title: "对话窗口",
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  loadView(win, "composer");
-
-  attachWindowLifecycle(win, {
-    lifecycle: WINDOW_LIFECYCLE.disposable,
+  const win = createSecondaryComposerWindow({
+    PRELOAD_PATH,
+    loadView,
     isQuitting: () => app.isQuiting,
+    bounds: getComposerWindowBounds(),
     onDestroyed: () => {
-    if (composerWindow === win) {
-      composerWindow = null;
-    }
+      if (composerWindow === win) composerWindow = null;
     }
   });
-
   composerWindow = win;
   return win;
 }
 
 function createChatWindow() {
-  const bounds = getChatWindowBounds();
-  const win = new BrowserWindow({
-    width: bounds.width,
-    height: bounds.height,
-    x: bounds.x,
-    y: bounds.y,
-    minWidth: 920,
-    minHeight: 620,
-    alwaysOnTop: false,
-    backgroundColor: "#f8eee7",
-    titleBarStyle: "hidden",
-    titleBarOverlay: getTitleBarOverlay(),
-    autoHideMenuBar: true,
-    show: false,
-    title: "聊天栏",
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  loadView(win, "chat");
-
-  attachWindowLifecycle(win, {
-    lifecycle: WINDOW_LIFECYCLE.disposable,
+  const win = createSecondaryChatWindow({
+    PRELOAD_PATH,
+    currentAppearanceTheme,
+    getTitleBarOverlay,
+    loadView,
     isQuitting: () => app.isQuiting,
-    onBeforeDestroy: restorePetAfterChat,
+    bounds: getChatWindowBounds(),
+    restorePetAfterChat,
+    hidePetForChat,
+    syncGlobalCursorTracking,
     onDestroyed: () => {
       if (chatWindow === win) chatWindow = null;
-      syncGlobalCursorTracking();
     }
   });
-
-  win.on("minimize", restorePetAfterChat);
-  win.on("hide", restorePetAfterChat);
-  win.on("restore", hidePetForChat);
-  for (const eventName of ["show", "hide", "minimize", "restore"]) {
-    win.on(eventName, syncGlobalCursorTracking);
-  }
-
   chatWindow = win;
   return win;
 }
 
 function createCodeWindow() {
-  const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    minWidth: 960,
-    minHeight: 620,
-    backgroundColor: "#0b0d10",
-    titleBarStyle: "hidden",
-    titleBarOverlay: getTitleBarOverlay("dark", true),
-    autoHideMenuBar: true,
-    show: false,
-    title: "Vivi Code",
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  loadView(win, "code");
-
-  attachWindowLifecycle(win, {
-    lifecycle: WINDOW_LIFECYCLE.disposable,
+  const win = createSecondaryCodeWindow({
+    PRELOAD_PATH,
+    getTitleBarOverlay,
+    loadView,
     isQuitting: () => app.isQuiting,
     onDestroyed: () => {
       if (codeWindow === win) codeWindow = null;
     }
   });
-
   codeWindow = win;
   return win;
 }
 
 function createBubbleWindow() {
-  const bounds = getBubbleWindowBounds();
-  const win = new BrowserWindow({
-    width: bounds.width,
-    height: bounds.height,
-    x: bounds.x,
-    y: bounds.y,
-    frame: false,
-    transparent: true,
-    hasShadow: false,
-    resizable: false,
-    maximizable: false,
-    minimizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    show: !isBackgroundScheduleLaunch,
-    focusable: true,
-    backgroundColor: "#00000000",
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
+  const win = createSecondaryBubbleWindow({
+    PRELOAD_PATH,
+    loadView,
+    bounds: getBubbleWindowBounds(),
+    isBackgroundScheduleLaunch,
+    updateBubbleWindowLayout,
+    onDestroyed: () => {
+      if (bubbleWindow === win) bubbleWindow = null;
     }
   });
-
-  loadView(win, "bubble");
-  win.setAlwaysOnTop(true, "screen-saver");
-
-  win.webContents.on("did-finish-load", () => {
-    updateBubbleWindowLayout();
-  });
-
-  win.on("closed", () => {
-    if (bubbleWindow === win) {
-      bubbleWindow = null;
-    }
-  });
-
   bubbleWindow = win;
   return win;
 }
 
 function ensureSettingsWindow() {
-  if (!settingsWindow || settingsWindow.isDestroyed()) {
-    return createSettingsWindow();
-  }
-
-  return settingsWindow;
+  return ensureWindow(settingsWindow, createSettingsWindow);
 }
 
 function ensureScaleWindow() {
-  if (!scaleWindow || scaleWindow.isDestroyed()) {
-    return createScaleWindow();
-  }
-
-  return scaleWindow;
+  return ensureWindow(scaleWindow, createScaleWindow);
 }
 
 function ensureComposerWindow() {
-  if (!composerWindow || composerWindow.isDestroyed()) {
-    return createComposerWindow();
-  }
-
-  return composerWindow;
+  return ensureWindow(composerWindow, createComposerWindow);
 }
 
 function ensureChatWindow() {
-  if (!chatWindow || chatWindow.isDestroyed()) {
-    return createChatWindow();
-  }
-
-  return chatWindow;
+  return ensureWindow(chatWindow, createChatWindow);
 }
 
 function ensureCodeWindow() {
-  if (!codeWindow || codeWindow.isDestroyed()) return createCodeWindow();
-  return codeWindow;
+  return ensureWindow(codeWindow, createCodeWindow);
 }
 
 function ensureBubbleWindow() {
-  if (!bubbleWindow || bubbleWindow.isDestroyed()) {
-    return createBubbleWindow();
-  }
-
-  return bubbleWindow;
+  return ensureWindow(bubbleWindow, createBubbleWindow);
 }
 
 function createExpressionWindow() {
-  const win = new BrowserWindow({
-    width: 420,
-    height: 560,
-    minWidth: 360,
-    minHeight: 440,
-    backgroundColor: "#0f1118",
-    titleBarStyle: "hidden",
-    titleBarOverlay: getTitleBarOverlay(),
-    autoHideMenuBar: true,
-    show: false,
-    resizable: true,
-    title: "表情与动作",
-    webPreferences: {
-      preload: PRELOAD_PATH,
-      contextIsolation: true,
-      nodeIntegration: false
-    }
-  });
-
-  loadView(win, "expressions");
-
-  win.webContents.on("did-finish-load", () => {
-    win.webContents.send("agent:expressions-updated", expressionChatStateService.getActiveExpressions());
-  });
-
-  attachWindowLifecycle(win, {
-    lifecycle: WINDOW_LIFECYCLE.disposable,
+  const win = createSecondaryExpressionWindow({
+    PRELOAD_PATH,
+    currentAppearanceTheme,
+    getTitleBarOverlay,
+    loadView,
     isQuitting: () => app.isQuiting,
+    getActiveExpressions: () => expressionChatStateService.getActiveExpressions(),
     onDestroyed: () => {
-    if (expressionWindow === win) {
-      expressionWindow = null;
-    }
+      if (expressionWindow === win) expressionWindow = null;
     }
   });
-
   expressionWindow = win;
   return win;
 }
 
 function ensureExpressionWindow() {
-  if (!expressionWindow || expressionWindow.isDestroyed()) {
-    return createExpressionWindow();
-  }
-  return expressionWindow;
+  return ensureWindow(expressionWindow, createExpressionWindow);
 }
 
 function openExpressionWindow() {
@@ -860,68 +588,24 @@ function getLoginItemOptions(openAtLogin) {
   };
 }
 
-function createTrayIcon() {
-  const size = 32;
-  const bitmap = Buffer.alloc(size * size * 4);
-  const setPixel = (x, y, red, green, blue, alpha = 255) => {
-    if (x < 0 || y < 0 || x >= size || y >= size) return;
-    const offset = (y * size + x) * 4;
-    bitmap[offset] = blue;
-    bitmap[offset + 1] = green;
-    bitmap[offset + 2] = red;
-    bitmap[offset + 3] = alpha;
-  };
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const dx = x - 15.5;
-      const dy = y - 15.5;
-      if (dx * dx + dy * dy <= 14 * 14) setPixel(x, y, 31, 174, 161);
-    }
-  }
-  for (let y = 8; y <= 22; y += 1) {
-    const progress = (y - 8) / 14;
-    const leftX = Math.round(9 + progress * 6);
-    const rightX = Math.round(22 - progress * 6);
-    for (let width = -1; width <= 1; width += 1) {
-      setPixel(leftX + width, y, 255, 255, 255);
-      setPixel(rightX + width, y, 255, 255, 255);
-    }
-  }
-  return nativeImage.createFromBitmap(bitmap, { width: size, height: size, scaleFactor: 1 }).resize({ width: 16, height: 16 });
-}
-
 function buildTrayContextMenu() {
   const petVisible = Boolean(petWindow && !petWindow.isDestroyed() && petWindow.isVisible());
-  return Menu.buildFromTemplate([
-    { label: "Vivi 正在后台运行", enabled: false },
-    { type: "separator" },
-    { label: petVisible ? "隐藏桌宠" : "显示桌宠", click: () => petVisible ? hidePetWindow() : showPetWindow() },
-    { label: "打开聊天栏", click: () => openChatWindow() },
-    { label: "快速输入", click: () => openComposerWindow() },
-    { label: "代码工作台", click: () => openCodeWindow() },
-    { label: "设置", click: () => openSettingsWindow() },
-    {
-      label: "鼠标移入时隐藏并穿透",
-      type: "checkbox",
-      checked: currentAgentConfig.appearance?.hoverAutoHide === true,
-      click: (menuItem) => { void updateHoverAutoHide(menuItem.checked); }
-    },
-    { type: "separator" },
-    {
-      label: "开机自动启动",
-      type: "checkbox",
-      checked: systemResourceService.isAutoLaunchEnabled(),
-      click: (menuItem) => systemResourceService.setAutoLaunchEnabled(menuItem.checked)
-    },
-    { type: "separator" },
-    {
-      label: "退出 V-Manager",
-      click: () => {
-        app.isQuiting = true;
-        app.quit();
-      }
+  return createTrayContextMenu({
+    petVisible,
+    currentAgentConfig,
+    isAutoLaunchEnabled: systemResourceService.isAutoLaunchEnabled(),
+    onTogglePet: (visible) => visible ? hidePetWindow() : showPetWindow(),
+    onOpenChat: () => openChatWindow(),
+    onOpenComposer: () => openComposerWindow(),
+    onOpenCode: () => openCodeWindow(),
+    onOpenSettings: () => openSettingsWindow(),
+    onToggleHoverAutoHide: (checked) => updateHoverAutoHide(checked),
+    onToggleAutoLaunch: (checked) => systemResourceService.setAutoLaunchEnabled(checked),
+    onQuit: () => {
+      app.isQuiting = true;
+      app.quit();
     }
-  ]);
+  });
 }
 
 function refreshTrayMenu() {
@@ -990,7 +674,7 @@ const speechService = registerSpeechServiceIpc({
   getBaseDir: () => app.getPath("userData"),
   getCurrentConfig: () => currentAgentConfig,
   loadConfig,
-  mergeConfig: mergeAgentConfig,
+  mergeConfig: mergeRuntimeConfig,
   showOpenDialog: (options) => dialog.showOpenDialog(settingsWindow ?? undefined, options),
   openPath: (target) => shell.openPath(target),
   fetch: (url, options) => net.fetch(url, options),
@@ -1005,7 +689,7 @@ const live2dModelService = createLive2DModelService({
   getBaseDir: () => app.getPath("userData"),
   getConfig: () => currentAgentConfig,
   setConfig: (config) => { currentAgentConfig = config; },
-  mergeConfig: mergeAgentConfig,
+  mergeConfig: mergeRuntimeConfig,
   saveConfig,
   broadcastConfigUpdated: (config) => broadcastConfigUpdated(config),
   broadcastModels: (models) => broadcastLive2DModels(models),
@@ -1018,7 +702,7 @@ const personaCardService = createPersonaCardService({
   getBaseDir: () => app.getPath("userData"),
   getConfig: () => currentAgentConfig,
   setConfig: (config) => { currentAgentConfig = config; },
-  mergeConfig: mergeAgentConfig,
+  mergeConfig: mergeRuntimeConfig,
   broadcastConfigUpdated: (config) => broadcastConfigUpdated(config)
 });
 
@@ -1026,7 +710,7 @@ const settingsService = createSettingsService({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
   getConfig: () => currentAgentConfig,
-  mergeConfig: mergeAgentConfig,
+  mergeConfig: mergeRuntimeConfig,
   loadRuntimePersona: async (storedConfig) => {
     const runtimePersona = await personaCardService.applyRuntimePersona(storedConfig);
     currentAgentConfig = runtimePersona.config;
@@ -1097,7 +781,7 @@ const companionLifeService = createCompanionLifeService({
   },
   broadcastRelationshipProfile,
   broadcastMoodUpdate,
-  mergeConfig: mergeAgentConfig,
+  mergeConfig: mergeRuntimeConfig,
   setInterval: (listener, intervalMs) => setInterval(listener, intervalMs),
   clearInterval: (timer) => clearInterval(timer),
   onError: (scope, error) => console.error(`[proactive] ${scope} failed:`, error),
@@ -1368,7 +1052,7 @@ function stopGlobalCursorTracking() {
 
 async function updateLive2DModel(modelId) {
   if (!live2dModelService.getModels().some((model) => model.id === modelId)) return false;
-  currentAgentConfig = mergeAgentConfig({
+  currentAgentConfig = mergeRuntimeConfig({
     ...currentAgentConfig,
     appearance: { ...currentAgentConfig.appearance, live2dModel: modelId }
   });
@@ -1378,7 +1062,7 @@ async function updateLive2DModel(modelId) {
 }
 
 async function updateMouseFollow(enabled) {
-  currentAgentConfig = mergeAgentConfig({
+  currentAgentConfig = mergeRuntimeConfig({
     ...currentAgentConfig,
     appearance: { ...currentAgentConfig.appearance, mouseFollow: Boolean(enabled) }
   });
@@ -1390,7 +1074,7 @@ async function updateMouseFollow(enabled) {
 }
 
 async function updateHoverAutoHide(enabled) {
-  currentAgentConfig = mergeAgentConfig({
+  currentAgentConfig = mergeRuntimeConfig({
     ...currentAgentConfig,
     appearance: { ...currentAgentConfig.appearance, hoverAutoHide: Boolean(enabled) }
   });
@@ -1420,128 +1104,38 @@ function updateBubbleWindowLayout() {
 }
 
 function buildPetContextMenu() {
-  return Menu.buildFromTemplate([
-    {
-      label: "对话",
-      submenu: [
-        {
-          label: "打开对话窗口",
-          click: () => sendComposerAction("focus-composer")
-        },
-        {
-          label: "清空气泡",
-          click: () => sendPetAction("clear-bubble")
-        },
-        {
-          label: "打开聊天栏",
-          click: () => sendChatAction("open-history-panel")
-        }
-      ]
+  return createPetContextMenu({
+    live2dModels: live2dModelService.getModels(),
+    selectedModelId: currentAgentConfig.appearance?.live2dModel,
+    positionLocked: petWindowLayoutService.getPositionLocked(),
+    isAlwaysOnTop: petWindow?.isAlwaysOnTop() === true,
+    currentAgentConfig,
+    onFocusComposer: () => sendComposerAction("focus-composer"),
+    onClearBubble: () => sendPetAction("clear-bubble"),
+    onOpenHistoryPanel: () => sendChatAction("open-history-panel"),
+    onOpenExpressionWindow: () => openExpressionWindow(),
+    onPetAction: (action) => sendPetAction(action),
+    onSelectModel: (modelId) => updateLive2DModel(modelId),
+    onOpenScaleWindow: () => openScaleWindow(),
+    onOpenCodeWindow: () => openCodeWindow(),
+    onOpenSettingsWindow: () => openSettingsWindow(),
+    onTogglePositionLock: () => {
+      const locked = petWindowLayoutService.setPositionLocked(!petWindowLayoutService.getPositionLocked());
+      petWindow?.webContents.send("agent:position-lock-updated", locked);
     },
-    {
-      label: "角色",
-      submenu: [
-        {
-          label: "表情与动作",
-          submenu: [
-            {
-              label: "打开表情面板",
-              click: () => openExpressionWindow()
-            },
-            { type: "separator" },
-            {
-              label: "待机",
-              click: () => sendPetAction("pet-idle")
-            },
-            {
-              label: "开心",
-              click: () => sendPetAction("pet-happy")
-            },
-            {
-              label: "思考",
-              click: () => sendPetAction("pet-thinking")
-            }
-          ]
-        },
-        {
-          label: "切换模型",
-          submenu: live2dModelService.getModels().map((model) => ({
-            label: model.label,
-            type: "radio",
-            checked: currentAgentConfig.appearance?.live2dModel === model.id,
-            click: () => { void updateLive2DModel(model.id); }
-          }))
-        },
-        {
-          label: "调整模型大小",
-          click: () => openScaleWindow()
-        }
-      ]
+    onToggleAlwaysOnTop: () => {
+      if (!petWindow) return;
+      const nextState = !petWindow.isAlwaysOnTop();
+      petWindow.setAlwaysOnTop(nextState, nextState ? "screen-saver" : "normal");
     },
-    {
-      label: "开发",
-      submenu: [
-        {
-          label: "打开代码工作台",
-          click: () => openCodeWindow()
-        }
-      ]
-    },
-    {
-      label: "设置",
-      click: () => openSettingsWindow()
-    },
-    {
-      label: "窗口",
-      submenu: [
-        {
-          label: "固定位置",
-          type: "checkbox",
-          checked: petWindowLayoutService.getPositionLocked(),
-          click: () => {
-            const locked = petWindowLayoutService.setPositionLocked(!petWindowLayoutService.getPositionLocked());
-            petWindow?.webContents.send("agent:position-lock-updated", locked);
-          }
-        },
-        { type: "separator" },
-        {
-          label: petWindow?.isAlwaysOnTop() ? "取消置顶" : "保持置顶",
-          click: () => {
-            if (!petWindow) {
-              return;
-            }
-
-            const nextState = !petWindow.isAlwaysOnTop();
-            petWindow.setAlwaysOnTop(nextState, nextState ? "screen-saver" : "normal");
-          }
-        },
-        {
-          label: "鼠标移入时隐藏并穿透",
-          type: "checkbox",
-          checked: currentAgentConfig.appearance?.hoverAutoHide === true,
-          click: (menuItem) => { void updateHoverAutoHide(menuItem.checked); }
-        },
-        {
-          label: "重置位置",
-          click: () => petWindow?.center()
-        }
-      ]
-    },
-    {
-      type: "separator"
-    },
-    {
-      label: "隐藏桌宠",
-      click: () => hidePetWindow()
-    },
-    {
-      label: "退出",
-      click: () => {
-        app.isQuiting = true;
-        app.quit();
-      }
+    onToggleHoverAutoHide: (checked) => updateHoverAutoHide(checked),
+    onCenterPet: () => petWindow?.center(),
+    onHidePet: () => hidePetWindow(),
+    onQuit: () => {
+      app.isQuiting = true;
+      app.quit();
     }
-  ]);
+  });
 }
 
 app.whenReady().then(async () => {
@@ -1566,7 +1160,7 @@ app.whenReady().then(async () => {
     callback(audioOnly);
   });
   const startupConfig = await loadConfig(app.getPath("userData"));
-  currentAgentConfig = mergeAgentConfig(startupConfig);
+  currentAgentConfig = mergeRuntimeConfig(startupConfig);
   await saveConfig(app.getPath("userData"), currentAgentConfig);
   await fs.rm(path.join(app.getPath("userData"), "agent-data", "outlook-token.bin"), { force: true }).catch(() => null);
   currentAppearanceTheme = currentAgentConfig.appearance?.theme === "dark" ? "dark" : "light";
@@ -1621,10 +1215,12 @@ app.whenReady().then(async () => {
       const relative = path.relative(assetRoot, filePath);
       if (relative.startsWith("..") || path.isAbsolute(relative)) return new Response("Forbidden", { status: 403 });
       const content = await fs.readFile(filePath);
-      return new Response(content, { headers: {
-        "content-type": getModelContentType(filePath),
-        "access-control-allow-origin": "*"
-      } });
+      return new Response(content, {
+        headers: {
+          "content-type": getModelContentType(filePath),
+          "access-control-allow-origin": "*"
+        }
+      });
     } catch {
       return new Response("Not found", { status: 404 });
     }
@@ -1640,10 +1236,12 @@ app.whenReady().then(async () => {
       const relative = path.relative(modelRoot, filePath);
       if (relative.startsWith("..") || path.isAbsolute(relative)) return new Response("Forbidden", { status: 403 });
       const content = await fs.readFile(filePath);
-      return new Response(content, { headers: {
-        "content-type": getModelContentType(filePath),
-        "access-control-allow-origin": "*"
-      } });
+      return new Response(content, {
+        headers: {
+          "content-type": getModelContentType(filePath),
+          "access-control-allow-origin": "*"
+        }
+      });
     } catch {
       return new Response("Not found", { status: 404 });
     }
