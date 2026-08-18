@@ -78,6 +78,7 @@ export const defaultConfig = {
     gptSovitsProfileId: "dania-v2-pro-plus",
     gptSovitsSpeed: 1,
     gptSovitsAutoStart: true,
+    gptSovitsRuntimeRoot: "",
     baseUrl: "https://api.elevenlabs.io/v1",
     apiKey: "",
     model: "eleven_v3",

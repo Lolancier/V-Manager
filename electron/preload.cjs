@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   getGptSovitsRuntimeStatus: (baseUrl) => ipcRenderer.invoke("agent:get-gpt-sovits-runtime-status", baseUrl),
   startGptSovitsRuntime: (baseUrl) => ipcRenderer.invoke("agent:start-gpt-sovits-runtime", baseUrl),
   stopGptSovitsRuntime: (baseUrl) => ipcRenderer.invoke("agent:stop-gpt-sovits-runtime", baseUrl),
+  installGptSovitsRuntime: () => ipcRenderer.invoke("agent:install-gpt-sovits-runtime"),
   getLocalSttStatus: (modelId) => ipcRenderer.invoke("agent:get-local-stt-status", modelId),
   installLocalStt: (modelId) => ipcRenderer.invoke("agent:install-local-stt", modelId),
   transcribeLocalSpeech: (audioBytes) => ipcRenderer.invoke("agent:transcribe-local-speech", audioBytes),
@@ -167,6 +168,11 @@ contextBridge.exposeInMainWorld("agentDesktop", {
     const listener = (_event, progress) => callback(progress);
     ipcRenderer.on("agent:gpt-sovits-progress", listener);
     return () => ipcRenderer.removeListener("agent:gpt-sovits-progress", listener);
+  },
+  onGptSovitsInstallProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("agent:gpt-sovits-install-progress", listener);
+    return () => ipcRenderer.removeListener("agent:gpt-sovits-install-progress", listener);
   },
   onAutoLaunchUpdated: (callback) => {
     const listener = (_event, enabled) => callback(Boolean(enabled));

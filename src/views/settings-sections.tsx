@@ -115,6 +115,9 @@ type VoiceSettingsSectionProps = {
   importingGptSovits: boolean;
   handleImportGptSovitsProfile: () => Promise<void>;
   gptSovitsMessage: string;
+  installingGptSovitsRuntime: boolean;
+  gptSovitsInstallProgress: { phase: "scan" | "copy" | "done"; percent: number } | null;
+  handleInstallGptSovitsRuntime: () => Promise<void>;
   bridge: DesktopBridge;
   elevenLabsModelPresets: readonly DeepSeekModelPreset[];
   availableVoiceOptions: ElevenLabsVoiceOption[];
@@ -714,6 +717,9 @@ export function VoiceSettingsSection(props: VoiceSettingsSectionProps) {
     importingGptSovits,
     handleImportGptSovitsProfile,
     gptSovitsMessage,
+    installingGptSovitsRuntime,
+    gptSovitsInstallProgress,
+    handleInstallGptSovitsRuntime,
     bridge,
     elevenLabsModelPresets,
     availableVoiceOptions,
@@ -821,6 +827,7 @@ export function VoiceSettingsSection(props: VoiceSettingsSectionProps) {
             {gptSovitsProfiles.length ? gptSovitsProfiles.map((profile: any) => <option value={profile.id} key={profile.id}>{profile.name} · {profile.version}</option>) : <option value="dania-v2-pro-plus">达妮娅 · v2ProPlus</option>}
           </select></label>
           <label>本机 API 地址<input value={configDraft.voice.gptSovitsBaseUrl} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsBaseUrl: event.target.value } })} placeholder="http://127.0.0.1:9880" /></label>
+          <label className="voice-config-wide">GPT-SoVITS 运行目录<input value={configDraft.voice.gptSovitsRuntimeRoot ?? ""} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsRuntimeRoot: event.target.value } })} placeholder="可选：留空会自动查找本机已装的 GPT-SoVITS" /></label>
           <label className="voice-speed-control"><span>语速 <strong>{configDraft.voice.gptSovitsSpeed.toFixed(2)}x</strong></span><input type="range" min="0.7" max="1.3" step="0.05" value={configDraft.voice.gptSovitsSpeed} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsSpeed: Number(event.target.value) } })} /></label>
         </div>
         <label className="voice-switch gpt-runtime-autostart">
@@ -835,6 +842,19 @@ export function VoiceSettingsSection(props: VoiceSettingsSectionProps) {
           <div className="asmr-actions">
             <button className="primary-button" type="button" disabled={gptSovitsRuntimeStatus.ready || Boolean(gptSovitsRuntimeBusy)} onClick={() => void handleGptSovitsRuntime("start")}>{gptSovitsRuntimeBusy === "start" ? "启动中…" : "启动语音服务"}</button>
             <button className="ghost-button compact" type="button" disabled={!gptSovitsRuntimeStatus.ready || Boolean(gptSovitsRuntimeBusy)} onClick={() => void handleGptSovitsRuntime("stop")}>{gptSovitsRuntimeBusy === "stop" ? "关闭中…" : "关闭并释放内存"}</button>
+          </div>
+        </div>
+        <div className="power-safety-note">
+          <div className="asmr-workspace-heading">
+            <div><strong>安装独立运行环境</strong><span>把整套 GPT-SoVITS（含本地依赖与模型）复制到自选目录，适合脱离开发项目独立使用。</span></div>
+            {gptSovitsInstallProgress?.phase === "copy" ? <span className="local-stt-status">{gptSovitsInstallProgress.percent}%</span> : null}
+          </div>
+          <div className="asmr-actions">
+            <button className="ghost-button compact" type="button" disabled={installingGptSovitsRuntime} onClick={() => void handleInstallGptSovitsRuntime()}>
+              {installingGptSovitsRuntime
+                ? (gptSovitsInstallProgress?.phase === "copy" ? `正在复制运行环境 ${gptSovitsInstallProgress.percent}%` : gptSovitsInstallProgress?.phase === "scan" ? "正在扫描环境…" : "正在准备…")
+                : "选择目录并安装到独立位置"}
+            </button>
           </div>
         </div>
         <div className="asmr-actions">
@@ -871,6 +891,7 @@ export function VoiceSettingsSection(props: VoiceSettingsSectionProps) {
           <p className="knowledge-hint">一次选择同一声线的 GPT .ckpt、SoVITS .pth 和参考音频。文件会复制进独立语音库并记录 SHA-256，不会从原位置直接加载。</p>
         </div> : null}
         <p className="knowledge-hint">连接仅允许 127.0.0.1 / localhost。手动模式下，服务未启动时不会因为自动朗读而自行常驻。</p>
+        <p className="knowledge-hint">会优先自动查找本机已安装的 GPT-SoVITS（含开发项目内的 third_party/GPT-SoVITS）。找不到时才需要你在“GPT-SoVITS 运行目录”里指向它，或先手动运行 npm run tts:gpt-sovits:start。</p>
         <p className="knowledge-hint">模型页标注 Apache-2.0；角色声音仍建议仅限个人使用，不用于冒充、欺骗或未经授权的公开发布。</p>
         {gptSovitsMessage ? <p className="feedback-text">{gptSovitsMessage}</p> : null}
       </div> : null}

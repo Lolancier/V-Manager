@@ -8,7 +8,7 @@ import { importGptSovitsProfile, installGptSovitsProfile, listGptSovitsProfiles,
 import { getLocalSttStatus, installLocalStt, transcribeLocalSpeech } from "../../src-agent/local-stt.js";
 import { pruneAudioCache, touchAudioCacheFile } from "../../src-agent/audio-cache.js";
 import { sanitizeSpeechText } from "../../src-agent/speech-text.js";
-import { ensureGptSovitsService, isGptSovitsServiceReady, stopGptSovitsService } from "../../src-agent/gpt-sovits-runtime.js";
+import { ensureGptSovitsService, installGptSovitsRuntime, isGptSovitsServiceReady, stopGptSovitsService } from "../../src-agent/gpt-sovits-runtime.js";
 
 export const SPEECH_HANDLE_CHANNELS = Object.freeze([
   "agent:select-asmr-text-file",
@@ -24,6 +24,7 @@ export const SPEECH_HANDLE_CHANNELS = Object.freeze([
   "agent:get-gpt-sovits-runtime-status",
   "agent:start-gpt-sovits-runtime",
   "agent:stop-gpt-sovits-runtime",
+  "agent:install-gpt-sovits-runtime",
   "agent:get-local-stt-status",
   "agent:install-local-stt",
   "agent:transcribe-local-speech",
@@ -50,6 +51,7 @@ const defaultDependencies = {
   touchAudioCacheFile,
   sanitizeSpeechText,
   ensureGptSovitsService,
+  installGptSovitsRuntime,
   isGptSovitsServiceReady,
   stopGptSovitsService
 };
@@ -134,7 +136,7 @@ export function createSpeechSynthesizer(options) {
           : await dependencies.synthesizeLocalSpeech(baseDir, voiceConfig, descriptor.speechText);
       } else if (descriptor.provider === "gpt_sovits") {
         if (voiceConfig.gptSovitsAutoStart !== false) {
-          await dependencies.ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl, { fetchImpl: options.fetch });
+          await dependencies.ensureGptSovitsService(voiceConfig.gptSovitsBaseUrl, { fetchImpl: options.fetch, runtimeRoot: options.getGptSovitsRuntimeRoot?.(), candidates: options.getGptSovitsRuntimeCandidates?.() });
         } else if (!await dependencies.isGptSovitsServiceReady(voiceConfig.gptSovitsBaseUrl, options.fetch)) {
           throw new Error("GPT-SoVITS 当前未运行。请到“设置 → 语音与 ASMR”手动启动，或开启“随 V-Manager 启动”。");
         }
@@ -192,7 +194,14 @@ function normalizeSpeechSignal(signal) {
 export function registerSpeechServiceIpc(options) {
   const dependencies = { ...defaultDependencies, ...(options.dependencies || {}) };
   const runBackgroundTask = typeof options.runBackgroundTask === "function" ? options.runBackgroundTask : null;
-  const synthesizeSpeech = createSpeechSynthesizer({ getBaseDir: options.getBaseDir, fetch: options.fetch, dependencies, runBackgroundTask });
+  const synthesizeSpeech = createSpeechSynthesizer({
+    getBaseDir: options.getBaseDir,
+    fetch: options.fetch,
+    dependencies,
+    runBackgroundTask,
+    getGptSovitsRuntimeRoot: options.getGptSovitsRuntimeRoot,
+    getGptSovitsRuntimeCandidates: options.getGptSovitsRuntimeCandidates
+  });
   const getConfig = async () => options.mergeConfig(await options.loadConfig(options.getBaseDir()));
   const currentVoiceConfig = () => options.getCurrentConfig().voice;
   const currentSpeechInputConfig = () => options.getCurrentConfig().speechInput;
@@ -252,8 +261,39 @@ export function registerSpeechServiceIpc(options) {
       return result;
     }],
     ["agent:get-gpt-sovits-runtime-status", async (_event, baseUrl) => ({ ready: await dependencies.isGptSovitsServiceReady(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, options.fetch) })],
-    ["agent:start-gpt-sovits-runtime", async (_event, baseUrl) => dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, { fetchImpl: options.fetch })],
+    ["agent:start-gpt-sovits-runtime", async (_event, baseUrl) => {
+      const result = await dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, { fetchImpl: options.fetch, runtimeRoot: options.getGptSovitsRuntimeRoot?.(), candidates: options.getGptSovitsRuntimeCandidates?.() });
+      // Remember the discovered runtime root so future launches (and the installed
+      // app) can reuse it without re-filling the field or setting an env var.
+      if (result?.runtimeRoot && typeof options.saveConfig === "function") {
+        const current = await getConfig();
+        if ((current.voice?.gptSovitsRuntimeRoot || "") !== result.runtimeRoot) {
+          await options.saveConfig(options.getBaseDir(), options.mergeConfig({ ...current, voice: { ...current.voice, gptSovitsRuntimeRoot: result.runtimeRoot } }));
+        }
+      }
+      return result;
+    }],
     ["agent:stop-gpt-sovits-runtime", async (_event, baseUrl) => dependencies.stopGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, options.fetch)],
+    ["agent:install-gpt-sovits-runtime", async (_event, _payload) => {
+      const selection = await options.showOpenDialog({
+        title: "选择 GPT-SoVITS 安装目录（将在此建立独立可运行的运行环境）",
+        properties: ["openDirectory", "createDirectory"]
+      });
+      if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
+      const targetRoot = selection.filePaths[0];
+      const broadcast = (progress) => options.broadcastGptSovitsInstallProgress?.(progress);
+      broadcast({ phase: "scan", percent: 0 });
+      const result = await dependencies.installGptSovitsRuntime(targetRoot, { sourceRoot: options.getGptSovitsSourceRoot?.(), onProgress: (progress) => broadcast({ ...progress, phase: "copy" }) });
+      // Remember the freshly installed runtime so V-Manager can reuse it.
+      if (typeof options.saveConfig === "function") {
+        const current = await getConfig();
+        if ((current.voice?.gptSovitsRuntimeRoot || "") !== result) {
+          await options.saveConfig(options.getBaseDir(), options.mergeConfig({ ...current, voice: { ...current.voice, gptSovitsRuntimeRoot: result } }));
+        }
+      }
+      broadcast({ phase: "done", percent: 100, runtimeRoot: result });
+      return { canceled: false, runtimeRoot: result };
+    }],
     ["agent:get-local-stt-status", async (_event, modelId) => {
       const config = await getConfig();
       return dependencies.getLocalSttStatus(options.getBaseDir(), modelId || config.speechInput.model);
@@ -294,7 +334,7 @@ export function registerSpeechServiceIpc(options) {
   let disposed = false;
   return {
     ensureGptSovitsRuntime(baseUrl) {
-      return dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, { fetchImpl: options.fetch });
+      return dependencies.ensureGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, { fetchImpl: options.fetch, runtimeRoot: options.getGptSovitsRuntimeRoot?.(), candidates: options.getGptSovitsRuntimeCandidates?.() });
     },
     stopGptSovitsRuntime(baseUrl) {
       return dependencies.stopGptSovitsService(baseUrl || currentVoiceConfig().gptSovitsBaseUrl, options.fetch);

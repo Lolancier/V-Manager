@@ -16,7 +16,7 @@ npm run dist
 
 ```
 D:\V-Manager-builds\win-unpacked\V-Manager.exe      # 免安装版
-D:\V-Manager-builds\V-Manager Setup 0.10.0.exe      # 安装包
+D:\V-Manager-builds\V-Manager Setup 0.10.1.exe      # 安装包
 ```
 
 ## 三个构建命令的区别

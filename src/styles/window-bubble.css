@@ -6,14 +6,24 @@
   justify-content: flex-start;
   padding: 0;
   background: transparent;
-  overflow: hidden;
+  overflow: visible;
 }
 
 body:has(.bubble-window-shell),
 body:has(.bubble-window-shell) #root {
   height: 100vh;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
+}
+
+/* The desk-pet bubble card: on Electron transparent windows,
+   backdrop-filter renders a rectangular frosted box (not clipped to the
+   rounded corners) and the 1px border reads as a visible frame. Drop both
+   here so only the rounded semi-transparent bubble remains. */
+.bubble-window-card.speech-bubble {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 1px solid transparent;
 }
 
 .bubble-window-card {

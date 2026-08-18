@@ -51,6 +51,7 @@ interface AgentConfig {
     gptSovitsProfileId: string;
     gptSovitsSpeed: number;
     gptSovitsAutoStart: boolean;
+    gptSovitsRuntimeRoot: string;
     baseUrl: string;
     apiKey: string;
     model: string;
@@ -607,6 +608,7 @@ interface Window {
     getGptSovitsRuntimeStatus: (baseUrl?: string) => Promise<GptSovitsRuntimeStatus>;
     startGptSovitsRuntime: (baseUrl?: string) => Promise<GptSovitsRuntimeStatus>;
     stopGptSovitsRuntime: (baseUrl?: string) => Promise<GptSovitsRuntimeStatus>;
+    installGptSovitsRuntime: () => Promise<{ canceled: boolean; runtimeRoot?: string }>;
     getLocalSttStatus: (modelId?: string) => Promise<LocalSttStatus>;
     installLocalStt: (modelId: string) => Promise<LocalSttStatus>;
     transcribeLocalSpeech: (audioBytes: Uint8Array) => Promise<{ text: string; modelId: string; language: string }>;
@@ -688,6 +690,7 @@ interface Window {
     onLocalSttProgress: (callback: (progress: { phase: "runtime" | "model"; received: number; total: number; percent: number }) => void) => () => void;
     onLocalTtsProgress: (callback: (progress: { phase: "voice-pack"; packId: string; received: number; total: number; percent: number }) => void) => () => void;
     onGptSovitsProgress: (callback: (progress: { phase: "gpt-sovits-profile"; profileId: string; file: string; received: number; total: number; percent: number }) => void) => () => void;
+    onGptSovitsInstallProgress: (callback: (progress: { phase: "scan" | "copy" | "done"; percent: number; runtimeRoot?: string; copiedMb?: number; totalMb?: number }) => void) => () => void;
     onPositionLockUpdated: (callback: (locked: boolean) => void) => () => void;
     onTriggerExpression: (callback: (name: string) => void) => () => void;
     onClearExpressions: (callback: () => void) => () => void;

@@ -26,19 +26,66 @@ export async function isGptSovitsServiceReady(baseUrl, fetchImpl = fetch) {
   }
 }
 
-async function startWorkspaceRuntime() {
+// Resolve the GPT-SoVITS runtime root by auto-discovery. Callers may supply a
+// list of candidate roots (e.g. the dev project root, a configured override, or
+// app.getAppPath()) plus an environment override. The first candidate that
+// actually contains a usable GPT-SoVITS runtime wins. When nothing is usable we
+// fall back to the module-adjacent project root (the dev checkout) so
+// development keeps working unchanged.
+//
+// A usable runtime requires both the start script and the bundled conda python:
+//   <root>/scripts/start-gpt-sovits.ps1
+//   <root>/third_party/GPT-SoVITS/.conda/python.exe
+async function findRuntimeRoot(candidates) {
+  const seen = new Set();
+  const roots = [projectRoot, ...(Array.isArray(candidates) ? candidates : [])];
+  for (const root of roots) {
+    const value = root && String(root).trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    if (await isUsableRuntime(value)) return path.resolve(value);
+  }
+  return null;
+}
+
+async function isUsableRuntime(root) {
+  try {
+    const [script, python] = await Promise.all([
+      fs.stat(path.join(root, "scripts", "start-gpt-sovits.ps1")).then((s) => s.isFile()).catch(() => false),
+      fs.stat(path.join(root, "third_party", "GPT-SoVITS", ".conda", "python.exe")).then((s) => s.isFile()).catch(() => false)
+    ]);
+    return script && python;
+  } catch {
+    return false;
+  }
+}
+
+async function startWorkspaceRuntime(_endpoint, runtimeRoot, candidates) {
   if (process.platform !== "win32") throw new Error("当前自动启动脚本仅支持 Windows。");
-  const scriptPath = path.join(projectRoot, "scripts", "start-gpt-sovits.ps1");
-  const runtimePython = path.join(projectRoot, "third_party", "GPT-SoVITS", ".conda", "python.exe");
+  const root = await findRuntimeRoot([runtimeRoot, ...(Array.isArray(candidates) ? candidates : [])]);
+  if (!root) {
+    throw new Error(
+      "没有找到已准备好的 GPT-SoVITS 本地运行环境。"
+      + "请先在“语音与 ASMR → GPT-SoVITS 角色声线”的 GPT-SoVITS 运行目录中填写含 third_party/GPT-SoVITS 的项目根目录，"
+      + "或先在项目目录运行 npm run tts:gpt-sovits:start。"
+    );
+  }
+  const runtimeDir = path.join(root, "third_party", "GPT-SoVITS");
+  const scriptPath = path.join(root, "scripts", "start-gpt-sovits.ps1");
+  const runtimePython = path.join(runtimeDir, ".conda", "python.exe");
   if (!await fs.stat(scriptPath).then((stat) => stat.isFile()).catch(() => false)
     || !await fs.stat(runtimePython).then((stat) => stat.isFile()).catch(() => false)) {
-    throw new Error("没有找到已准备好的 GPT-SoVITS 本地运行环境。请先运行 npm run tts:gpt-sovits:start。");
+    throw new Error(
+      "没有找到已准备好的 GPT-SoVITS 本地运行环境。"
+      + "本机会先自动查找已安装的 GPT-SoVITS；如果确实没有，请在“语音与 ASMR → GPT-SoVITS 角色声线”的 GPT-SoVITS 运行目录中指向项目根，"
+      + "或先在项目目录运行 npm run tts:gpt-sovits:start。"
+    );
   }
 
   await new Promise((resolve, reject) => {
     const child = spawn("powershell.exe", [
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath
-    ], { cwd: projectRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    ], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const append = (chunk) => { output = `${output}${chunk}`.slice(-4_000); };
     child.stdout.on("data", append);
@@ -57,24 +104,119 @@ async function startWorkspaceRuntime() {
       else reject(new Error(`GPT-SoVITS 启动失败（退出码 ${code}）${output.trim() ? `：${output.trim()}` : ""}`));
     });
   });
+  return root;
 }
 
-export async function ensureGptSovitsService(baseUrl, { fetchImpl = fetch, startImpl = startWorkspaceRuntime } = {}) {
+export async function ensureGptSovitsService(baseUrl, { fetchImpl = fetch, startImpl = startWorkspaceRuntime, runtimeRoot, candidates } = {}) {
   const endpoint = endpointUrl(baseUrl);
   if (await isGptSovitsServiceReady(endpoint, fetchImpl)) return { ready: true, started: false };
 
-  const key = endpoint.origin;
+  const key = `${endpoint.origin}|${runtimeRoot || "auto"}|${(candidates || []).join(",")}`;
   if (!starts.has(key)) {
     const task = (async () => {
-      await startImpl(endpoint);
+      const resolved = await startImpl(endpoint, runtimeRoot, candidates);
       if (!await isGptSovitsServiceReady(endpoint, fetchImpl)) {
         throw new Error(`GPT-SoVITS 已执行启动脚本，但 ${endpoint.origin} 仍无法访问。`);
       }
-      return { ready: true, started: true };
+      return { ready: true, started: true, runtimeRoot: resolved ?? null };
     })().finally(() => starts.delete(key));
     starts.set(key, task);
   }
   return starts.get(key);
+}
+
+// Directories not carried over when a run is duplicated to a fresh target. The
+// .git history is unnecessary for a runtime, logs are disposable, and bytecode/
+// caches are regenerated on first run.
+const RUNTIME_INSTALL_IGNORED = new Set([
+  ".git",
+  "__pycache__",
+  ".pytest_cache",
+  "vmanager-api.log",
+  "vmanager-api.stderr.log",
+  "vmanager-api.stdout.log"
+]);
+
+async function walkBytes(root, ignore, onFile) {
+  let total = 0;
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    if (ignore.has(entry.name)) continue;
+    const child = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      total += await walkBytes(child, ignore, onFile);
+    } else if (entry.isFile()) {
+      const stat = await fs.stat(child);
+      total += stat.size;
+      onFile?.(child, stat.size);
+    }
+  }
+  return total;
+}
+
+async function copyRuntimeTree(source, target, ignore, progress) {
+  await fs.mkdir(target, { recursive: true });
+  const entries = await fs.readdir(source, { withFileTypes: true });
+  for (const entry of entries) {
+    if (ignore.has(entry.name)) continue;
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) {
+      await copyRuntimeTree(from, to, ignore, progress);
+    } else if (entry.isFile()) {
+      await fs.copyFile(from, to);
+      const size = (await fs.stat(from)).size;
+      progress.copied += size;
+      progress.emit();
+    }
+  }
+}
+
+// Build a self-contained GPT-SoVITS runtime under targetRoot by duplicating the
+// validated source checkout (official clone + bundled conda env + pretrained
+// weights). The resulting layout mirrors the project so the existing discovery
+// (<root>/third_party/GPT-SoVITS/.conda/python.exe and <root>/scripts/start-gpt-
+// sovits.ps1) and the relative-path start script both keep working without
+// rewrites:
+//
+//   <targetRoot>/third_party/GPT-SoVITS/...   (the full runtime copy)
+//   <targetRoot>/scripts/start-gpt-sovits.ps1
+//
+// An existing usable runtime at targetRoot is never overwritten.
+export async function installGptSovitsRuntime(targetRoot, { sourceRoot = projectRoot, onProgress } = {}) {
+  const root = String(targetRoot || "").trim();
+  if (!root) throw new Error("请选择 GPT-SoVITS 安装目标目录。");
+  if (await isUsableRuntime(root)) {
+    throw new Error("目标目录已经包含可用的 GPT-SoVITS 运行环境，无需重新安装。");
+  }
+  const source = path.join(sourceRoot, "third_party", "GPT-SoVITS");
+  if (!await isUsableRuntime(sourceRoot)) {
+    throw new Error(
+      "本机缺少可复制的 GPT-SoVITS 运行环境（需 third_party/GPT-SoVITS/.conda 与 scripts/start-gpt-sovits.ps1）。"
+    );
+  }
+
+  const target = path.join(root, "third_party", "GPT-SoVITS");
+  const total = await walkBytes(source, RUNTIME_INSTALL_IGNORED);
+  const progress = { copied: 0, total, emit() {
+    if (typeof onProgress !== "function") return;
+    const bytes = progress.copied;
+    const percent = total > 0 ? Math.min(100, Math.round((bytes / total) * 100)) : 0;
+    const mb = Math.round(bytes / (1024 * 1024));
+    onProgress({ percent, copiedMb: mb, totalMb: total > 0 ? Math.round(total / (1024 * 1024)) : 0 });
+  } };
+
+  await copyRuntimeTree(source, target, RUNTIME_INSTALL_IGNORED, progress);
+  const startSource = path.join(sourceRoot, "scripts", "start-gpt-sovits.ps1");
+  const startTarget = path.join(root, "scripts", "start-gpt-sovits.ps1");
+  await fs.mkdir(path.dirname(startTarget), { recursive: true });
+  await fs.copyFile(startSource, startTarget);
+
+  if (!await isUsableRuntime(root)) {
+    throw new Error("运行环境复制完成，但结构校验未通过（缺少关键文件）。");
+  }
+  progress.emit();
+  return root;
 }
 
 export async function stopGptSovitsService(baseUrl, fetchImpl = fetch) {

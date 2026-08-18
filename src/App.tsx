@@ -90,6 +90,7 @@ const previewConfig: AgentConfig = {
     gptSovitsProfileId: "dania-v2-pro-plus",
     gptSovitsSpeed: 1,
     gptSovitsAutoStart: true,
+    gptSovitsRuntimeRoot: "",
     baseUrl: "https://api.elevenlabs.io/v1",
     apiKey: "",
     model: "eleven_v3",
@@ -646,6 +647,8 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
   });
   const [gptSovitsRuntimeStatus, setGptSovitsRuntimeStatus] = useState<GptSovitsRuntimeStatus>({ ready: false });
   const [gptSovitsRuntimeBusy, setGptSovitsRuntimeBusy] = useState<"start" | "stop" | null>(null);
+  const [installingGptSovitsRuntime, setInstallingGptSovitsRuntime] = useState(false);
+  const [gptSovitsInstallProgress, setGptSovitsInstallProgress] = useState<{ phase: "scan" | "copy" | "done"; percent: number } | null>(null);
   const [installingLocalStt, setInstallingLocalStt] = useState(false);
   const [localSttProgress, setLocalSttProgress] = useState<{ phase: "runtime" | "model"; percent: number } | null>(null);
   const [recordingVoiceInput, setRecordingVoiceInput] = useState(false);
@@ -789,6 +792,11 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
   useEffect(() => {
     if (!bridge || viewMode !== "settings") return;
     return bridge.onGptSovitsProgress((progress) => setGptSovitsProgress(progress.percent));
+  }, [bridge, viewMode]);
+
+  useEffect(() => {
+    if (!bridge || viewMode !== "settings") return;
+    return bridge.onGptSovitsInstallProgress((progress) => setGptSovitsInstallProgress({ phase: progress.phase, percent: progress.percent }));
   }, [bridge, viewMode]);
 
   function clearTimer(timerRef: { current: number | null }) {
@@ -1710,16 +1718,23 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
     const card = bubbleCardRef.current;
     card.style.width = `${cardWidth}px`;
 
+    // Wait two frames: while a segment is being prepared the bubble may show a
+    // short placeholder, and the real text only renders after it becomes ready.
+    // Measuring too early sizes the window for the placeholder and truncates
+    // longer text, so re-measure once the actual content is laid out.
     const frame = window.requestAnimationFrame(() => {
-      const width = cardWidth + 24;
-      const height = Math.ceil(card.offsetHeight) + 28;
-      void bridge.updateBubbleWindowSize(width, height).then((layout) => {
-        if (layout?.placement) setBubblePlacement(layout.placement);
+      window.requestAnimationFrame(() => {
+        if (!card.isConnected) return;
+        const width = cardWidth + 24;
+        const height = Math.ceil(card.offsetHeight) + 28;
+        void bridge.updateBubbleWindowSize(width, height).then((layout) => {
+          if (layout?.placement) setBubblePlacement(layout.placement);
+        });
       });
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [bridge, bubbleSegmentText, bubbleVisible, lastReplyMeta, viewMode]);
+  }, [bridge, bubbleSegmentText, bubbleSegmentReady, bubbleVisible, lastReplyMeta, viewMode]);
 
   // ---- Auto mouth movement: thinking + speaking while text is streaming ----
   // Mouth movement is independent from the emotion mood, so expressions are not overwritten.
@@ -2286,6 +2301,31 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
       try { setGptSovitsRuntimeStatus(await bridge.getGptSovitsRuntimeStatus(configDraft.voice.gptSovitsBaseUrl)); } catch { }
     } finally {
       setGptSovitsRuntimeBusy(null);
+    }
+  }
+
+  async function handleInstallGptSovitsRuntime() {
+    if (!bridge || installingGptSovitsRuntime) return;
+    setInstallingGptSovitsRuntime(true);
+    setGptSovitsMessage("正在准备安装 GPT-SoVITS 运行环境…");
+    try {
+      const result = await bridge.installGptSovitsRuntime();
+      if (result.canceled) {
+        setGptSovitsMessage("已取消安装。");
+        return;
+      }
+      const nextConfig = { ...configDraft, voice: { ...configDraft.voice, gptSovitsRuntimeRoot: result.runtimeRoot ?? configDraft.voice.gptSovitsRuntimeRoot } };
+      setConfigDraft(nextConfig);
+      const updated = await bridge.saveConfig(nextConfig).catch(() => nextConfig);
+      setConfigDraft(updated);
+      setGptSovitsMessage(`GPT-SoVITS 运行环境已安装到 ${result.runtimeRoot}。可在上方“启动语音服务”验证。`);
+      // Refresh runtime status against the freshly installed runtime.
+      try { setGptSovitsRuntimeStatus(await bridge.getGptSovitsRuntimeStatus(updated.voice.gptSovitsBaseUrl)); } catch { }
+    } catch (error) {
+      setGptSovitsMessage(`安装失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setInstallingGptSovitsRuntime(false);
+      setGptSovitsInstallProgress(null);
     }
   }
 
@@ -2993,6 +3033,9 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
         importingGptSovits={importingGptSovits}
         handleImportGptSovitsProfile={handleImportGptSovitsProfile}
         gptSovitsMessage={gptSovitsMessage}
+        installingGptSovitsRuntime={installingGptSovitsRuntime}
+        gptSovitsInstallProgress={gptSovitsInstallProgress}
+        handleInstallGptSovitsRuntime={handleInstallGptSovitsRuntime}
         elevenLabsModelPresets={elevenLabsModelPresets}
         availableVoiceOptions={availableVoiceOptions}
         setVoiceConnectionState={setVoiceConnectionState}

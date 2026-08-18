@@ -207,7 +207,7 @@ function serviceOptions(baseDir, trustedIpc, overrides = {}) {
   };
 }
 
-test("service owns 17 handles and one listener with idempotent disposal", async (t) => {
+test("service owns 18 handles and one listener with idempotent disposal", async (t) => {
   const baseDir = await temporaryBase(t);
   const handlers = new Map();
   const removed = [];
@@ -221,7 +221,7 @@ test("service owns 17 handles and one listener with idempotent disposal", async 
     }
   };
   const service = registerSpeechServiceIpc(serviceOptions(baseDir, trustedIpc));
-  assert.equal(SPEECH_HANDLE_CHANNELS.length, 17);
+  assert.equal(SPEECH_HANDLE_CHANNELS.length, 18);
   assert.deepEqual([...handlers.keys()], [...SPEECH_HANDLE_CHANNELS]);
 
   const localTtsFolder = await handlers.get("agent:open-local-tts-folder")({});
@@ -309,7 +309,7 @@ test("registration failure rolls back handles registered earlier", async (t) => 
   assert.deepEqual(removed, [...registered].reverse());
 });
 
-test("listener registration failure rolls back all 17 handles", async (t) => {
+test("listener registration failure rolls back all 18 handles", async (t) => {
   const baseDir = await temporaryBase(t);
   const registered = [];
   const removed = [];
@@ -515,4 +515,51 @@ test("speech service composes with trusted registrar and normalizes trusted sign
   service.dispose();
   assert.equal(handlers.size, 0);
   assert.equal(listeners.size, 0);
+});
+
+test("install-gpt-sovits-runtime picks a directory, copies the blueprint, and persists the root", async (t) => {
+  const baseDir = await temporaryBase(t);
+  const handlers = new Map();
+  let installedSource;
+  let installOptions;
+  let saved;
+  const options = serviceOptions(baseDir, {
+    handle: (channel, handler) => handlers.set(channel, handler),
+    removeHandler: () => {},
+    on: () => () => {}
+  }, {
+    showOpenDialog: async () => ({ canceled: false, filePaths: ["D:/Runtimes"] }),
+    getGptSovitsSourceRoot: () => "D:/Blueprint",
+    saveConfig: async (_base, config) => { saved = config; },
+    broadcastGptSovitsInstallProgress: () => {}
+  });
+  options.dependencies.installGptSovitsRuntime = async (targetRoot, opts) => {
+    installedSource = targetRoot;
+    installOptions = opts;
+    opts.onProgress?.({ percent: 100, copiedMb: 10, totalMb: 10 });
+    return targetRoot;
+  };
+  registerSpeechServiceIpc(options);
+  const result = await handlers.get("agent:install-gpt-sovits-runtime")({}, {});
+  assert.deepEqual(result, { canceled: false, runtimeRoot: "D:/Runtimes" });
+  assert.equal(installedSource, "D:/Runtimes");
+  assert.equal(installOptions.sourceRoot, "D:/Blueprint");
+  assert.equal(saved.voice.gptSovitsRuntimeRoot, "D:/Runtimes");
+});
+
+test("install-gpt-sovits-runtime returns canceled when the dialog is dismissed", async (t) => {
+  const baseDir = await temporaryBase(t);
+  const handlers = new Map();
+  const options = serviceOptions(baseDir, {
+    handle: (channel, handler) => handlers.set(channel, handler),
+    removeHandler: () => {},
+    on: () => () => {}
+  }, {
+    showOpenDialog: async () => ({ canceled: true, filePaths: [] })
+  });
+  let called = false;
+  options.dependencies.installGptSovitsRuntime = async () => { called = true; };
+  registerSpeechServiceIpc(options);
+  assert.deepEqual(await handlers.get("agent:install-gpt-sovits-runtime")({}, {}), { canceled: true });
+  assert.equal(called, false);
 });

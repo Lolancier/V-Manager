@@ -673,8 +673,25 @@ const speechService = registerSpeechServiceIpc({
   trustedIpc,
   getBaseDir: () => app.getPath("userData"),
   getCurrentConfig: () => currentAgentConfig,
+  getGptSovitsSourceRoot: () => app.getAppPath(),
+  getGptSovitsRuntimeRoot: () => currentAgentConfig.voice?.gptSovitsRuntimeRoot,
+  getGptSovitsRuntimeCandidates: () => {
+    const candidates = [];
+    const appPath = app.getAppPath();
+    if (currentAgentConfig.voice?.gptSovitsRuntimeRoot) candidates.push(currentAgentConfig.voice.gptSovitsRuntimeRoot);
+    const envRoot = process.env.V_MANAGER_PROJECT_ROOT;
+    if (envRoot) candidates.push(envRoot);
+    // In dev, app.getAppPath() is the project root itself; in a packaged build it
+    // points inside app.asar, which can never contain the runtime, so skip it.
+    if (appPath && !appPath.includes("app.asar")) candidates.push(appPath);
+    // The folder that typically holds a project checkout / the runtime root.
+    const parent = appPath ? path.dirname(appPath) : null;
+    if (parent && !parent.includes("app.asar")) candidates.push(parent);
+    return candidates;
+  },
   loadConfig,
   mergeConfig: mergeRuntimeConfig,
+  saveConfig,
   showOpenDialog: (options) => dialog.showOpenDialog(settingsWindow ?? undefined, options),
   openPath: (target) => shell.openPath(target),
   fetch: (url, options) => net.fetch(url, options),
@@ -682,6 +699,7 @@ const speechService = registerSpeechServiceIpc({
   broadcastSttProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:local-stt-progress", progress),
   broadcastLocalTtsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:local-tts-progress", progress),
   broadcastGptSovitsProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow, composerWindow], "agent:gpt-sovits-progress", progress),
+  broadcastGptSovitsInstallProgress: (progress) => broadcastToWindows([settingsWindow, chatWindow], "agent:gpt-sovits-install-progress", progress),
   runBackgroundTask: (type, payload, runOptions) => utilityTaskSupervisor.run(type, payload, runOptions)
 });
 const live2dModelService = createLive2DModelService({

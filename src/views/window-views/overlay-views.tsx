@@ -145,7 +145,7 @@ export function BubbleWindowView(props: {
                 <button type="button" onClick={closeBubble}>等你完成</button>
               </div>
             </div>
-          ) : <p>{bubbleSegmentReady ? (bubbleSegmentText || "...") : "正在准备语音…"}</p>}
+          ) : <p>{bubbleSegmentReady ? (bubbleSegmentText || "...") : "正在准备…"}</p>}
         </article>
       ) : null}
     </div>
