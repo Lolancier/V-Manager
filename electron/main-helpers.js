@@ -5,7 +5,11 @@ export function mergeAgentConfig(nextConfig = {}, { defaultConfig, normalizeInte
   return {
     ...defaultConfig,
     ...supportedConfig,
-    deepseek: { ...defaultConfig.deepseek, ...(nextConfig.deepseek ?? {}) },
+    deepseek: {
+      ...defaultConfig.deepseek,
+      ...(nextConfig.deepseek ?? {}),
+      providers: { ...(defaultConfig.deepseek?.providers ?? {}), ...(nextConfig.deepseek?.providers ?? {}) }
+    },
     embedding: { ...defaultConfig.embedding, ...(nextConfig.embedding ?? {}) },
     astrbot: {
       ...defaultConfig.astrbot,

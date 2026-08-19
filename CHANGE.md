@@ -1,6 +1,21 @@
 # V-Manager 版本变更
 
-当前版本：**0.10.1**（2026-08-17）
+当前版本：**0.11.0**（2026-08-19）
+
+本版本重构大语言模型配置：从"DeepSeek 官方 + 每模型一个中转开关"升级为"官方 + 多个可保存的第三方提供方注册表"，每个模型显式选择当前配置，并提供逐提供方连通性测试，界面对齐 Harness 风格。
+
+主要变化：
+
+- **模型配置数据模型**：新增 `deepseek.providers`（保存的第三方提供方注册表，含 `id/name/apiKey/baseUrl/model/api`）；每个模型通过 `chatProvider`（日常对话 Flash）/ `proProvider`（复杂任务 Pro）**独立选择当前来源**（`official` 或某个第三方 id）。后端统一在 `deepseek-endpoint.js` 的 `resolveDeepSeekEndpoint` 解析，所有模型调用点集中走它。
+- **官方/自定义显式切换**：设置页模型区顶部新增**常驻的"当前配置"面板**，每个模型一个下拉可选「DeepSeek 官方」或任意已保存第三方，右侧实时显示当前来源；切回官方一步完成，不再藏在编辑卡里。
+- **多第三方注册表**：可创建多个自定义提供方并保存为独立卡片（名称 + API 地址 + API 密钥 + API 协议 + 模型名 + 获取可用模型），每张可编辑 / 测试连通性 / 删除，并可在任意模型来源间切换复用；带"使用中"徽标，当前配置一目了然。
+- **逐提供方连通性测试**：新增 `testDeepSeekRelayConnection` + IPC `agent:test-deepseek-relay` + 桥接 `testDeepSeekRelay()`，每个提供方行有"测试连通性"按钮，实时内联结果。
+- **兼容迁移**：旧的 `modelRelay` / `chatModelRelay` 启用项在 `normalizeDeepSeekSection` 自动转为注册表条目并设为对应模型的当前来源，旧配置无需手动修改。
+- 全量测试 **309 项通过**，架构审计 0 critical / 0 warnings，Vite 生产构建通过。
+
+---
+
+### 0.10.1（2026-08-17）
 
 本版本修复 GPT-SoVITS 语音模块在安装/打包环境下的启动失败，并新增"以本机已跑通环境为蓝本、一键安装到自选目录"的链路。
 

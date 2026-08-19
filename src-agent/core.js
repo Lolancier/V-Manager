@@ -28,6 +28,7 @@ import {
   recordRelationshipInteraction
 } from "./relationship-engine.js";
 import { DEFAULT_INTEREST_CONFIG, normalizeInterestConfig } from "./interest-sandbox.js";
+import { resolveDeepSeekEndpoint, withResolvedDeepSeek } from "./deepseek-endpoint.js";
 import { deriveConversationStyle } from "./conversation-style.js";
 import { estimateMessageTokens, estimateTokens, trimKnowledgeToTokenBudget, truncateToTokenBudget } from "./token-budget.js";
 import {
@@ -52,7 +53,10 @@ export const defaultConfig = {
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
     model: "deepseek-v4-pro",
-    chatModel: "deepseek-v4-flash"
+    chatModel: "deepseek-v4-flash",
+    providers: {},
+    chatProvider: "official",
+    proProvider: "official"
   },
   embedding: {
     apiKey: "",
@@ -173,18 +177,64 @@ export function normalizeMemoryConfig(raw = {}) {
   };
 }
 
+/**
+ * Normalize the DeepSeek config section to the registry model:
+ * `providers` (named custom providers) + per-role selection `chatProvider` /
+ * `proProvider` ("official" or a provider id). Migrates the legacy single
+ * `modelRelay` / `chatModelRelay` fields into registry entries when enabled.
+ */
+function normalizeDeepSeekSection(rawDeepSeek = {}) {
+  const base = defaultConfig.deepseek;
+  const model = normalizeDeepSeekModel(rawDeepSeek.model, base.model);
+  const chatModel = normalizeDeepSeekModel(rawDeepSeek.chatModel, base.chatModel);
+  const rawProviders = rawDeepSeek.providers && typeof rawDeepSeek.providers === "object"
+    ? rawDeepSeek.providers
+    : {};
+  const providers = { ...rawProviders };
+
+  const migrate = (relayKey, providerKey, kindModel, label) => {
+    const relay = rawDeepSeek[relayKey];
+    let selected = typeof rawDeepSeek[providerKey] === "string" && rawDeepSeek[providerKey] !== ""
+      ? rawDeepSeek[providerKey]
+      : "";
+    if (relay && relay.enabled) {
+      const id = `${relayKey === "modelRelay" ? "custom_pro" : "custom_chat"}`;
+      if (selected === "" && !providers[id]) {
+        providers[id] = {
+          id,
+          name: label,
+          apiKey: relay.apiKey || "",
+          baseUrl: relay.baseUrl || "",
+          model: relay.model || kindModel,
+          api: relay.api || "openai-completions"
+        };
+      }
+      if (selected === "") selected = id;
+    }
+    return selected || "official";
+  };
+
+  const merged = {
+    ...base,
+    ...rawDeepSeek,
+    model,
+    chatModel,
+    providers,
+    chatProvider: migrate("chatModelRelay", "chatProvider", chatModel, "自定义（日常对话 Flash）"),
+    proProvider: migrate("modelRelay", "proProvider", model, "自定义（复杂任务 Pro）")
+  };
+  delete merged.modelRelay;
+  delete merged.chatModelRelay;
+  return merged;
+}
+
 function mergeConfig(rawConfig = {}) {
   const { calendar: _removedCalendar, ...supportedConfig } = rawConfig;
   const rawDeepSeek = rawConfig.deepseek ?? {};
   return {
     ...defaultConfig,
     ...supportedConfig,
-    deepseek: {
-      ...defaultConfig.deepseek,
-      ...rawDeepSeek,
-      model: normalizeDeepSeekModel(rawDeepSeek.model, defaultConfig.deepseek.model),
-      chatModel: normalizeDeepSeekModel(rawDeepSeek.chatModel, defaultConfig.deepseek.chatModel)
-    },
+    deepseek: normalizeDeepSeekSection(rawDeepSeek),
     embedding: {
       ...defaultConfig.embedding,
       ...(rawConfig.embedding ?? {})
@@ -562,9 +612,10 @@ async function requestDeepSeek(config, messages, onUsage, fetchImpl = fetch, sig
 
 export async function generateAsmrScript(baseDir, { mode = "custom", prompt = "" } = {}, fetchImpl = fetch) {
   const config = await loadConfig(baseDir);
-  if (!config.deepseek.apiKey) throw new Error("请先配置 DeepSeek API Key。");
+  const resolved = withResolvedDeepSeek(config, "model");
+  if (!resolved.deepseek.apiKey) throw new Error("请先配置 DeepSeek API Key。");
   const scene = mode === "sleep" ? "温柔哄睡" : mode === "casual" ? "放松休闲谈话" : "用户指定主题";
-  const content = await requestDeepSeek(config, [
+  const content = await requestDeepSeek(resolved, [
     {
       role: "system",
       content: [
@@ -727,59 +778,179 @@ export async function requestDeepSeekStream(config, messages, onDelta, allowRetr
 export async function testDeepSeekConnection(baseDir, fetchImpl = fetch, signal) {
   const config = await loadConfig(baseDir);
 
-  if (!config.deepseek.apiKey) {
-    return {
-      ok: false,
-      message: "还没有配置 DeepSeek API Key。",
-      config
-    };
+  const roles = [
+    { kind: "chat", label: "日常对话(flash)" },
+    { kind: "model", label: "复杂任务(pro)" }
+  ];
+  const results = [];
+  for (const role of roles) {
+    const ep = resolveDeepSeekEndpoint(config, role.kind);
+    if (!ep.apiKey) {
+      results.push({ ok: false, label: role.label, message: "未配置 API Key" });
+      continue;
+    }
+    const endpoint = `${ep.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    try {
+      const response = await fetchImpl(endpoint, {
+        method: "POST",
+        signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ep.apiKey}`
+        },
+        body: JSON.stringify({
+          model: ep.model,
+          messages: [
+            {
+              role: "user",
+              content: "reply with ok"
+            }
+          ],
+          max_tokens: 8,
+          temperature: 0
+        })
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        results.push({ ok: false, label: role.label, message: `${ep.relay ? "中转站" : "官方"} ${response.status} ${errorText}` });
+        continue;
+      }
+      const data = await response.json();
+      results.push({
+        ok: true,
+        label: role.label,
+        message: `模型返回：${data.choices?.[0]?.message?.content ?? "空内容"}`
+      });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      results.push({ ok: false, label: role.label, message: `异常：${error.message}` });
+    }
   }
 
-  const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const anyOk = results.some((item) => item.ok);
+  const message = results
+    .map((item) => `${item.label}${item.ok ? " ✓" : " ✗"}：${item.message}`)
+    .join("\n");
+  return { ok: anyOk, message, results, config };
+}
 
+/**
+ * Fetch the list of models exposed by a relay (中转站) endpoint via the
+ * OpenAI-compatible `GET {baseUrl}/models` interface. Used by the settings UI
+ * to auto-populate the per-model relay model name.
+ *
+ * @param {{ baseUrl?: string, apiKey?: string }} relay
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ ok: boolean, models: Array<{ id: string, label: string }>, message: string }>}
+ */
+export async function listDeepSeekModels(relay = {}, fetchImpl = fetch, signal) {
+  const baseUrl = String(relay.baseUrl || "").trim().replace(/\/+$/, "");
+  const apiKey = String(relay.apiKey || "").trim();
+  if (!baseUrl) return { ok: false, models: [], message: "请先填写中转站 Base URL。中转站地址一般形如 https://你的域名/v1" };
+  if (!apiKey) return { ok: false, models: [], message: "请先填写中转站 API Key，中转站需要用该 Key 鉴权才能拉取模型列表。" };
+
+  const combinedSignal = typeof AbortSignal.any === "function"
+    ? AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+    : signal;
+
+  // Try a few common OpenAI-compatible paths. `/v1/models` is the most common;
+  // also try plain `/models` and (if the user pasted a full baseUrl) avoid
+  // duplicating `/v1`.
+  const candidates = [];
+  const normalized = baseUrl;
+  if (/\/v1$/.test(normalized)) {
+    candidates.push(`${normalized}/models`, `${normalized.replace(/\/v1$/, "")}/v1/models`, `${normalized.replace(/\/v1$/, "")}/models`);
+  } else {
+    candidates.push(`${normalized}/models`, `${normalized}/v1/models`);
+  }
+
+  let lastErrorText = "";
+  for (const endpoint of candidates) {
+    let response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: "GET",
+        signal: combinedSignal,
+        headers: { Authorization: `Bearer ${apiKey}` }
+      });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      lastErrorText = error.message;
+      continue;
+    }
+    if (!response.ok) {
+      lastErrorText = `${response.status} ${(await response.text().catch(() => "")).slice(0, 240)}`;
+      continue;
+    }
+    const payload = await response.json().catch(() => null);
+    const rows = Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.models)
+        ? payload.models
+        : Array.isArray(payload) ? payload : [];
+    const models = rows
+      .map((item) => {
+        const id = String(item?.id || item?.name || "").trim();
+        return { id, label: String(item?.id || item?.name || "").trim() };
+      })
+      .filter((item) => item.id);
+    if (models.length) return { ok: true, models, message: `已获取 ${models.length} 个模型，来自 ${endpoint}` };
+    return { ok: false, models: [], message: "中转站响应了但返回的模型列表为空（没有可识别的模型 id）。" };
+  }
+
+  return {
+    ok: false,
+    models: [],
+    message: lastErrorText
+      ? `获取模型列表失败：${lastErrorText}。如果中转站地址需要带路径，请确认 Base URL 以 /v1 结尾。`
+      : "无法连接中转站，请检查 Base URL 与网络。"
+  };
+}
+
+/**
+ * Test connectivity to a specific relay (custom) endpoint, including the
+ * optional model name. Used by the settings page's per-provider "测试连通性".
+ *
+ * @param {{ baseUrl?: string, apiKey?: string, model?: string }} relay
+ * @param {typeof fetch} [fetchImpl]
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<{ ok: boolean, message: string }>}
+ */
+export async function testDeepSeekRelayConnection(relay = {}, fetchImpl = fetch, signal) {
+  const baseUrl = String(relay.baseUrl || "").trim().replace(/\/+$/, "");
+  const apiKey = String(relay.apiKey || "").trim();
+  if (!baseUrl) return { ok: false, message: "请先填写 API 地址。" };
+  if (!apiKey) return { ok: false, message: "请先填写 API 密钥。" };
+  const endpoint = `${baseUrl}/chat/completions`;
+  const model = String(relay.model || "").trim() || "deepseek-v3";
+  const combinedSignal = typeof AbortSignal.any === "function"
+    ? AbortSignal.any([signal, AbortSignal.timeout(12_000)])
+    : signal;
   try {
     const response = await fetchImpl(endpoint, {
       method: "POST",
-      signal,
+      signal: combinedSignal,
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${config.deepseek.apiKey}`
+        Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: config.deepseek.model,
-        messages: [
-          {
-            role: "user",
-            content: "reply with ok"
-          }
-        ],
+        model,
+        messages: [{ role: "user", content: "reply with ok" }],
         max_tokens: 8,
         temperature: 0
       })
     });
-
     if (!response.ok) {
-      const errorText = await response.text();
-      return {
-        ok: false,
-        message: `DeepSeek 连通性测试失败：${response.status} ${errorText}`,
-        config
-      };
+      const errorText = await response.text().catch(() => "");
+      return { ok: false, message: `连接失败：${response.status} ${errorText.slice(0, 200)}` };
     }
-
-    const data = await response.json();
-    return {
-      ok: true,
-      message: `DeepSeek 连通成功，模型返回：${data.choices?.[0]?.message?.content ?? "空内容"}`,
-      config
-    };
+    const payload = await response.json().catch(() => null);
+    const content = String(payload?.choices?.[0]?.message?.content ?? "").trim().slice(0, 60);
+    return { ok: true, message: content ? `连接成功，模型返回：${content}` : "连接成功（模型未返回内容）。" };
   } catch (error) {
     if (signal?.aborted) throw signal.reason || error;
-    return {
-      ok: false,
-      message: `DeepSeek 连通性测试异常：${error.message}`,
-      config
-    };
+    return { ok: false, message: `连接异常：${error.message}` };
   }
 }
 
@@ -1211,7 +1382,11 @@ export async function buildAgentReply(baseDir, payload) {
     ? await recordRelationshipInteraction(baseDir, payload.message)
     : await loadRelationshipProfile(baseDir);
   const history = await loadHistory(baseDir);
-  const normalizedHistory = config.deepseek.apiKey
+  const hasAnyModelKey = Boolean(
+    resolveDeepSeekEndpoint(config, "chat").apiKey
+    || resolveDeepSeekEndpoint(config, "model").apiKey
+  );
+  const normalizedHistory = hasAnyModelKey
     ? history.filter((item) => !isStaleLocalModeReply(item.assistant))
     : history;
   const personaHistory = filterHistoryForPersona(normalizedHistory, activePersonaCard);
@@ -1346,7 +1521,7 @@ export async function buildAgentReply(baseDir, payload) {
     knowledgeCount: knowledge.length,
     knowledgeFiles: knowledge.map((item) => item.file),
     fallbackReason,
-    model: config.deepseek.model,
+    model: resolveDeepSeekEndpoint(responseConfig, "model").model,
     route: route.type,
     ragMode: ragResult.meta.ragMode,
     embeddingProvider: ragResult.meta.embeddingProvider,
@@ -1360,14 +1535,11 @@ export async function buildAgentReply(baseDir, payload) {
   // AFTER this point belong to the current conversation round.
   const historySplitIndex = messages.length;
 
-  if (config.deepseek.apiKey && route.type === "chat") {
-    const fastConfig = {
-      ...responseConfig,
-      deepseek: {
-        ...responseConfig.deepseek,
-        model: config.deepseek.chatModel || "deepseek-v4-flash"
-      }
-    };
+  const chatResolvedConfig = withResolvedDeepSeek(responseConfig, "chat");
+  const modelResolvedConfig = withResolvedDeepSeek(responseConfig, "model");
+
+  if (chatResolvedConfig.deepseek.apiKey && route.type === "chat") {
+    const fastConfig = chatResolvedConfig;
     try {
       reply = payload.stream
         ? await requestDeepSeekStream(fastConfig, messages, payload.onDelta, true, captureUsage, payload.fetchImpl, payload.signal)
@@ -1390,10 +1562,10 @@ export async function buildAgentReply(baseDir, payload) {
       reply = `${buildFallbackReplyV2(config, payload.message, knowledge, { hasApiKey: true })}\n\n模型调用报错：${error.message}`;
       meta = { ...meta, fallbackReason };
     }
-  } else if (config.deepseek.apiKey) {
+  } else if (modelResolvedConfig.deepseek.apiKey) {
     try {
       // Function calling loop: up to 5 rounds of tool calls
-      let response = await callDeepSeekWithTools(responseConfig, messages, routeTools, captureUsage, payload.fetchImpl, payload.signal);
+      let response = await callDeepSeekWithTools(modelResolvedConfig, messages, routeTools, captureUsage, payload.fetchImpl, payload.signal);
       let round = 0;
       const maxRounds = codeContext?.mode === "agent" ? 12 : 6;
 

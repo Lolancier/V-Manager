@@ -1,4 +1,5 @@
 import { normalizePersonaPayload } from "./persona-cards.js";
+import { resolveDeepSeekEndpoint } from "./deepseek-endpoint.js";
 
 const MAX_SOURCES = 6;
 
@@ -136,14 +137,16 @@ export async function generatePersonaCardDraft(config, input = {}, fetchImpl = f
     expectedName ? `用户明确指定的角色名是“${expectedName}”。identityName 必须是“${expectedName}”，不得替换成小灵、Vivi、九条真白或其他角色。` : "角色名应忠实于用户描述；只有用户没有点名时才可以创作新名字。",
     `联网参考：\n${reference}`
   ].join("\n\n");
-  const endpoint = `${String(config.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
+  const ep = resolveDeepSeekEndpoint(config, "model");
+  if (!ep.apiKey) throw new Error("请先配置 DeepSeek API Key。");
+  const endpoint = `${String(ep.baseUrl).replace(/\/$/, "")}/chat/completions`;
   let lastFailure = "";
   for (const maxTokens of [8_000, 16_000]) {
     const response = await fetchImpl(endpoint, {
       method: "POST",
-      headers: { authorization: `Bearer ${config.deepseek.apiKey}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${ep.apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({
-        model: config.deepseek.model || config.deepseek.chatModel,
+        model: ep.model,
         temperature: 0.45,
         max_tokens: maxTokens,
         response_format: { type: "json_object" },

@@ -106,6 +106,8 @@ type SettingsWindowRootProps = {
   lastReplyMeta: RuntimeReplyMeta | null;
   handleTestConnection: () => Promise<void>;
   testingConnection: boolean;
+  fetchRelayModels: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; models: Array<{ id: string; label: string }>; message: string }>;
+  testRelayConnection: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; message: string }>;
   handleClearMemory: () => Promise<void>;
   clearingMemory: boolean;
   connectionMessage: string;
@@ -319,6 +321,8 @@ export function SettingsWindowRoot(props: SettingsWindowRootProps) {
     lastReplyMeta,
     handleTestConnection,
     testingConnection,
+    fetchRelayModels,
+    testRelayConnection,
     handleClearMemory,
     clearingMemory,
     connectionMessage,
@@ -539,6 +543,8 @@ export function SettingsWindowRoot(props: SettingsWindowRootProps) {
             saving={saving}
             handleTestConnection={handleTestConnection}
             testingConnection={testingConnection}
+            fetchRelayModels={fetchRelayModels}
+            testRelayConnection={testRelayConnection}
             handleClearMemory={handleClearMemory}
             clearingMemory={clearingMemory}
             saveMessage={saveMessage}

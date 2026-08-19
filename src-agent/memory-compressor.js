@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getAgentPaths } from "./runtime-paths.js";
+import { resolveDeepSeekEndpoint } from "./deepseek-endpoint.js";
 
 const COMPRESSION_PROMPT = `你是一个对话记忆整理器。请从以下对话片段中提取关键信息，按下面的 Markdown 格式输出。
 
@@ -31,15 +32,16 @@ function buildCompressionMessages(oldMessages) {
 }
 
 async function callDeepSeekForCompression(config, messages) {
-  const endpoint = `${config.deepseek.baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const ep = resolveDeepSeekEndpoint(config, "model");
+  const endpoint = `${ep.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.deepseek.apiKey}`
+      Authorization: `Bearer ${ep.apiKey}`
     },
     body: JSON.stringify({
-      model: config.deepseek.model,
+      model: ep.model,
       messages,
       temperature: 0.3,
       max_tokens: 1500

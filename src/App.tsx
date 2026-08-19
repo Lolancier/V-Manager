@@ -64,7 +64,10 @@ const previewConfig: AgentConfig = {
     apiKey: "",
     baseUrl: "https://api.deepseek.com/v1",
     model: "deepseek-v4-pro",
-    chatModel: "deepseek-v4-flash"
+    chatModel: "deepseek-v4-flash",
+    providers: {},
+    chatProvider: "official",
+    proProvider: "official"
   },
   embedding: {
     apiKey: "",
@@ -1920,6 +1923,24 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
     }
   }
 
+  const handleFetchRelayModels = async (relay: DeepSeekRelayConfig) => {
+    if (!bridge) return { ok: false, models: [], message: "当前仍在预览模式，无法获取中转站模型列表。" };
+    try {
+      return await bridge.listDeepSeekModels(relay);
+    } catch (error) {
+      return { ok: false, models: [], message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
+  const handleTestRelay = async (relay: DeepSeekRelayConfig) => {
+    if (!bridge) return { ok: false, message: "当前仍在预览模式，无法测试连通性。" };
+    try {
+      return await bridge.testDeepSeekRelay(relay);
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
   async function handleRefreshRagStatus() {
     if (!bridge) return;
     setLoadingRagStatus(true);
@@ -2985,6 +3006,8 @@ function RuntimeApp({ viewMode }: RuntimeAppProps) {
         lastReplyMeta={lastReplyMeta}
         handleTestConnection={handleTestConnection}
         testingConnection={testingConnection}
+        fetchRelayModels={handleFetchRelayModels}
+        testRelayConnection={handleTestRelay}
         handleClearMemory={handleClearMemory}
         clearingMemory={clearingMemory}
         connectionMessage={connectionMessage}

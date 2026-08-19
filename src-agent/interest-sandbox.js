@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { resolveDeepSeekEndpoint } from "./deepseek-endpoint.js";
 
 export const DEFAULT_INTEREST_CONFIG = Object.freeze({
   enabled: false,
@@ -660,7 +661,8 @@ function completionText(choice) {
 }
 
 async function generateWithModel(type, context, agentConfig, timeoutMinutes, fetchImpl, signal) {
-  if (!agentConfig.deepseek?.apiKey) throw new Error("需要先配置 DeepSeek，才能生成兴趣作品。");
+  const guardKind = type === "diary" ? "chat" : "model";
+  if (!resolveDeepSeekEndpoint(agentConfig, guardKind).apiKey) throw new Error("需要先配置 DeepSeek，才能生成兴趣作品。");
   const schemas = {
     diary: '{"title":"标题","mood":"今天的心情","content":"第一人称日记正文（Markdown）"}',
     drawing: '{"title":"标题","description":"创作想法","svg":"完整 SVG，禁止脚本、外链、事件属性和 foreignObject"}',
@@ -676,10 +678,10 @@ async function generateWithModel(type, context, agentConfig, timeoutMinutes, fet
     `格式严格为：${schemas[type]}`,
     `今天可用的只读上下文：${JSON.stringify(context).slice(0, 14000)}`
   ].join("\n");
-  const url = `${String(agentConfig.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
-  const model = type === "diary"
-    ? (agentConfig.deepseek.chatModel || agentConfig.deepseek.model)
-    : (agentConfig.deepseek.model || agentConfig.deepseek.chatModel);
+  const kind = type === "diary" ? "chat" : "model";
+  const ep = resolveDeepSeekEndpoint(agentConfig, kind);
+  const url = `${String(ep.baseUrl).replace(/\/$/, "")}/chat/completions`;
+  const model = ep.model;
   let totalTokens = 0;
   let previousFailure = "";
   for (const maxTokens of [12_000, 24_000]) {
@@ -689,7 +691,7 @@ async function generateWithModel(type, context, agentConfig, timeoutMinutes, fet
     const response = await fetchImpl(url, {
       method: "POST",
       signal,
-      headers: { authorization: `Bearer ${agentConfig.deepseek.apiKey}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${ep.apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({
         model,
         temperature: 0.85,
@@ -725,7 +727,7 @@ async function generateAutonomousLifeNote(type, context, agentConfig, fetchImpl,
   if (type === "rest") {
     return { title: "安静休息了一会儿", summary: "暂时放空，没有调用模型，也没有消耗 Token。", content: "我把手边的事放下了一会儿，只是安静待着。没有读取新的内容，也没有生成作品。", tokens: 0 };
   }
-  if (!agentConfig.deepseek?.apiKey) throw new Error("需要先配置 DeepSeek，才能进行这项自主生活活动。");
+  if (!resolveDeepSeekEndpoint(agentConfig, "chat").apiKey) throw new Error("需要先配置 DeepSeek，才能进行这项自主生活活动。");
   const instructions = {
     collect_diary_materials: "从只读上下文提取可供今晚日记使用的真实素材、情绪线索和仍不确定的内容，不要写成已经发生的虚构事件。",
     browse_information: "整理被授权读取的天气和资讯标题，说明哪些内容可能值得之后继续关注；没有资讯时如实说明。",
@@ -734,12 +736,13 @@ async function generateAutonomousLifeNote(type, context, agentConfig, fetchImpl,
     plan_creation: "制定下一次日记、绘画或小游戏创作的简短计划，包含主题、动机和可执行步骤。",
     prepare_chat_topics: "准备三到五个以后可以自然和主人聊的话题或关心问题；这是草稿，不要声称已经向主人说过。"
   };
-  const endpoint = `${String(agentConfig.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
+  const ep = resolveDeepSeekEndpoint(agentConfig, "chat");
+  const endpoint = `${String(ep.baseUrl).replace(/\/$/, "")}/chat/completions`;
   const response = await fetchImpl(endpoint, {
     method: "POST", signal,
-    headers: { authorization: `Bearer ${agentConfig.deepseek.apiKey}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${ep.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: agentConfig.deepseek.chatModel || agentConfig.deepseek.model,
+      model: ep.model,
       temperature: 0.7, max_tokens: 1400, response_format: { type: "json_object" },
       messages: [
         { role: "system", content: `${agentConfig.personaPrompt || `你是 ${agentConfig.personaName || "Vivi"}。`}\n你在自己的隔离沙盒里进行轻量虚拟生活。只返回 JSON：{"title":"标题","summary":"一句摘要","content":"Markdown 记录"}。不得编造事实或声称执行了未发生的操作。` },
@@ -1007,13 +1010,14 @@ export async function repairInterestGame(baseDir, agentConfig, activity, playtes
     `试玩反馈：${JSON.stringify(feedback).slice(0, 8000)}`,
     `原始源码：${JSON.stringify(original).slice(0, 90_000)}`
   ].join("\n\n");
-  const endpoint = `${String(agentConfig.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
+  const ep = resolveDeepSeekEndpoint(agentConfig, "model");
+  const endpoint = `${String(ep.baseUrl).replace(/\/$/, "")}/chat/completions`;
   const response = await (options.modelFetch ?? fetchWithTimeout)(endpoint, {
     method: "POST",
     signal: options.signal,
-    headers: { authorization: `Bearer ${agentConfig.deepseek.apiKey}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${ep.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: agentConfig.deepseek.model || agentConfig.deepseek.chatModel,
+      model: ep.model,
       temperature: 0.35,
       max_tokens: 20_000,
       response_format: { type: "json_object" },
@@ -1035,7 +1039,7 @@ export async function reviseInterestGame(baseDir, agentConfig, activity, instruc
   if (!activity || activity.type !== "mini_game" || !activity.artifactPath) throw new Error("没有找到需要修改的小游戏。");
   const request = String(instruction || "").trim().slice(0, 3000);
   if (!request) throw new Error("请说明想怎样修改这个小游戏。");
-  if (!agentConfig.deepseek?.apiKey) throw new Error("需要先配置 DeepSeek，才能修改小游戏。");
+  if (!resolveDeepSeekEndpoint(agentConfig, "model").apiKey) throw new Error("需要先配置 DeepSeek，才能修改小游戏。");
   const paths = await ensureSandbox(baseDir);
   assertInside(paths.root, activity.artifactPath);
   const sourcePath = activity.sourcePath || path.join(path.dirname(activity.artifactPath), "source.json");
@@ -1053,13 +1057,14 @@ export async function reviseInterestGame(baseDir, agentConfig, activity, instruc
     `用户修改要求：${request}`,
     `原始源码：${JSON.stringify(original).slice(0, 90_000)}`
   ].join("\n\n");
-  const endpoint = `${String(agentConfig.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
+  const ep = resolveDeepSeekEndpoint(agentConfig, "model");
+  const endpoint = `${String(ep.baseUrl).replace(/\/$/, "")}/chat/completions`;
   const response = await (options.modelFetch ?? fetchWithTimeout)(endpoint, {
     method: "POST",
     signal: options.signal,
-    headers: { authorization: `Bearer ${agentConfig.deepseek.apiKey}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${ep.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: agentConfig.deepseek.model || agentConfig.deepseek.chatModel,
+      model: ep.model,
       temperature: 0.45,
       max_tokens: 20_000,
       response_format: { type: "json_object" },
@@ -1094,15 +1099,16 @@ export async function generatePlaytestReflection(agentConfig, activity, playtest
   const fallback = playtest.ok
     ? `我自己试玩了《${activity.title}》${playtest.highestScore != null ? `，最高拿到 ${playtest.highestScore} 分` : ""}。操作能够正常响应，之后还想再调整一下节奏。`
     : `我试着玩了《${activity.title}》，但它还没有顺利运行起来。我记录下了错误，准备继续修好它。`;
-  if (!agentConfig.deepseek?.apiKey) return { reflection: fallback, tokens: 0 };
+  const reflectionEp = resolveDeepSeekEndpoint(agentConfig, "chat");
+  if (!reflectionEp.apiKey) return { reflection: fallback, tokens: 0 };
   try {
-    const endpoint = `${String(agentConfig.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
+    const endpoint = `${String(reflectionEp.baseUrl).replace(/\/$/, "")}/chat/completions`;
     const response = await (options.modelFetch ?? fetchWithTimeout)(endpoint, {
       method: "POST",
       signal: options.signal,
-      headers: { authorization: `Bearer ${agentConfig.deepseek.apiKey}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${reflectionEp.apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({
-        model: agentConfig.deepseek.chatModel || agentConfig.deepseek.model,
+        model: reflectionEp.model,
         temperature: 0.7,
         max_tokens: 800,
         messages: [{ role: "system", content: `你是 ${activity.personaName || agentConfig.personaName || "Vivi"}。用第一人称写 2–3 句自然、简短的小游戏试玩感想，不虚构试玩数据。` }, { role: "user", content: JSON.stringify({ title: activity.title, outcome: playtest.outcome, score: playtest.highestScore, actions: playtest.actions, state: playtest.state, errors: playtest.errors }) }]

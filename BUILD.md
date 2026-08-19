@@ -16,7 +16,7 @@ npm run dist
 
 ```
 D:\V-Manager-builds\win-unpacked\V-Manager.exe      # 免安装版
-D:\V-Manager-builds\V-Manager Setup 0.10.1.exe      # 安装包
+D:\V-Manager-builds\V-Manager Setup 0.11.0.exe      # 安装包
 ```
 
 ## 三个构建命令的区别
@@ -29,22 +29,22 @@ D:\V-Manager-builds\V-Manager Setup 0.10.1.exe      # 安装包
 
 ## 发布新版本
 
-例如从 `0.10.0` 更新到 `0.10.1`：
+例如从 `0.10.1` 更新到 `0.11.0`：
 
 ```bash
-npm version 0.10.1 --no-git-tag-version
+npm version 0.11.0 --no-git-tag-version
 npm test
 npm run dist
 ```
 
-`npm version` 会同步更新 `package.json` 和 `package-lock.json`，安装包名称也会自动变为 `V-Manager Setup 0.10.1.exe`。
+`npm version` 会同步更新 `package.json` 和 `package-lock.json`，安装包名称也会自动变为 `V-Manager Setup 0.11.0.exe`。
 
 ## 建议的完整发布顺序
 
 ```bash
 cd D:\V-Manager
 npm install
-npm version 0.10.1 --no-git-tag-version
+npm version 0.11.0 --no-git-tag-version
 npm test
 npm run dist
 ```

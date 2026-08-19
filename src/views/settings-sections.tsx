@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { AlertCircle, CheckCircle2, LoaderCircle } from "lucide-react";
 import type {
@@ -86,6 +87,8 @@ type IntelligenceSettingsSectionsProps = {
   saving: boolean;
   handleTestConnection: () => Promise<void>;
   testingConnection: boolean;
+  fetchRelayModels: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; models: Array<{ id: string; label: string }>; message: string }>;
+  testRelayConnection: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; message: string }>;
   handleClearMemory: () => Promise<void>;
   clearingMemory: boolean;
   saveMessage: string;
@@ -528,6 +531,379 @@ export function PersonaSettingsSection(props: PersonaSettingsSectionProps) {
   );
 }
 
+type ModelsProvidersSectionProps = {
+  configDraft: AgentConfig;
+  setConfigDraft: SetConfigDraft;
+  fetchRelayModels: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; models: Array<{ id: string; label: string }>; message: string }>;
+  testRelayConnection: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; message: string }>;
+  selectedModelPreset: string;
+  handleModelPresetChange: (nextValue: string) => void;
+  deepSeekModelPresets: readonly DeepSeekModelPreset[];
+};
+
+type RelayKind = "flash" | "pro";
+type EditTarget = "deepseek" | "new" | string | null;
+
+const DEFAULT_RELAY: DeepSeekRelayConfig = { apiKey: "", baseUrl: "", model: "", api: "openai-completions" };
+
+/**
+ * DSH-style Models section, on a registry of saved custom providers.
+ * - "DeepSeek" is the built-in official provider.
+ * - `deepseek.providers` holds any number of named custom providers the user
+ *   saves; each can be edited, tested, deleted, and assigned to either model
+ *   role.
+ * - Each model role (日常对话 Flash / 复杂任务 Pro) explicitly chooses its
+ *   source via `chatProvider` / `proProvider`: one of "official" or a custom
+ *   provider id. The "当前使用" badge makes the active choice unambiguous.
+ *
+ * All edits write to the global config draft and are committed by the
+ * existing "保存设置" button.
+ */
+function ModelsProvidersSection(props: ModelsProvidersSectionProps) {
+  const { configDraft, setConfigDraft, fetchRelayModels, testRelayConnection } = props;
+  const providers = configDraft.deepseek.providers ?? {};
+  const providerList = Object.values(providers);
+  const [editing, setEditing] = useState<EditTarget>(null);
+  const [adding, setAdding] = useState(false);
+  // A brand-new provider being drafted before save (id, name, apiKey, baseUrl, model).
+  const [draft, setDraft] = useState<DeepSeekCustomProvider | undefined>(undefined);
+  const [testing, setTesting] = useState<"deepseek" | string | null>(null);
+  const [testResult, setTestResult] = useState<{ target: string; ok: boolean; message: string } | undefined>(undefined);
+  const [fetchingFor, setFetchingFor] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<Array<{ id: string; label: string }>>([]);
+  const [pickerFor, setPickerFor] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | undefined>(undefined);
+
+  const activeFor = (kind: RelayKind): string =>
+    (kind === "flash" ? configDraft.deepseek.chatProvider : configDraft.deepseek.proProvider) || "official";
+
+  const sourceLabel = (id: string): string => {
+    if (id === "official") return "DeepSeek 官方";
+    return providers[id]?.name || "自定义";
+  };
+
+  function newProviderId(): string {
+    let id = "";
+    do {
+      id = `custom_${Math.random().toString(36).slice(2, 8)}`;
+    } while (providers[id]);
+    return id;
+  }
+
+  function upsertProvider(provider: DeepSeekCustomProvider) {
+    setConfigDraft({
+      ...configDraft,
+      deepseek: { ...configDraft.deepseek, providers: { ...providers, [provider.id]: provider } }
+    });
+  }
+
+  function patchProvider(id: string, patch: Partial<DeepSeekCustomProvider>) {
+    const current = providers[id];
+    if (!current) return;
+    upsertProvider({ ...current, ...patch });
+  }
+
+  function removeProvider(id: string) {
+    const next = { ...providers };
+    delete next[id];
+    setConfigDraft({
+      ...configDraft,
+      deepseek: {
+        ...configDraft.deepseek,
+        providers: next,
+        chatProvider: activeFor("flash") === id ? "official" : configDraft.deepseek.chatProvider,
+        proProvider: activeFor("pro") === id ? "official" : configDraft.deepseek.proProvider
+      }
+    });
+    if (editing === id) setEditing(null);
+  }
+
+  function setSource(kind: RelayKind, id: string) {
+    const key = kind === "flash" ? "chatProvider" : "proProvider";
+    setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, [key]: id } });
+  }
+
+  function field(value: string, placeholder: string, onChange: (value: string) => void, password = false) {
+    return <input className="model-input" type={password ? "password" : "text"} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />;
+  }
+
+  async function handleTest(target: "deepseek" | string) {
+    let relay: DeepSeekRelayConfig;
+    if (target === "deepseek") {
+      relay = { ...DEFAULT_RELAY, apiKey: configDraft.deepseek.apiKey, baseUrl: configDraft.deepseek.baseUrl, model: configDraft.deepseek.model };
+    } else {
+      const provider = providers[target];
+      relay = { ...DEFAULT_RELAY, apiKey: provider?.apiKey || "", baseUrl: provider?.baseUrl || "", model: provider?.model || "" };
+    }
+    setTesting(target);
+    setTestResult(undefined);
+    try {
+      const result = await testRelayConnection(relay);
+      setTestResult({ target, ok: result.ok, message: result.message });
+    } finally {
+      setTesting(null);
+    }
+  }
+
+  async function handleFetch(providerId: string) {
+    const provider = providers[providerId];
+    setFetchingFor(providerId);
+    setFailure(undefined);
+    try {
+      const result = await fetchRelayModels({ ...DEFAULT_RELAY, apiKey: provider?.apiKey || "", baseUrl: provider?.baseUrl || "", model: provider?.model || "", enabled: true });
+      if (!result.ok) { setFailure(result.message); return; }
+      setCandidates(result.models);
+      setPickerFor(providerId);
+    } finally {
+      setFetchingFor(null);
+    }
+  }
+
+  function testLine(target: string) {
+    if (testResult && testResult.target === target) {
+      return <p className={"models-test-result" + (testResult.ok ? " is-ok" : " is-error")}>{testResult.message}</p>;
+    }
+    return null;
+  }
+
+  function providerFields(provider: DeepSeekCustomProvider, onChange: (patch: Partial<DeepSeekCustomProvider>) => void, onFetch: () => void, busy: boolean) {
+    return (
+      <>
+        <div className="model-field">
+          <span className="model-field-label">名称</span>
+          {field(provider.name, "例如：我的中转站", (value) => onChange({ name: value }))}
+        </div>
+        <div className="model-field">
+          <span className="model-field-label">API 地址</span>
+          {field(provider.baseUrl, "https://中转站地址/v1", (value) => onChange({ baseUrl: value }))}
+        </div>
+        <div className="model-field">
+          <span className="model-field-label">API 密钥</span>
+          {field(provider.apiKey, "sk-...", (value) => onChange({ apiKey: value }), true)}
+        </div>
+        <div className="model-field">
+          <span className="model-field-label">API 协议</span>
+          <select className="model-input" value={provider.api || "openai-completions"} onChange={(event) => onChange({ api: event.target.value })}>
+            <option value="openai-completions">OpenAI Chat Completions（OpenAI 兼容）</option>
+          </select>
+        </div>
+        <div className="model-catalog">
+          <div className="model-catalog-head">
+            <span className="model-catalog-title">模型目录</span>
+            <button type="button" className="model-link-btn" disabled={busy || !provider.baseUrl} title={provider.baseUrl ? undefined : "请先填写 API 地址，再获取"} onClick={onFetch}>
+              {busy ? "正在询问提供方…" : "获取可用模型"}
+            </button>
+          </div>
+          <div className="model-entry">
+            <label className="model-row-label">模型名</label>
+            {field(provider.model, "留空则沿用官方模型名", (value) => onChange({ model: value }))}
+          </div>
+          {!provider.baseUrl ? <p className="models-hint">请先填写上方 API 地址，再获取可用模型。</p> : null}
+          {failure ? <p className="models-error">{failure}</p> : null}
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div className="models-section">
+      <p className="models-title">模型</p>
+      <p className="models-intro">填入各提供方的 API 密钥即可使用其模型。</p>
+
+      {/* 常驻：每个模型当前使用哪个配置 */}
+      <div className="models-current">
+        <div className="models-current-title">当前配置 · 每个模型使用哪个提供方</div>
+        <div className="models-current-row">
+          <span className="models-current-label">日常对话（Flash）</span>
+          <select className="model-input model-route-select" value={activeFor("flash")} onChange={(event) => setSource("flash", event.target.value)}>
+            <option value="official">DeepSeek 官方</option>
+            {providerList.map((provider) => <option key={provider.id} value={provider.id}>{provider.name || "自定义"}</option>)}
+          </select>
+          <span className="model-active-note">当前：{sourceLabel(activeFor("flash"))}</span>
+          {activeFor("flash") === "official" ? <span className="model-route-badge badge-official">官方</span> : <span className="model-route-badge badge-custom">自定义</span>}
+        </div>
+        <div className="models-current-row">
+          <span className="models-current-label">复杂任务（Pro）</span>
+          <select className="model-input model-route-select" value={activeFor("pro")} onChange={(event) => setSource("pro", event.target.value)}>
+            <option value="official">DeepSeek 官方</option>
+            {providerList.map((provider) => <option key={provider.id} value={provider.id}>{provider.name || "自定义"}</option>)}
+          </select>
+          <span className="model-active-note">当前：{sourceLabel(activeFor("pro"))}</span>
+          {activeFor("pro") === "official" ? <span className="model-route-badge badge-official">官方</span> : <span className="model-route-badge badge-custom">自定义</span>}
+        </div>
+      </div>
+
+      {/* ---- DeepSeek official provider ---- */}
+      <div className="provider-row">
+        <div className="provider-row-head">
+          <span className="provider-row-identity">
+            <span className="provider-row-name">DeepSeek</span>
+            <span className="model-tag is-official">官方</span>
+            <span className="model-usage">
+              {[["flash", "日常对话"], ["pro", "复杂任务"]].map(([kind, label]) =>
+                activeFor(kind as RelayKind) === "official"
+                  ? <span key={kind as string} className="model-usage-chip">{`${label} · 使用中`}</span>
+                  : null
+              )}
+            </span>
+            <span className={"credential-dot" + (configDraft.deepseek.apiKey ? " is-configured" : " is-missing")} role="img" aria-label={configDraft.deepseek.apiKey ? "API 密钥已配置" : "API 密钥缺失"} title={configDraft.deepseek.apiKey ? "API 密钥已配置" : "API 密钥缺失"} />
+          </span>
+          <span className="provider-row-actions">
+            <button type="button" className="model-btn" onClick={() => void handleTest("deepseek")} disabled={testing !== null}>
+              {testing === "deepseek" ? "测试中…" : "测试连通性"}
+            </button>
+            <button type="button" className="model-btn" onClick={() => setEditing(editing === "deepseek" ? null : "deepseek")}>
+              {editing === "deepseek" ? "收起" : "编辑"}
+            </button>
+          </span>
+        </div>
+        {testLine("deepseek")}
+        {editing === "deepseek" ? (
+          <div className="provider-editor">
+            <div className="model-field">
+              <span className="model-field-label">API 密钥</span>
+              {field(configDraft.deepseek.apiKey, "输入 API 密钥", (value) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, apiKey: value } }), true)}
+            </div>
+            <div className="model-field">
+              <span className="model-field-label">API 地址</span>
+              {field(configDraft.deepseek.baseUrl, "https://api.deepseek.com/v1", (value) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, baseUrl: value } }))}
+            </div>
+            <div className="model-catalog">
+              <div className="model-catalog-title">DeepSeek 官方模型名称</div>
+              <div className="model-entry">
+                <label className="model-row-label">日常对话（Flash）</label>
+                {field(configDraft.deepseek.chatModel, "deepseek-v4-flash", (value) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, chatModel: value } }))}
+              </div>
+              <div className="model-entry">
+                <label className="model-row-label">复杂任务（Pro）</label>
+                <select className="model-input" value={props.selectedModelPreset} onChange={(event) => props.handleModelPresetChange(event.target.value)}>
+                  {props.deepSeekModelPresets.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                  <option value="custom">自定义模型 ID</option>
+                </select>
+                {props.selectedModelPreset === "custom" ? (
+                  field(configDraft.deepseek.model, "deepseek-v4-pro", (value) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, model: value } }))
+                ) : configDraft.deepseek.model ? (
+                  <div className="model-inline-value">{configDraft.deepseek.model}</div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      {/* ---- Saved custom providers ---- */}
+      {providerList.map((provider) => (
+        <div key={provider.id} className="provider-row">
+          <div className="provider-row-head">
+            <span className="provider-row-identity">
+              <span className="provider-row-name">{provider.name || "未命名"}</span>
+              <span className="model-tag">自定义</span>
+              {activeFor("flash") === provider.id ? <span className="model-tag is-active">日常对话 · 使用中</span> : null}
+              {activeFor("pro") === provider.id ? <span className="model-tag is-active">复杂任务 · 使用中</span> : null}
+              <span className={"credential-dot" + (provider.apiKey ? " is-configured" : " is-missing")} role="img" aria-label={provider.apiKey ? "API 密钥已配置" : "API 密钥缺失"} title={provider.apiKey ? "API 密钥已配置" : "API 密钥缺失"} />
+            </span>
+            <span className="provider-row-actions">
+              <button type="button" className="model-btn" onClick={() => void handleTest(provider.id)} disabled={testing !== null}>
+                {testing === provider.id ? "测试中…" : "测试连通性"}
+              </button>
+              <button type="button" className="model-btn" onClick={() => setEditing(editing === provider.id ? null : provider.id)}>
+                {editing === provider.id ? "收起" : "编辑"}
+              </button>
+              <button type="button" className="model-btn model-btn-danger" onClick={() => removeProvider(provider.id)}>
+                删除
+              </button>
+            </span>
+          </div>
+          {testLine(provider.id)}
+          {editing === provider.id ? (
+            <div className="provider-editor">
+              {providerFields(provider, (patch) => patchProvider(provider.id, patch), () => void handleFetch(provider.id), fetchingFor === provider.id)}
+            </div>
+          ) : null}
+        </div>
+      ))}
+
+      {/* ---- Add a new custom provider ---- */}
+      <div className="models-add-block">
+        {editing === "new" ? (
+          <div className="models-add-card">
+            <div className="model-field">
+              <span className="model-field-label">新建自定义提供方</span>
+              {providerFields(
+                draft ?? { id: newProviderId(), name: "", apiKey: "", baseUrl: "", model: "", api: "openai-completions" },
+                (patch) => setDraft((current) => ({ ...(current ?? { id: newProviderId(), name: "", apiKey: "", baseUrl: "", model: "", api: "openai-completions" }), ...patch })),
+                () => {
+                  const d = draft ?? { id: newProviderId(), name: "", apiKey: "", baseUrl: "", model: "", api: "openai-completions" };
+                  setDraft(d);
+                  void (async () => {
+                    setFetchingFor("new");
+                    setFailure(undefined);
+                    const result = await fetchRelayModels({ ...DEFAULT_RELAY, apiKey: d.apiKey, baseUrl: d.baseUrl, model: d.model, enabled: true });
+                    setFetchingFor(null);
+                    if (!result.ok) { setFailure(result.message); return; }
+                    setCandidates(result.models);
+                    setPickerFor(d.id);
+                  })();
+                },
+                fetchingFor === "new"
+              )}
+            </div>
+            <div className="models-add-actions">
+              <button type="button" className="model-btn" disabled={!(draft?.baseUrl && draft?.name)} onClick={() => {
+                if (draft) { upsertProvider(draft); setEditing(null); setDraft(undefined); setAdding(false); }
+              }}>
+                保存提供方
+              </button>
+              <button type="button" className="model-link-btn" onClick={() => { setEditing(null); setDraft(undefined); setAdding(false); }}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="models-add-button" onClick={() => { setEditing("new"); setAdding(true); setDraft(undefined); }}>
+            <span className="models-add-glyph">+</span>
+            添加自定义提供方
+          </button>
+        )}
+      </div>
+
+      {/* ---- Model picker modal ---- */}
+      {pickerFor !== null ? (
+        <div className="relay-modal-overlay" role="dialog" aria-modal="true" aria-label="选择要添加的模型" onClick={() => setPickerFor(null)}>
+          <div className="relay-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="relay-modal-title">选择要添加的模型</div>
+            <p className="relay-modal-hint">以下是模型提供方的可用模型，点击一个即可填入该提供方的模型名。</p>
+            {candidates.length === 0
+              ? <p className="models-error">该提供方没有列出任何模型，请手动添加。</p>
+              : (
+                <ul className="relay-candidate-list">
+                  {candidates.map((candidate) => (
+                    <li key={candidate.id}>
+                      <button className="relay-candidate" type="button" onClick={() => {
+                        if (pickerFor === "new") {
+                          setDraft((current) => ({ ...(current ?? { id: newProviderId(), name: "", apiKey: "", baseUrl: "", model: "", api: "openai-completions" }), model: candidate.id }));
+                        } else {
+                          patchProvider(pickerFor, { model: candidate.id });
+                        }
+                        setPickerFor(null);
+                      }}>
+                        <span className="relay-candidate-id">{candidate.id}</span>
+                        <span className="relay-candidate-apply">选择</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            <div className="relay-modal-footer">
+              <button className="model-btn" type="button" onClick={() => setPickerFor(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function IntelligenceSettingsSections(props: IntelligenceSettingsSectionsProps) {
   const {
     configDraft,
@@ -550,6 +926,8 @@ export function IntelligenceSettingsSections(props: IntelligenceSettingsSections
     saving,
     handleTestConnection,
     testingConnection,
+    fetchRelayModels,
+    testRelayConnection,
     handleClearMemory,
     clearingMemory,
     saveMessage,
@@ -571,31 +949,15 @@ export function IntelligenceSettingsSections(props: IntelligenceSettingsSections
               : bootstrap.startupDiagnostics?.rag?.rebuilt ? " RAG 已自动更新" : " RAG 索引已是最新"}
           </small>
         </div>
-        <label>
-          DeepSeek API Key
-          <input type="password" value={configDraft.deepseek.apiKey} onChange={(event) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, apiKey: event.target.value } })} />
-        </label>
-        <label>
-          Base URL
-          <input value={configDraft.deepseek.baseUrl} onChange={(event) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, baseUrl: event.target.value } })} />
-        </label>
-        <label>
-          复杂任务模型预设
-          <select value={selectedModelPreset} onChange={(event) => handleModelPresetChange(event.target.value)}>
-            {deepSeekModelPresets.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            <option value="custom">自定义模型 ID</option>
-          </select>
-        </label>
-        <p className="knowledge-hint">{selectedModelPreset === "custom" ? "当前使用自定义模型 ID。" : deepSeekModelPresets.find((item) => item.value === selectedModelPreset)?.hint}</p>
-        <label>
-          复杂任务模型名
-          <input value={configDraft.deepseek.model} onChange={(event) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, model: event.target.value } })} />
-        </label>
-        <label>
-          日常对话模型
-          <input value={configDraft.deepseek.chatModel} placeholder="deepseek-v4-flash" onChange={(event) => setConfigDraft({ ...configDraft, deepseek: { ...configDraft.deepseek, chatModel: event.target.value } })} />
-        </label>
-        <p className="knowledge-hint">日常对话使用独立快速模型单次流式返回；电脑操作与代码任务使用复杂任务模型和对应工具。</p>
+        <ModelsProvidersSection
+          configDraft={configDraft}
+          setConfigDraft={setConfigDraft}
+          fetchRelayModels={fetchRelayModels}
+          testRelayConnection={testRelayConnection}
+          selectedModelPreset={selectedModelPreset}
+          handleModelPresetChange={handleModelPresetChange}
+          deepSeekModelPresets={deepSeekModelPresets}
+        />
         <section className="panel-block" style={{ borderTop: "1px solid var(--border-color, #e0e0e0)", paddingTop: "0.75rem", marginTop: "0.5rem" }}>
           <p className="eyebrow">Embedding 配置（RAG 向量检索）</p>
           {!configDraft.embedding?.apiKey ? <p className="knowledge-hint">配置后可启用向量相似度检索，替代关键词匹配。推荐使用硅基流动（SiliconFlow）免费 Embedding API。</p> : null}

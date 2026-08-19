@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld("agentDesktop", {
   undoFileOperation: (operationId) => ipcRenderer.invoke("agent:undo-file-operation", operationId),
   openExternal: (url) => ipcRenderer.invoke("agent:open-external", url),
   testDeepSeek: () => ipcRenderer.invoke("agent:test-deepseek"),
+  testDeepSeekRelay: (relay) => ipcRenderer.invoke("agent:test-deepseek-relay", relay),
+  listDeepSeekModels: (relay) => ipcRenderer.invoke("agent:list-deepseek-models", relay),
   testAstrBot: (astrbotConfig) => ipcRenderer.invoke("agent:test-astrbot", astrbotConfig),
   clearMemory: () => ipcRenderer.invoke("agent:clear-memory"),
   showPetContextMenu: () => ipcRenderer.send("agent:show-pet-context-menu"),

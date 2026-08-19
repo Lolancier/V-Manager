@@ -16,6 +16,23 @@ interface AgentKnowledge {
   content: string;
 }
 
+interface DeepSeekRelayConfig {
+  enabled?: boolean;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  api: string;
+}
+
+interface DeepSeekCustomProvider {
+  id: string;
+  name: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  api: string;
+}
+
 interface AgentConfig {
   appName: string;
   personaName: string;
@@ -26,6 +43,9 @@ interface AgentConfig {
     baseUrl: string;
     model: string;
     chatModel: string;
+    providers?: Record<string, DeepSeekCustomProvider>;
+    chatProvider?: string;
+    proProvider?: string;
   };
   embedding: {
     apiKey: string;
@@ -632,6 +652,8 @@ interface Window {
     undoFileOperation: (operationId?: string) => Promise<FileOperation>;
     openExternal: (url: string) => Promise<boolean>;
     testDeepSeek: () => Promise<{ ok: boolean; message: string; config: AgentConfig }>;
+    testDeepSeekRelay: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; message: string }>;
+    listDeepSeekModels: (relay: DeepSeekRelayConfig) => Promise<{ ok: boolean; models: Array<{ id: string; label: string }>; message: string }>;
     testAstrBot: (config?: AgentConfig["astrbot"]) => Promise<{ ok: boolean; message: string; bots: unknown[] }>;
     clearMemory: () => Promise<boolean>;
     showPetContextMenu: () => void;

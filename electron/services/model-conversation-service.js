@@ -1,13 +1,18 @@
 import {
   buildAgentReply,
-  testDeepSeekConnection
+  listDeepSeekModels,
+  testDeepSeekConnection,
+  testDeepSeekRelayConnection
 } from "../../src-agent/core.js";
+import { resolveDeepSeekEndpoint } from "../../src-agent/deepseek-endpoint.js";
 import { generatePersonaCardDraft } from "../../src-agent/persona-generator.js";
 import { generateStartupGreeting } from "../../src-agent/startup-greeting.js";
 
 export const MODEL_CONVERSATION_HANDLE_CHANNELS = Object.freeze([
   "agent:chat",
   "agent:test-deepseek",
+  "agent:test-deepseek-relay",
+  "agent:list-deepseek-models",
   "agent:generate-persona-card-draft"
 ]);
 
@@ -21,6 +26,8 @@ export function createModelConversationService(options) {
   const dependencies = {
     buildAgentReply,
     testDeepSeekConnection,
+    testDeepSeekRelayConnection,
+    listDeepSeekModels,
     generatePersonaCardDraft,
     generateStartupGreeting,
     ...(options.dependencies || {})
@@ -77,28 +84,37 @@ export function createModelConversationService(options) {
     return runTask((signal) => dependencies.testDeepSeekConnection(options.getBaseDir(), options.fetch, signal));
   }
 
+  function listModels(relay) {
+    return runTask((signal) => dependencies.listDeepSeekModels(relay, options.fetch, signal));
+  }
+
+  function testRelay(relay) {
+    return runTask((signal) => dependencies.testDeepSeekRelayConnection(relay, options.fetch, signal));
+  }
+
   function caughtInterestReply(activity, configSnapshot = options.getConfig()) {
     return runTask(async (signal) => {
       const title = activity?.title ? `《${activity.title}》` : "这个小游戏";
       const fallback = activity?.type === "mini_game"
         ? `诶……你什么时候过来的？我刚玩到${title}这里，差一点就想装作什么都没发生了。你要看我继续，还是先把位置让给你？`
         : `诶，你回来啦。我刚才在${activity?.label || options.interestStatusLabel(activity?.type)}，本来还想等整理好以后再悄悄给你看的。`;
-      if (!configSnapshot.deepseek?.apiKey) return fallback;
+      const chatEp = resolveDeepSeekEndpoint(configSnapshot, "chat");
+      if (!chatEp.apiKey) return fallback;
       const timeout = AbortSignal.timeout(6_000);
       const combinedSignal = typeof AbortSignal.any === "function"
         ? AbortSignal.any([signal, timeout])
         : timeout;
       try {
-        const endpoint = `${String(configSnapshot.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`;
+        const endpoint = `${String(chatEp.baseUrl).replace(/\/$/, "")}/chat/completions`;
         const response = await options.fetch(endpoint, {
           method: "POST",
           signal: combinedSignal,
           headers: {
-            authorization: `Bearer ${configSnapshot.deepseek.apiKey}`,
+            authorization: `Bearer ${chatEp.apiKey}`,
             "content-type": "application/json"
           },
           body: JSON.stringify({
-            model: configSnapshot.deepseek.chatModel || configSnapshot.deepseek.model,
+            model: chatEp.model,
             temperature: 0.9,
             max_tokens: 260,
             messages: [
@@ -140,6 +156,8 @@ export function createModelConversationService(options) {
     try {
       register("agent:chat", (_event, payload) => chatHandler(payload));
       register("agent:test-deepseek", () => testConnection());
+      register("agent:test-deepseek-relay", (_event, relay) => testRelay(relay));
+      register("agent:list-deepseek-models", (_event, relay) => listModels(relay));
       register("agent:generate-persona-card-draft", (_event, input) => generatePersonaDraft(input));
     } catch (error) {
       for (const channel of registeredChannels) options.trustedIpc.removeHandler(channel);
@@ -172,10 +190,12 @@ export function createModelConversationService(options) {
     generateGreeting,
     generatePersonaDraft,
     generateReply,
+    listModels,
     registerIpc,
     snapshot: () => ({ accepting, active: activeTasks.size, channels: [...registeredChannels] }),
     stop,
-    testConnection
+    testConnection,
+    testRelay
   };
   return service;
 }

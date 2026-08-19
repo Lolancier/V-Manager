@@ -1,3 +1,5 @@
+import { resolveDeepSeekEndpoint } from "./deepseek-endpoint.js";
+
 function completionText(choice) {
   return String(choice?.message?.content || choice?.text || "").trim();
 }
@@ -30,7 +32,8 @@ export function fallbackStartupGreeting(config, context = {}, now = new Date()) 
 export async function generateStartupGreeting(config, context = {}, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   const fallback = fallbackStartupGreeting(config, context, now);
-  if (!config.deepseek?.apiKey) return { reply: fallback, mode: "local" };
+  const ep = resolveDeepSeekEndpoint(config, "chat");
+  if (!ep.apiKey) return { reply: fallback, mode: "local" };
   const fetchImpl = options.modelFetch || fetch;
   const recentHistory = (context.history || []).slice(-10).map((item) => `${item.role === "user" ? "用户" : "角色"}：${item.content}`).join("\n");
   const memory = context.memory || {};
@@ -44,12 +47,12 @@ export async function generateStartupGreeting(config, context = {}, options = {}
     `近期对话：\n${recentHistory || "暂无"}`
   ].join("\n\n");
   try {
-    const response = await fetchImpl(`${String(config.deepseek.baseUrl).replace(/\/$/, "")}/chat/completions`, {
+    const response = await fetchImpl(`${String(ep.baseUrl).replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       signal: options.signal || AbortSignal.timeout(12_000),
-      headers: { authorization: `Bearer ${config.deepseek.apiKey}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${ep.apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({
-        model: config.deepseek.chatModel || config.deepseek.model,
+        model: ep.model,
         temperature: 1.05,
         max_tokens: 180,
         messages: [{ role: "system", content: prompt }, { role: "user", content: "自然地和我见面。" }]
