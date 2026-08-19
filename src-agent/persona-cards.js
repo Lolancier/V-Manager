@@ -207,22 +207,12 @@ export function applyPersonaCardToConfig(config, card) {
   if (!card?.payload) return config;
   const payload = normalizePersonaPayload(card.payload);
   const normalizedCard = { ...card, payload };
-  const voicePackId = String(payload.voicePackId || "").trim();
-  const voice = { ...config.voice };
-  if (voicePackId) {
-    if (/^gpt[_-]?sovits:/i.test(voicePackId)) {
-      voice.provider = "gpt_sovits";
-      voice.gptSovitsProfileId = voicePackId.replace(/^gpt[_-]?sovits:/i, "").trim();
-    } else if (/^elevenlabs:/i.test(voicePackId)) {
-      voice.provider = "elevenlabs";
-      voice.voice = voicePackId.replace(/^elevenlabs:/i, "").trim();
-    } else {
-      const [packId, speakerId] = voicePackId.split(":");
-      voice.provider = "local";
-      voice.localPackId = packId.trim();
-      if (/^\d+$/.test(speakerId || "")) voice.localSpeakerId = Number(speakerId);
-    }
-  }
+  // Note: the persona card's voicePackId is intentionally NOT applied here.
+  // The voice (provider / profile / pack / speaker) is owned by the settings
+  // page: the manual choice there is authoritative and must not be silently
+  // overwritten every time a persona is applied (which previously flipped the
+  // user's selected GPT-SoVITS profile back to the card's bound voice on every
+  // save). tone/identity/expression below remain persona-controlled.
   return {
     ...config,
     personaName: payload.identityName || config.personaName,
@@ -231,7 +221,6 @@ export function applyPersonaCardToConfig(config, card) {
       ...config.appearance,
       live2dModel: payload.live2dModelId || config.appearance?.live2dModel
     },
-    voice,
     activePersonaCard: { id: card.id, version: card.version, name: card.name }
   };
 }

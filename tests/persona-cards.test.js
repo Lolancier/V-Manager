@@ -46,15 +46,16 @@ test("persona cards version, switch and archive without deleting history", async
   assert.equal(cards.find((card) => card.id === created.id)?.version, 2);
 });
 
-test("persona voice pack selects exactly one provider and voice", () => {
-  const base = { personaName: "Vivi", appearance: {}, voice: { provider: "gpt_sovits", gptSovitsProfileId: "old", localPackId: "old", localSpeakerId: 0 } };
-  const local = applyPersonaCardToConfig(base, { id: "a", version: 1, name: "A", payload: { identityName: "A", voicePackId: "sherpa-zh:2" } });
-  assert.equal(local.voice.provider, "local");
-  assert.equal(local.voice.localPackId, "sherpa-zh");
-  assert.equal(local.voice.localSpeakerId, 2);
-  const sovits = applyPersonaCardToConfig(base, { id: "b", version: 1, name: "B", payload: { identityName: "B", voicePackId: "gpt-sovits:shorekeeper" } });
-  assert.equal(sovits.voice.provider, "gpt_sovits");
-  assert.equal(sovits.voice.gptSovitsProfileId, "shorekeeper");
+test("persona card does not override the settings voice (settings is authoritative)", () => {
+  const base = { personaName: "Vivi", appearance: {}, voice: { provider: "gpt_sovits", gptSovitsProfileId: "dania-v2-pro-plus", localPackId: "sherpa-zh-ll", localSpeakerId: 0 } };
+  const gptCard = applyPersonaCardToConfig(base, { id: "a", version: 1, name: "A", payload: { identityName: "A", voicePackId: "gpt-sovits:shorekeeper-zh-v2-pro-plus" } });
+  assert.equal(gptCard.voice.provider, "gpt_sovits");
+  assert.equal(gptCard.voice.gptSovitsProfileId, "dania-v2-pro-plus");
+  const localCard = applyPersonaCardToConfig(base, { id: "b", version: 1, name: "B", payload: { identityName: "B", voicePackId: "sherpa-zh:2" } });
+  assert.equal(localCard.voice.provider, "gpt_sovits");
+  assert.equal(localCard.voice.gptSovitsProfileId, "dania-v2-pro-plus");
+  assert.equal(localCard.voice.localPackId, "sherpa-zh-ll");
+  assert.equal(localCard.voice.localSpeakerId, 0);
 });
 
 test("explicit chat commands can update the active persona while vague requests cannot", async (t) => {

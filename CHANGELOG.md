@@ -25,9 +25,16 @@
 
 - 修复桌宠气泡在 Electron 透明窗口上量宽过早导致长文本被截断的问题（延迟两帧再量），并去除透明窗上的毛玻璃方框/边框视觉残留。
 
+### 修复跟进（并入 0.10.1）
+
+- **设置页声线选择为主**：修复保存后声线被自动切回的问题。根因是激活人物卡里残留的 `voicePackId`（如绑定守岸人）在每次保存/回复时经 `applyPersonaCardToConfig` 覆盖设置里的选择；现在 `applyPersonaCardToConfig` 不再改动 voice，人物卡只影响身份/语气/表达/外观，语音（provider/声线/音色）统一以「语音与 ASMR」设置为准。
+- **清理残留数据**：已清除本机 3 张人物卡当前版本里残留的 `voicePackId`（含活跃的傲娇猫娘），避免旧绑定继续误导。
+- **运行目录自动向上识别**：GPT-SoVITS 运行目录现在既填项目根（`D:\V-Manager`）也可直接填 GPT-SoVITS 本体目录（`…\third_party\GPT-SoVITS`，含安装向导装出的独立目录），会自动向上定位含 `scripts/start-gpt-sovits.ps1` + `third_party/GPT-SoVITS/.conda/python.exe` 的可用运行根；提示文案同步更新。
+- 对应新增/更新测试：`resolveRuntimeRoot` 接受项目根、本体目录并向上识别、无效路径返回 null；人物卡不再覆盖设置声线。
+
 ### 门禁
 
-- 架构审计 **0 critical / 0 warnings**；全量测试 **306 项全部通过**（新增安装链路与 IPC 用例）；Vite 生产构建通过。
+- 架构审计 **0 critical / 0 warnings**；全量测试 **309 项全部通过**（新增安装链路与 IPC 用例、运行目录识别与声线优先级用例）；Vite 生产构建通过。
 
 ---
 

@@ -26,24 +26,30 @@ export async function isGptSovitsServiceReady(baseUrl, fetchImpl = fetch) {
   }
 }
 
-// Resolve the GPT-SoVITS runtime root by auto-discovery. Callers may supply a
-// list of candidate roots (e.g. the dev project root, a configured override, or
-// app.getAppPath()) plus an environment override. The first candidate that
-// actually contains a usable GPT-SoVITS runtime wins. When nothing is usable we
-// fall back to the module-adjacent project root (the dev checkout) so
-// development keeps working unchanged.
+// Resolve a usable GPT-SoVITS runtime root by auto-discovery. `roots` is an
+// ordered candidate list (e.g. the dev project root, a configured override, or
+// app.getAppPath()); the first candidate that contains a usable runtime wins.
 //
 // A usable runtime requires both the start script and the bundled conda python:
 //   <root>/scripts/start-gpt-sovits.ps1
 //   <root>/third_party/GPT-SoVITS/.conda/python.exe
-async function findRuntimeRoot(candidates) {
+//
+// Each candidate may be either a project root itself or any descendant such as
+// the GPT-SoVITS checkout folder (D:\V-Manager\third_party\GPT-SoVITS, or a
+// self-contained <target>/third_party/GPT-SoVITS): we walk up a few levels to
+// find the ancestor carrying scripts/ + third_party/GPT-SoVITS.
+export async function resolveRuntimeRoot(roots) {
   const seen = new Set();
-  const roots = [projectRoot, ...(Array.isArray(candidates) ? candidates : [])];
-  for (const root of roots) {
+  for (const root of roots ?? []) {
     const value = root && String(root).trim();
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    if (await isUsableRuntime(value)) return path.resolve(value);
+    if (!value) continue;
+    for (let current = path.resolve(value), depth = 0; depth <= 4; depth += 1, current = path.dirname(current)) {
+      if (seen.has(current)) break;
+      seen.add(current);
+      if (await isUsableRuntime(current)) return current;
+      const parent = path.dirname(current);
+      if (parent === current) break; // reached the drive root
+    }
   }
   return null;
 }
@@ -62,11 +68,12 @@ async function isUsableRuntime(root) {
 
 async function startWorkspaceRuntime(_endpoint, runtimeRoot, candidates) {
   if (process.platform !== "win32") throw new Error("当前自动启动脚本仅支持 Windows。");
-  const root = await findRuntimeRoot([runtimeRoot, ...(Array.isArray(candidates) ? candidates : [])]);
+  const root = await resolveRuntimeRoot([projectRoot, runtimeRoot, ...(Array.isArray(candidates) ? candidates : [])]);
   if (!root) {
     throw new Error(
       "没有找到已准备好的 GPT-SoVITS 本地运行环境。"
-      + "请先在“语音与 ASMR → GPT-SoVITS 角色声线”的 GPT-SoVITS 运行目录中填写含 third_party/GPT-SoVITS 的项目根目录，"
+      + "请在“语音与 ASMR → GPT-SoVITS 角色声线”的 GPT-SoVITS 运行目录中填写含 third_party/GPT-SoVITS 的项目根，"
+      + "或直接指向 GPT-SoVITS 本体目录（如 …\\third_party\\GPT-SoVITS），"
       + "或先在项目目录运行 npm run tts:gpt-sovits:start。"
     );
   }
@@ -77,7 +84,7 @@ async function startWorkspaceRuntime(_endpoint, runtimeRoot, candidates) {
     || !await fs.stat(runtimePython).then((stat) => stat.isFile()).catch(() => false)) {
     throw new Error(
       "没有找到已准备好的 GPT-SoVITS 本地运行环境。"
-      + "本机会先自动查找已安装的 GPT-SoVITS；如果确实没有，请在“语音与 ASMR → GPT-SoVITS 角色声线”的 GPT-SoVITS 运行目录中指向项目根，"
+      + "本机会先自动查找已安装的 GPT-SoVITS；如果确实没有，请在“语音与 ASMR → GPT-SoVITS 角色声线”的 GPT-SoVITS 运行目录中指向项目根或其 GPT-SoVITS 本体目录，"
       + "或先在项目目录运行 npm run tts:gpt-sovits:start。"
     );
   }

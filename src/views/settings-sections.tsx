@@ -827,7 +827,7 @@ export function VoiceSettingsSection(props: VoiceSettingsSectionProps) {
             {gptSovitsProfiles.length ? gptSovitsProfiles.map((profile: any) => <option value={profile.id} key={profile.id}>{profile.name} · {profile.version}</option>) : <option value="dania-v2-pro-plus">达妮娅 · v2ProPlus</option>}
           </select></label>
           <label>本机 API 地址<input value={configDraft.voice.gptSovitsBaseUrl} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsBaseUrl: event.target.value } })} placeholder="http://127.0.0.1:9880" /></label>
-          <label className="voice-config-wide">GPT-SoVITS 运行目录<input value={configDraft.voice.gptSovitsRuntimeRoot ?? ""} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsRuntimeRoot: event.target.value } })} placeholder="可选：留空会自动查找本机已装的 GPT-SoVITS" /></label>
+          <label className="voice-config-wide">GPT-SoVITS 运行目录<input value={configDraft.voice.gptSovitsRuntimeRoot ?? ""} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsRuntimeRoot: event.target.value } })} placeholder="可选：项目根或 GPT-SoVITS 本体目录，留空自动查找" /></label>
           <label className="voice-speed-control"><span>语速 <strong>{configDraft.voice.gptSovitsSpeed.toFixed(2)}x</strong></span><input type="range" min="0.7" max="1.3" step="0.05" value={configDraft.voice.gptSovitsSpeed} onChange={(event) => setConfigDraft({ ...configDraft, voice: { ...configDraft.voice, gptSovitsSpeed: Number(event.target.value) } })} /></label>
         </div>
         <label className="voice-switch gpt-runtime-autostart">

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ensureGptSovitsService, installGptSovitsRuntime, isGptSovitsServiceReady, stopGptSovitsService } from "../src-agent/gpt-sovits-runtime.js";
+import { ensureGptSovitsService, installGptSovitsRuntime, isGptSovitsServiceReady, resolveRuntimeRoot, stopGptSovitsService } from "../src-agent/gpt-sovits-runtime.js";
 
 async function temporaryRoot(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "v-manager-gpt-runtime-"));
@@ -85,4 +85,20 @@ test("installGptSovitsRuntime rejects a missing source blueprint", async (t) => 
   const target = await temporaryRoot(t);
   const source = await temporaryRoot(t); // empty, not usable
   await assert.rejects(installGptSovitsRuntime(target, { sourceRoot: source }), /缺少可复制的/);
+});
+
+test("resolveRuntimeRoot accepts the project root itself", async (t) => {
+  const source = await makeSourceRoot(t);
+  assert.equal(await resolveRuntimeRoot([source]), source);
+});
+
+test("resolveRuntimeRoot accepts the GPT-SoVITS folder and walks up to the project root", async (t) => {
+  const source = await makeSourceRoot(t);
+  const gptSovitsDir = path.join(source, "third_party", "GPT-SoVITS");
+  assert.equal(await resolveRuntimeRoot([gptSovitsDir]), source);
+});
+
+test("resolveRuntimeRoot returns null when no candidate contains a usable runtime", async (t) => {
+  const empty = await temporaryRoot(t);
+  assert.equal(await resolveRuntimeRoot([empty]), null);
 });
