@@ -2,18 +2,16 @@
 
 V-Manager 是一个面向 Windows 的本地桌面 Agent。它以 Live2D 角色作为交互载体，提供人物卡、多轮对话、本地记忆与 RAG、语音交互、桌面工具和隔离的自主生活空间。
 
-> 当前版本：**0.11.0**
+> 当前版本：**0.10.2**
 > 项目状态：个人本地开发版，功能仍在持续迭代。
 
-## 0.11.0 重点（多第三方模型提供方与官方/自定义切换）
+## 0.10.2 重点（修复主动陪伴引擎启动问题）
 
-- 大语言模型配置升级为 **"官方 + 多个可保存的第三方提供方"** 注册表模型：`deepseek.providers` 保存若干自定义提供方，每个模型（日常对话 Flash / 复杂任务 Pro）通过 `chatProvider` / `proProvider` **独立选择当前使用哪个配置**。
-- 设置页模型区顶部新增**常驻的"当前配置"面板**：每个模型一个下拉，可选「DeepSeek 官方」或任意已保存第三方，右侧实时显示当前来源，**切回官方**一步完成。
-- **添加自定义提供方**：可创建多个并保存为独立卡片（名称 + API 地址 + API 密钥 + API 协议 + 模型名 + 获取可用模型），每个可编辑 / 测试连通性 / 删除，并可在任意模型来源间切换复用。
-- 每张提供方卡片带"使用中"徽标，当前配置一目了然；设置界面整体对齐 Harness 的 Models 分区风格。
-- 新增**逐提供方连通性测试**（`测试连通性` 按钮，实时内联结果）。
-- 兼容迁移：旧的 `modelRelay` / `chatModelRelay` 启用项自动转为注册表条目，无需手动改配置。
-- 全量测试 **309 项通过**，架构审计 0 critical / 0 warnings，Vite 生产构建通过。
+- 修复 `registerIpc().start()` 接线错误：主动陪伴（proactive）引擎因 `engineStarted` 始终为 `false` 而从未启动，导致定时问候和健康提醒失效。
+- 根本原因：陪伴服务 `createCompanionLifeService` 用 `...runtime` 扩展了底层 `trusted-domain` 服务，但 `runtime.registerIpc()` 内部返回的是底层服务对象，而非陪伴服务包装对象，因此 `registerIpc().start()` 只调用了底层 `start()`（仅设置 `started=true`），没有调用陪伴服务的 `start()`（设置 `engineStarted=true` + `startEngine()`）。
+- 修复方式：在陪伴服务中覆写 `registerIpc`，使其调用 `runtime.registerIpc()` 后返回陪伴服务自身，从而让 `registerIpc().start()` 正确路由到陪伴服务的 `start()`。
+- 新增回归测试 `companion registerIpc().start() arms the proactive engine timer`，验证定时器被正确启动。
+- 全量测试 **310 项通过**，架构审计 0 critical / 0 warnings，Vite 生产构建通过。
 
 ## 0.10.1 重点（GPT-SoVITS 运行环境复用与安装）
 
