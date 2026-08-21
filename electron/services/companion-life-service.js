@@ -315,7 +315,12 @@ export function createCompanionLifeService(options) {
     return runtime.dispose();
   }
 
-  return {
+  function registerIpc() {
+    runtime.registerIpc();
+    return service;
+  }
+
+  const service = {
     ...runtime,
     dispose,
     getLifeState: () => lifeState,
@@ -325,9 +330,11 @@ export function createCompanionLifeService(options) {
     petTouch,
     publishInterestInteraction,
     publishProactiveEvent,
+    registerIpc,
     restoreLifeState,
     start,
     startEngine,
     stop
   };
+  return service;
 }

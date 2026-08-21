@@ -597,6 +597,36 @@ test("companion dispose waits for a persisting tick and suppresses every late si
   assert.equal(service.isProactiveBusy(), false);
 });
 
+test("companion registerIpc().start() arms the proactive engine timer", async () => {
+  let timers = 0;
+  let cleared = 0;
+  const { ipc, trustedIpc } = makeRegistrar();
+  const service = createCompanionLifeService({
+    trustedIpc,
+    getBaseDir: () => "base",
+    isHostReady: () => true,
+    setInterval: () => { timers += 1; return timers; },
+    clearInterval: () => { cleared += 1; },
+    mergeConfig: (config) => config,
+    getInterestSettings: () => ({ enabled: false, autonomousLifeEnabled: false }),
+    chatStateStore: { appendProactiveEvent: () => ({}) },
+    now: () => 0,
+    dependencies: {
+      loadLifeState: async () => ({ lastInteractionAt: "2026-08-16T00:00:00.000Z" }),
+      getFollowUpCandidate: async () => ({ store: { feedback: { interruptionScore: 0 } }, candidate: null }),
+      loadRelationshipProfile: async () => ({ affection: { stage: "close" } }),
+      loadConfig: async () => ({ proactive: { enabled: false } }),
+      saveLifeState: async () => ({}),
+      markCommitmentFollowedUp: async () => {}
+    }
+  });
+  const started = service.registerIpc().start();
+  await Promise.resolve(started);
+  assert.equal(timers, 1, "registerIpc().start() must route through the companion start so startEngine arms the proactive timer");
+  service.dispose();
+  assert.equal(cleared, 1);
+});
+
 test("window intent service forwards open requests through the trust boundary", async () => {
   const calls = [];
   const { ipc, trustedIpc } = makeRegistrar();
